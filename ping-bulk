@@ -12,6 +12,26 @@ from datetime import datetime
 # Stats column modes cycled with [s]; 'off' means hidden
 STATS_MODES = ['off', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', 'All']
 
+# Ping history character modes cycled with [h]
+HISTORY_MODES = ['success', 'rtt', 'scaled']
+
+
+def _history_char(val, mode):
+    """Convert a raw history value (float ms or None) to a single display character.
+
+    success — '.' for any successful ping, 'X' for failure
+    rtt     — last digit of int(ms) for success, 'X' for failure
+    scaled  — digit 0-9 mapping 10 ms buckets (0=<10ms … 9=90+ms), 'X' for failure
+    """
+    if val is None:
+        return 'X'
+    if mode == 'rtt':
+        return str(int(round(val)))[-1]
+    if mode == 'scaled':
+        scaled = round(val / 100 * 9)
+        return '>' if scaled > 9 else str(scaled)
+    return '.'  # 'success' mode
+
 class PingMonitor:
     def __init__(self, host):
         self.host = host
@@ -61,20 +81,20 @@ class PingMonitor:
                                 self.latency = float(latency_str)
                                 break
                         self.alive = True
-                        self.history.append('.')
+                        self.history.append(self.latency)  # float
                         self.rx_count += 1
                         self.latencies.append(self.latency)
                     else:
                         self.alive = False
                         self.latency = None
-                        self.history.append('X')
+                        self.history.append(None)  # failure
                         self.xx_count += 1
 
             except (subprocess.TimeoutExpired, Exception):
                 with self.lock:
                     self.alive = False
                     self.latency = None
-                    self.history.append('X')
+                    self.history.append(None)  # failure
                     self.xx_count += 1
 
             self.ping_count += 1
@@ -87,10 +107,18 @@ class PingMonitor:
             if remaining > 0:
                 time.sleep(remaining)
 
-    def get_history_string(self, length=50, offset=0):
+    def get_history_string(self, length=50, offset=0, mode='success', cell_width=1):
         """Get history as a string of given length ending offset steps from the newest sample.
-        offset=0  -> most recent samples (live view)
-        offset>0  -> scroll back into the past
+        offset=0     -> most recent samples (live view)
+        offset>0     -> scroll back into the past
+        mode         -> one of HISTORY_MODES ('success', 'rtt', 'scaled')
+        cell_width   -> characters per ping cell; >1 used by 'rtt' mode only
+
+        When cell_width > 1 (rtt mode) each cell is exactly cell_width characters wide:
+          success  -> right-justified integer in (cell_width-1) chars + one trailing space
+          failure  -> 'X' repeated (cell_width-1) times + one trailing space
+          blank    -> cell_width spaces
+        The returned string therefore has length * cell_width characters.
         """
         with self.lock:
             history_list = list(self.history)
@@ -100,9 +128,22 @@ class PingMonitor:
             result = []
             for i in range(start, end):
                 if i < 0 or i >= total:
-                    result.append(' ')
+                    cell = ' ' * cell_width if cell_width > 1 else ' '
                 else:
-                    result.append(history_list[i])
+                    val = history_list[i]
+                    if cell_width > 1:
+                        # rtt mode: right-justify ms value in a fixed-width field
+                        num_w = cell_width - 1  # digits field width
+                        if val is None:
+                            cell = 'X' * num_w + ' '
+                        else:
+                            # Cap at the max representable value so the field never overflows
+                            # (Python's str.format does NOT truncate, it just widens).
+                            capped = min(int(round(val)), 10 ** num_w - 1)
+                            cell = f"{capped:>{num_w}} "
+                    else:
+                        cell = _history_char(val, mode)
+                result.append(cell)
             return ''.join(reversed(result))
 
     def get_display_name(self, show_dns=False):
@@ -121,7 +162,7 @@ class Application:
         self.show_dns = False
         self.stats_mode = 0    # index into STATS_MODES; 0 = off
         self.sort_by = 'none'  # none, name, status, latency
-        self.time_scale = 1    # seconds between pings
+        self.history_mode = 0  # index into HISTORY_MODES
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
         self.running = True
@@ -201,6 +242,10 @@ class Application:
         current_idx = sorts.index(self.sort_by)
         self.sort_by = sorts[(current_idx + 1) % len(sorts)]
 
+    def cycle_history_mode(self):
+        """Cycle through history display modes"""
+        self.history_mode = (self.history_mode + 1) % len(HISTORY_MODES)
+
     def scroll_history(self, delta):
         """Scroll history view by delta steps (positive = back in time)"""
         max_offset = self.monitors[0].history.maxlen if self.monitors else 100
@@ -234,7 +279,7 @@ class Application:
             (f"[d]NS resolve", self.show_dns),
             (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
             (f"[o]rder by {self.sort_by}", False),
-            (f"[t]ime scale {self.time_scale}s", False),
+            (f"[h]istory:{HISTORY_MODES[self.history_mode]}", False),
             (f"[p]ause {'on' if self.paused else 'off'}", self.paused),
             ("[w]rite to file", False),
             ("[q]uit", False),
@@ -276,6 +321,21 @@ class Application:
     # Column where the 'All' stats block starts
     STATS_COL = 84
 
+    def _rtt_cell_width(self):
+        """Compute the cell width needed for rtt mode based on max RTT across all monitors.
+
+        cell_width = len(str(max_rtt_ms)) + 1  (digits field + 1 trailing space)
+        Minimum is 3 (2-digit field covers values up to 99 ms + 1 space).
+        Uses monitor.latencies (never-capped) for a stable maximum.
+        """
+        max_rtt = 0
+        for monitor in self.monitors:
+            with monitor.lock:
+                for val in monitor.latencies:
+                    if val > max_rtt:
+                        max_rtt = val
+        return max(3, len(str(int(max_rtt))) + 1)
+
     def draw_hosts(self, stdscr, start_row, max_rows, width, show_header=True):
         """Draw host list with ping history.
 
@@ -305,10 +365,12 @@ class Application:
                 col25_label = mode_name if show_single else "ms"
                 stdscr.addstr(start_row, stat_col, f"{col25_label:>6}", curses.A_BOLD)
 
-            # Show scroll indicator when not in live view
-            history_header = "Ping history"
+            # Always show track mode; append scroll indicator when not in live view
+            mode_label = HISTORY_MODES[self.history_mode]
+            display_label = 'scaled/100ms' if mode_label == 'scaled' else mode_label
+            history_header = f"Ping history [{display_label}]"
             if self.history_offset > 0:
-                history_header = f"Ping history [<{self.history_offset}s]"
+                history_header = f"Ping history [{display_label}] [<{self.history_offset}s]"
             stdscr.addstr(start_row, hist_col, history_header, curses.A_BOLD)
 
             if show_all and self.STATS_COL < width:
@@ -320,8 +382,16 @@ class Application:
         row = data_start
         sorted_monitors = self.get_sorted_monitors()
 
+        # In rtt/scaled mode use multi-character cells; success mode uses 1 char per ping.
+        hist_mode = HISTORY_MODES[self.history_mode]
+        if hist_mode == 'rtt':
+            cell_width = self._rtt_cell_width()
+        else:
+            cell_width = 1  # 'success' and 'scaled' both use one column per ping
+
         # Resize every monitor's history deque to match the current terminal width
         # so that recorded history always fills the full available column.
+        # Always size by screen columns (not ping count) so switching modes keeps data.
         normal_history_length = max(1, width - hist_col - 1)
         for m in self.monitors:
             with m.lock:
@@ -351,43 +421,81 @@ class Application:
 
             # Ping history — full screen width in normal modes; narrower in All mode
             if show_all:
-                history_length = max(0, self.STATS_COL - hist_col - 1)
+                col_length = max(0, self.STATS_COL - hist_col - 1)
             else:
                 # Extend to the right edge of the terminal; no 100-col cap so the
                 # bar fills the whole screen.  get_history_string() pads with spaces
                 # for columns beyond the actual deque content.
-                history_length = max(0, width - hist_col - 1)
+                col_length = max(0, width - hist_col - 1)
 
-            # Sweep mode: fill 0→history_length once, then snap to half and grow again.
+            # Number of ping samples that fit in the available columns.
+            # In rtt mode each sample occupies cell_width columns; other modes use 1.
+            ping_length = max(1, col_length // cell_width)
+
+            # Sweep mode: fill 0→ping_length once, then snap to half and grow again.
             # ping_count is never capped (unlike the history deque).
-            half = max(1, history_length // 2)
+            half = max(1, ping_length // 2)
 
             if self.history_offset > 0:
                 # Scrolled view: always show the full available width
-                display_count = history_length
+                display_count = ping_length
             else:
                 max_pings = max((m.ping_count for m in self.monitors), default=0)
-                if max_pings < history_length:
-                    # Initial fill phase: grow from 0 to history_length
+                if max_pings < ping_length:
+                    # Initial fill phase: grow from 0 to ping_length
                     display_count = max_pings
                 else:
-                    # Sweep phase: snap to half, grow back to history_length-1, repeat
-                    display_count = half + ((max_pings - history_length) % half)
+                    # Sweep phase: snap to half, grow back to ping_length-1, repeat
+                    display_count = half + ((max_pings - ping_length) % half)
 
-            history = monitor.get_history_string(display_count, self.history_offset)
+            history = monitor.get_history_string(
+                display_count, self.history_offset, hist_mode, cell_width
+            )
 
-            # Color code the history
+            # Color code the history.
             col = hist_col
-            for char in history:
-                if col >= width - 1:
-                    break
-                if char == '.':
-                    stdscr.addstr(row, col, char, curses.color_pair(1))
-                elif char == 'X':
-                    stdscr.addstr(row, col, char, curses.color_pair(2))
-                else:
-                    stdscr.addstr(row, col, char)
-                col += 1
+            if cell_width > 1:
+                # rtt mode: iterate cell_width characters at a time.
+                # Each cell is (cell_width-1) digit chars + 1 trailing space.
+                for i in range(0, len(history), cell_width):
+                    if col >= width - 1:
+                        break
+                    cell = history[i:i + cell_width]
+                    content = cell[:cell_width - 1].lstrip()
+                    if not content:
+                        # blank padding cell
+                        stdscr.addstr(row, col, cell)
+                    elif content[0] == 'X':
+                        stdscr.addstr(row, col, cell, curses.color_pair(2))  # red
+                    elif content[0] == '>':
+                        stdscr.addstr(row, col, cell, curses.color_pair(3))  # yellow — >100 ms
+                    else:
+                        val = int(content)
+                        if hist_mode == 'scaled':
+                            # scaled values are 0-9; threshold at 5 (≈55 ms)
+                            color = curses.color_pair(1) if val < 5 else curses.color_pair(3)
+                        else:
+                            color = curses.color_pair(1) if val < 50 else curses.color_pair(3)
+                        stdscr.addstr(row, col, cell, color)
+                    col += cell_width
+            else:
+                # success / scaled mode: one character per ping.
+                for char in history:
+                    if col >= width - 1:
+                        break
+                    if char == 'X':
+                        stdscr.addstr(row, col, char, curses.color_pair(2))  # red
+                    elif char == '.':
+                        stdscr.addstr(row, col, char, curses.color_pair(1))  # green
+                    elif char in '01234':
+                        stdscr.addstr(row, col, char, curses.color_pair(1))  # green
+                    elif char in '56789':
+                        stdscr.addstr(row, col, char, curses.color_pair(3))  # yellow
+                    elif char == '>':
+                        stdscr.addstr(row, col, char, curses.color_pair(5))  # magenta — >100 ms
+                    else:
+                        stdscr.addstr(row, col, char)
+                    col += 1
 
             # All-stats block at right
             if show_all and self.STATS_COL < width:
@@ -577,7 +685,7 @@ class Application:
                 f.write("-" * 70 + "\n")
                 for monitor in sorted_monitors:
                     with monitor.lock:
-                        history = ''.join(monitor.history)
+                        history = ''.join(_history_char(v, 'success') for v in monitor.history)
                         latency = f"{monitor.latency:6.1f}" if monitor.latency is not None else "     -"
                     f.write(f"{monitor.host:<{name_col}} {latency:>6}  {history}\n")
 
@@ -598,10 +706,11 @@ class Application:
 
         # Initialize colors
         curses.start_color()
-        curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)   # Success
-        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)     # Failure
-        curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Warning
-        curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)   # Hotkey
+        curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)    # Success
+        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)      # Failure
+        curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # Warning (slow)
+        curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)    # Hotkey
+        curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK)  # Very slow (>100 ms)
 
         self.start_monitoring()
 
@@ -652,9 +761,8 @@ class Application:
                     self.cycle_sort()
                 elif key == ord('p') or key == ord('P'):
                     self.paused = not self.paused
-                elif key == ord('t') or key == ord('T'):
-                    # Cycle time scale (not implemented in ping loop yet)
-                    pass
+                elif key == ord('h') or key == ord('H'):
+                    self.cycle_history_mode()
                 elif key == ord('w') or key == ord('W'):
                     self.prompt_save(stdscr, height, width)
                 # History scrolling (left/right arrows)
