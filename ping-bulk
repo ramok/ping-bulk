@@ -15,6 +15,12 @@ STATS_MODES = ['off', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', '
 # Ping history character modes cycled with [h]
 HISTORY_MODES = ['success', 'rtt', 'scaled']
 
+# DNS display modes cycled with [d]/[D]
+# off      — show the address/name exactly as given on the command line
+# hostname — resolve every entry to its hostname (reverse DNS for IPs)
+# ip       — resolve every entry to its IP address
+DNS_MODES = ['off', 'hostname', 'ip']
+
 
 def _history_char(val, mode):
     """Convert a raw history value (float ms or None) to a single display character.
@@ -35,7 +41,8 @@ def _history_char(val, mode):
 class PingMonitor:
     def __init__(self, host):
         self.host = host
-        self.resolved_name = None
+        self.resolved_ip = None        # IP address resolved from a hostname
+        self.resolved_hostname = None  # hostname resolved from an IP (reverse DNS)
         self.alive = None
         self.latency = None
         self.history = deque(maxlen=100)
@@ -49,16 +56,26 @@ class PingMonitor:
         self.lock = threading.Lock()
 
     def resolve_dns(self):
-        """Resolve hostname to IP or vice versa"""
+        """Resolve the host to both its IP address and its hostname.
+
+        resolved_ip       — forward DNS: hostname → IP (or self if already an IP)
+        resolved_hostname — reverse DNS: IP → hostname (or self if already a hostname)
+        Both fields are populated in a single call so switching modes never
+        requires a second resolution thread.
+        """
+        # Forward: resolve to IP address
         try:
-            # Try to resolve as hostname
-            self.resolved_name = socket.gethostbyname(self.host)
-            if self.resolved_name != self.host:
-                return
-            # Try reverse DNS
-            self.resolved_name = socket.gethostbyaddr(self.host)[0]
-        except:
-            self.resolved_name = None
+            ip = socket.gethostbyname(self.host)
+            self.resolved_ip = ip
+        except Exception:
+            self.resolved_ip = None
+
+        # Reverse: resolve to hostname via the IP we just found (or the host itself)
+        lookup_addr = self.resolved_ip if self.resolved_ip else self.host
+        try:
+            self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
+        except Exception:
+            self.resolved_hostname = None
 
     def ping(self):
         """Ping the host and update stats"""
@@ -146,11 +163,18 @@ class PingMonitor:
                 result.append(cell)
             return ''.join(reversed(result))
 
-    def get_display_name(self, show_dns=False):
-        """Get display name for host"""
-        if show_dns and self.resolved_name:
-            return self.resolved_name
-        return self.host
+    def get_display_name(self, dns_mode='off'):
+        """Return the display name for this host according to dns_mode.
+
+        off      — return self.host exactly as given on the command line
+        hostname — return resolved_hostname if available, else fall back to host
+        ip       — return resolved_ip if available, else fall back to host
+        """
+        if dns_mode == 'hostname':
+            return self.resolved_hostname or self.host
+        if dns_mode == 'ip':
+            return self.resolved_ip or self.host
+        return self.host  # 'off'
 
 
 class Application:
@@ -159,7 +183,7 @@ class Application:
         self.monitors = [PingMonitor(host) for host in hosts]
         self.events = deque(maxlen=50)
         self.paused = False
-        self.show_dns = False
+        self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
         self.stats_mode = 0    # index into STATS_MODES; 0 = off
         self.sort_by = 'none'  # none, name, status, latency
         self.history_mode = 0  # index into HISTORY_MODES
@@ -223,14 +247,14 @@ class Application:
                     monitor.last_state = current_state
             time.sleep(0.5)
 
-    def toggle_dns(self):
-        """Toggle DNS resolution display"""
-        self.show_dns = not self.show_dns
-        if self.show_dns:
+    def cycle_dns(self, direction=1):
+        """Cycle through DNS display modes. direction=1 forward, -1 backward."""
+        self.dns_mode = (self.dns_mode + direction) % len(DNS_MODES)
+        # Trigger resolution threads for monitors not yet resolved when entering a resolve mode
+        if DNS_MODES[self.dns_mode] in ('hostname', 'ip'):
             for monitor in self.monitors:
-                if monitor.resolved_name is None:
-                    thread = threading.Thread(target=monitor.resolve_dns, daemon=True)
-                    thread.start()
+                if monitor.resolved_ip is None:
+                    threading.Thread(target=monitor.resolve_dns, daemon=True).start()
 
     def cycle_stats(self, direction=1):
         """Cycle through stats display modes. direction=1 forward, -1 backward."""
@@ -276,7 +300,7 @@ class Application:
         The character inside brackets is rendered with bold+underline to stand out.
         """
         menu_items = [
-            (f"[d]NS resolve", self.show_dns),
+            (f"[d]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
             (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
             (f"[o]rder by {self.sort_by}", False),
             (f"[h]istory:{HISTORY_MODES[self.history_mode]}", False),
@@ -347,7 +371,7 @@ class Application:
 
         # Adaptive hostname column: wide enough for all display names and the header label
         max_name_len = max(
-            (len(m.get_display_name(self.show_dns)) for m in self.monitors), default=8
+            (len(m.get_display_name(DNS_MODES[self.dns_mode])) for m in self.monitors), default=8
         )
         name_col_width = max(len("Hostname"), max_name_len)
         stat_col = name_col_width + 1   # stat value starts 1 col after hostname
@@ -407,7 +431,7 @@ class Application:
                 break
 
             # Hostname
-            display_name = monitor.get_display_name(self.show_dns)
+            display_name = monitor.get_display_name(DNS_MODES[self.dns_mode])
             stdscr.addstr(row, 0, display_name[:name_col_width].ljust(name_col_width))
 
             # Stat col: Last latency (off) or single stat value; hidden in All mode
@@ -752,8 +776,10 @@ class Application:
                 if key == ord('q') or key == ord('Q'):
                     self.running = False
                     break
-                elif key == ord('d') or key == ord('D'):
-                    self.toggle_dns()
+                elif key == ord('d'):
+                    self.cycle_dns(1)
+                elif key == ord('D'):
+                    self.cycle_dns(-1)
                 elif key == ord('s'):
                     self.cycle_stats(1)
                 elif key == ord('S'):
