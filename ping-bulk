@@ -1,0 +1,689 @@
+#!/usr/bin/env python3
+import curses
+import math
+import subprocess
+import threading
+import time
+import sys
+import socket
+from collections import deque
+from datetime import datetime
+
+# Stats column modes cycled with [s]; 'off' means hidden
+STATS_MODES = ['off', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', 'All']
+
+class PingMonitor:
+    def __init__(self, host):
+        self.host = host
+        self.resolved_name = None
+        self.alive = None
+        self.latency = None
+        self.history = deque(maxlen=100)
+        self.latencies = []    # all recorded latency values (successful pings)
+        self.rx_count = 0      # total successful pings (RX)
+        self.xx_count = 0      # total failed pings (XX)
+        self.last_state = None
+        self.down_since = None  # monotonic timestamp of when the host went down
+        self.ping_count = 0    # total pings ever sent (never capped, unlike history deque)
+        self.running = True
+        self.lock = threading.Lock()
+
+    def resolve_dns(self):
+        """Resolve hostname to IP or vice versa"""
+        try:
+            # Try to resolve as hostname
+            self.resolved_name = socket.gethostbyname(self.host)
+            if self.resolved_name != self.host:
+                return
+            # Try reverse DNS
+            self.resolved_name = socket.gethostbyaddr(self.host)[0]
+        except:
+            self.resolved_name = None
+
+    def ping(self):
+        """Ping the host and update stats"""
+        while self.running:
+            cycle_start = time.monotonic()
+            try:
+                result = subprocess.run(
+                    ['ping', '-c', '1', '-W', '1', self.host],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+
+                with self.lock:
+                    if result.returncode == 0:
+                        # Extract latency from output
+                        for line in result.stdout.split('\n'):
+                            if 'time=' in line:
+                                latency_str = line.split('time=')[1].split()[0]
+                                self.latency = float(latency_str)
+                                break
+                        self.alive = True
+                        self.history.append('.')
+                        self.rx_count += 1
+                        self.latencies.append(self.latency)
+                    else:
+                        self.alive = False
+                        self.latency = None
+                        self.history.append('X')
+                        self.xx_count += 1
+
+            except (subprocess.TimeoutExpired, Exception):
+                with self.lock:
+                    self.alive = False
+                    self.latency = None
+                    self.history.append('X')
+                    self.xx_count += 1
+
+            self.ping_count += 1
+
+            # Sleep only the remainder of the 1-second cycle so that both
+            # successful pings (fast) and timed-out pings (slow) produce the
+            # same number of samples per second.
+            elapsed = time.monotonic() - cycle_start
+            remaining = 1.0 - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+
+    def get_history_string(self, length=50, offset=0):
+        """Get history as a string of given length ending offset steps from the newest sample.
+        offset=0  -> most recent samples (live view)
+        offset>0  -> scroll back into the past
+        """
+        with self.lock:
+            history_list = list(self.history)
+            total = len(history_list)
+            end = total - offset
+            start = end - length
+            result = []
+            for i in range(start, end):
+                if i < 0 or i >= total:
+                    result.append(' ')
+                else:
+                    result.append(history_list[i])
+            return ''.join(reversed(result))
+
+    def get_display_name(self, show_dns=False):
+        """Get display name for host"""
+        if show_dns and self.resolved_name:
+            return self.resolved_name
+        return self.host
+
+
+class Application:
+    def __init__(self, hosts):
+        self.hosts = hosts
+        self.monitors = [PingMonitor(host) for host in hosts]
+        self.events = deque(maxlen=50)
+        self.paused = False
+        self.show_dns = False
+        self.stats_mode = 0    # index into STATS_MODES; 0 = off
+        self.sort_by = 'none'  # none, name, status, latency
+        self.time_scale = 1    # seconds between pings
+        self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
+        self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
+        self.running = True
+        self.threads = []
+
+    def add_event(self, host, message):
+        """Add event to log"""
+        timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+        max_host_len = max((len(m.host) for m in self.monitors), default=len(host))
+        self.events.append(f"{timestamp}   {host:<{max_host_len}} {message}")
+
+    def start_monitoring(self):
+        """Start all ping threads"""
+        for monitor in self.monitors:
+            thread = threading.Thread(target=monitor.ping, daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+        # Check for state changes
+        checker = threading.Thread(target=self.check_state_changes, daemon=True)
+        checker.start()
+
+    @staticmethod
+    def _format_downtime(seconds):
+        """Format a duration in seconds into a human-readable string"""
+        secs = int(seconds)
+        mins = secs // 60
+        remaining = secs % 60
+        if mins > 0:
+            return f"{secs} sec ({mins} min {remaining} sec)"
+        return f"{secs} sec"
+
+    def check_state_changes(self):
+        """Monitor state changes and log events"""
+        while self.running:
+            for monitor in self.monitors:
+                current_state = monitor.alive
+                if monitor.last_state is None:
+                    monitor.last_state = current_state
+                    if current_state:
+                        self.add_event(monitor.host, "host starts up")
+                    elif current_state is False:
+                        monitor.down_since = time.monotonic()
+                        self.add_event(monitor.host, "host down")
+                elif monitor.last_state != current_state:
+                    if current_state:
+                        # Host recovered — report downtime if tracked
+                        if monitor.down_since is not None:
+                            downtime = time.monotonic() - monitor.down_since
+                            monitor.down_since = None
+                            msg = f"host recover. Down time: {self._format_downtime(downtime)}"
+                        else:
+                            msg = "host recover"
+                        self.add_event(monitor.host, msg)
+                    else:
+                        monitor.down_since = time.monotonic()
+                        self.add_event(monitor.host, "host down")
+                    monitor.last_state = current_state
+            time.sleep(0.5)
+
+    def toggle_dns(self):
+        """Toggle DNS resolution display"""
+        self.show_dns = not self.show_dns
+        if self.show_dns:
+            for monitor in self.monitors:
+                if monitor.resolved_name is None:
+                    thread = threading.Thread(target=monitor.resolve_dns, daemon=True)
+                    thread.start()
+
+    def cycle_stats(self):
+        """Cycle through stats display modes"""
+        self.stats_mode = (self.stats_mode + 1) % len(STATS_MODES)
+
+    def cycle_sort(self):
+        """Cycle through sort options"""
+        sorts = ['none', 'name', 'status', 'latency']
+        current_idx = sorts.index(self.sort_by)
+        self.sort_by = sorts[(current_idx + 1) % len(sorts)]
+
+    def scroll_history(self, delta):
+        """Scroll history view by delta steps (positive = back in time)"""
+        max_offset = 100  # matches history deque maxlen
+        self.history_offset = max(0, min(max_offset, self.history_offset + delta))
+
+    def scroll_log(self, delta):
+        """Scroll event log by delta lines (positive = up/back in time, negative = down/forward)"""
+        total = len(self.events)
+        max_offset = max(0, total - 1)
+        self.log_offset = max(0, min(max_offset, self.log_offset + delta))
+
+    def get_sorted_monitors(self):
+        """Get monitors sorted by current sort option"""
+        if self.sort_by == 'name':
+            return sorted(self.monitors, key=lambda m: m.host)
+        elif self.sort_by == 'status':
+            return sorted(self.monitors, key=lambda m: (m.alive is not True, m.host))
+        elif self.sort_by == 'latency':
+            return sorted(self.monitors, key=lambda m: (
+                m.latency if m.latency is not None else float('inf'), m.host
+            ))
+        return self.monitors
+
+    def draw_menu_bar(self, stdscr, width):
+        """Draw the top menu bar with highlighted hotkeys.
+
+        Labels use [x] notation to mark the hotkey character, e.g. '[q]uit'.
+        The character inside brackets is rendered with bold+underline to stand out.
+        """
+        menu_items = [
+            (f"[d]NS resolve", self.show_dns),
+            (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
+            (f"[o]rder by {self.sort_by}", False),
+            (f"[t]ime scale {self.time_scale}s", False),
+            (f"[p]ause {'on' if self.paused else 'off'}", self.paused),
+            ("[w]rite to file", False),
+            ("[q]uit", False),
+        ]
+
+        prefix = "Ping-Multi: "
+        stdscr.addstr(0, 0, prefix)
+        col = len(prefix)
+
+        for idx, (label, active) in enumerate(menu_items):
+            if col >= width - 1:
+                break
+
+            # Render each character; highlight hotkey (inside [...]) in white
+            i = 0
+            while i < len(label) and col < width - 1:
+                ch = label[i]
+                if ch == '[':
+                    # Next char is the hotkey, skip the brackets
+                    i += 1
+                    if i < len(label):
+                        stdscr.addstr(0, col, label[i], curses.color_pair(4) | curses.A_BOLD)
+                        col += 1
+                        i += 1
+                    # Skip the closing ']'
+                    if i < len(label) and label[i] == ']':
+                        i += 1
+                else:
+                    stdscr.addstr(0, col, ch)
+                    col += 1
+                    i += 1
+
+            # Separator
+            sep = " | " if idx < len(menu_items) - 1 else ""
+            if col + len(sep) < width:
+                stdscr.addstr(0, col, sep)
+                col += len(sep)
+
+    # Column where the 'All' stats block starts
+    STATS_COL = 84
+
+    def draw_hosts(self, stdscr, start_row, max_rows, width, show_header=True):
+        """Draw host list with ping history.
+
+        Layout per stats mode:
+          off         — stat_col: Last latency (colored), history full width
+          single mode — stat_col: stat value (replaces Last), history full width
+          All         — stat_col: hidden, history narrows to STATS_COL, all stats at right
+        """
+        mode_name = STATS_MODES[self.stats_mode]
+        show_all = (mode_name == 'All')
+        show_single = (self.stats_mode > 0 and not show_all)
+
+        # Adaptive hostname column: wide enough for all display names and the header label
+        max_name_len = max(
+            (len(m.get_display_name(self.show_dns)) for m in self.monitors), default=8
+        )
+        name_col_width = max(len("Hostname"), max_name_len)
+        stat_col = name_col_width + 1   # stat value starts 1 col after hostname
+        hist_col = stat_col + 7         # history starts 7 cols after stat (6-char value + 1 gap)
+
+        if show_header:
+            stdscr.addstr(start_row, 0, "Hostname", curses.A_BOLD)
+
+            if not show_all:
+                # stat_col header: mode label when a single stat is active, "ms" otherwise
+                # Left-justify within the 6-char stat field to align with data rows
+                col25_label = mode_name if show_single else "ms"
+                stdscr.addstr(start_row, stat_col, f"{col25_label:>6}", curses.A_BOLD)
+
+            # Show scroll indicator when not in live view
+            history_header = "Ping history"
+            if self.history_offset > 0:
+                history_header = f"Ping history [<{self.history_offset}s]"
+            stdscr.addstr(start_row, hist_col, history_header, curses.A_BOLD)
+
+            if show_all and self.STATS_COL < width:
+                all_header = (f"{'ms':>6}  {'Avg':>6}  {'Min':>6}  {'Max':>6}  "
+                              f"{'Loss%':>6}  {'StDev':>6}  {'RX':>6}  {'TX':>6}  {'XX':>6}")
+                stdscr.addstr(start_row, self.STATS_COL, all_header, curses.A_BOLD)
+
+        data_start = start_row + (1 if show_header else 0)
+        row = data_start
+        sorted_monitors = self.get_sorted_monitors()
+
+        for monitor in sorted_monitors:
+            if row >= data_start + max_rows:
+                break
+
+            # Hostname
+            display_name = monitor.get_display_name(self.show_dns)
+            stdscr.addstr(row, 0, display_name[:name_col_width].ljust(name_col_width))
+
+            # Stat col: Last latency (off) or single stat value; hidden in All mode
+            if not show_all:
+                if show_single:
+                    stat_str = self._compute_stat(monitor, mode_name)
+                    stdscr.addstr(row, stat_col, stat_str)
+                else:
+                    # off mode — show Last latency with color
+                    if monitor.latency is not None:
+                        color = curses.color_pair(1) if monitor.latency < 50 else curses.color_pair(3)
+                        stdscr.addstr(row, stat_col, f"{monitor.latency:6.1f}", color)
+                    else:
+                        stdscr.addstr(row, stat_col, "     -", curses.color_pair(2))
+
+            # Ping history — full screen width in normal modes; narrower in All mode
+            if show_all:
+                history_length = max(0, min(self.STATS_COL - hist_col - 1, 100))
+            else:
+                # Extend to the right edge of the terminal; no 100-col cap so the
+                # bar fills the whole screen.  get_history_string() pads with spaces
+                # for columns beyond the actual deque content.
+                history_length = max(0, width - hist_col - 1)
+
+            # Sweep mode: fill 0→data_cap once, then snap to half and grow again.
+            # data_cap is capped at 100 (the history deque maxlen) so the animation
+            # runs at a consistent speed regardless of terminal width.
+            # ping_count is never capped (unlike the history deque).
+            data_cap = min(history_length, 100)
+            half = max(1, data_cap // 2)
+
+            if self.history_offset > 0:
+                # Scrolled view: always show the full available width
+                display_count = history_length
+            else:
+                max_pings = max((m.ping_count for m in self.monitors), default=0)
+                if max_pings < data_cap:
+                    # Initial fill phase: grow from 0 to data_cap
+                    display_count = max_pings
+                else:
+                    # Sweep phase: snap to half, grow back to data_cap-1, repeat
+                    display_count = half + ((max_pings - data_cap) % half)
+
+            history = monitor.get_history_string(display_count, self.history_offset)
+
+            # Color code the history
+            col = hist_col
+            for char in history:
+                if col >= width - 1:
+                    break
+                if char == '.':
+                    stdscr.addstr(row, col, char, curses.color_pair(1))
+                elif char == 'X':
+                    stdscr.addstr(row, col, char, curses.color_pair(2))
+                else:
+                    stdscr.addstr(row, col, char)
+                col += 1
+
+            # All-stats block at right
+            if show_all and self.STATS_COL < width:
+                stdscr.addstr(row, self.STATS_COL, self._compute_all_stats(monitor))
+
+            row += 1
+
+        return row
+
+    @staticmethod
+    def _compute_stat(monitor, mode):
+        """Compute a formatted stat string for a given STATS_MODES label."""
+        with monitor.lock:
+            lats = list(monitor.latencies)
+            rx = monitor.rx_count
+            xx = monitor.xx_count
+            tx = monitor.ping_count
+            last = monitor.latency
+
+        if mode == 'Last':
+            return f"{last:6.1f}" if last is not None else "     -"
+        elif mode == 'Loss%':
+            total = rx + xx
+            if total == 0:
+                return "     -"
+            return f"{xx / total * 100:5.1f}%"
+        elif mode == 'Avg':
+            if not lats:
+                return "     -"
+            return f"{sum(lats) / len(lats):6.1f}"
+        elif mode == 'Min':
+            if not lats:
+                return "     -"
+            return f"{min(lats):6.1f}"
+        elif mode == 'Max':
+            if not lats:
+                return "     -"
+            return f"{max(lats):6.1f}"
+        elif mode == 'StDev':
+            if len(lats) < 2:
+                return "     -"
+            avg = sum(lats) / len(lats)
+            stdev = math.sqrt(sum((x - avg) ** 2 for x in lats) / len(lats))
+            return f"{stdev:6.1f}"
+        elif mode == 'RX':
+            return f"{rx:6d}"
+        elif mode == 'TX':
+            return f"{tx:6d}"
+        elif mode == 'XX':
+            return f"{xx:6d}"
+        return "     -"
+
+    @staticmethod
+    def _compute_all_stats(monitor):
+        """Compute a compact all-stats string for 'All' mode.
+
+        Format (aligned to match the header in draw_hosts):
+          Avg    Min    Max    Loss%   StDev  RX     TX     XX
+        """
+        with monitor.lock:
+            lats = list(monitor.latencies)
+            rx = monitor.rx_count
+            xx = monitor.xx_count
+            tx = monitor.ping_count
+            last = monitor.latency
+
+        # Last (ms)
+        ms_s = f"{last:6.1f}" if last is not None else "     -"
+
+        # Avg
+        if lats:
+            avg_s = f"{sum(lats) / len(lats):6.1f}"
+        else:
+            avg_s = "     -"
+
+        # Min
+        min_s = f"{min(lats):6.1f}" if lats else "     -"
+
+        # Max
+        max_s = f"{max(lats):6.1f}" if lats else "     -"
+
+        # Loss%
+        total = rx + xx
+        if total == 0:
+            loss_s = "    - "
+        else:
+            loss_s = f"{xx / total * 100:5.1f}%"
+
+        # StDev
+        if len(lats) >= 2:
+            avg = sum(lats) / len(lats)
+            stdev = math.sqrt(sum((x - avg) ** 2 for x in lats) / len(lats))
+            stdev_s = f"{stdev:6.1f}"
+        else:
+            stdev_s = "     -"
+
+        return (f"{ms_s}  {avg_s}  {min_s}  {max_s}  {loss_s}  "
+                f"{stdev_s}  {rx:6d}  {tx:6d}  {xx:6d}")
+
+    def draw_events(self, stdscr, start_row, height, width):
+        """Draw event log at bottom with optional scroll support.
+
+        log_offset=0  -> tail mode (newest events always visible)
+        log_offset>0  -> scrolled back; header shows position and resume hint
+        """
+        page_size = max(1, height - start_row - 2)  # rows available for event lines
+        total = len(self.events)
+        event_list = list(self.events)
+
+        if self.log_offset == 0:
+            # Live tail mode
+            visible = event_list[-page_size:]
+            header = "Events"
+        else:
+            end = total - self.log_offset
+            start = max(0, end - page_size)
+            visible = event_list[start:end]
+            line_start = start + 1
+            line_end = end
+            header = f"Events [lines {line_start}-{line_end}/{total}  ↓/PgDn to resume]"
+
+        stdscr.addstr(start_row, 0, header[:width - 1], curses.A_BOLD)
+
+        row = start_row + 1
+        for event in visible:
+            if row >= height - 1:
+                break
+            stdscr.addstr(row, 0, event[:width - 1])
+            row += 1
+
+    def prompt_save(self, stdscr, height, width):
+        """Prompt user for a filename and save current state to it"""
+        prompt = "Save to file: "
+        stdscr.addstr(height - 1, 0, prompt + " " * (width - len(prompt) - 1),
+                      curses.A_REVERSE)
+        stdscr.addstr(height - 1, len(prompt), "")
+        stdscr.refresh()
+
+        # Read filename character by character
+        curses.curs_set(1)
+        stdscr.nodelay(0)  # blocking input during prompt
+        filename_chars = []
+        cursor_col = len(prompt)
+
+        while True:
+            ch = stdscr.getch()
+            if ch in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+                break
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if filename_chars:
+                    filename_chars.pop()
+                    cursor_col -= 1
+                    stdscr.addstr(height - 1, cursor_col, " ", curses.A_REVERSE)
+                    stdscr.move(height - 1, cursor_col)
+            elif ch == 27:  # Escape — cancel
+                filename_chars = []
+                break
+            elif 32 <= ch < 127:
+                filename_chars.append(chr(ch))
+                stdscr.addstr(height - 1, cursor_col, chr(ch), curses.A_REVERSE)
+                cursor_col += 1
+
+            stdscr.refresh()
+
+        curses.curs_set(0)
+        stdscr.nodelay(1)
+
+        filename = ''.join(filename_chars).strip()
+        if not filename:
+            return
+
+        self.save_to_file(filename)
+
+    def save_to_file(self, filename):
+        """Write current ping history and event log to a file"""
+        timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+        sorted_monitors = self.get_sorted_monitors()
+
+        try:
+            with open(filename, 'w') as f:
+                f.write(f"Ping-Multi snapshot — {timestamp}\n")
+                f.write("=" * 70 + "\n\n")
+
+                max_name_len = max((len(m.host) for m in sorted_monitors), default=8)
+                name_col = max(len("Hostname"), max_name_len)
+                f.write(f"{'Hostname':<{name_col}} {'Last':>6}  {'History (newest right)'}\n")
+                f.write("-" * 70 + "\n")
+                for monitor in sorted_monitors:
+                    with monitor.lock:
+                        history = ''.join(monitor.history)
+                        latency = f"{monitor.latency:6.1f}" if monitor.latency is not None else "     -"
+                    f.write(f"{monitor.host:<{name_col}} {latency:>6}  {history}\n")
+
+                f.write("\n" + "=" * 70 + "\n")
+                f.write("Events\n")
+                f.write("-" * 70 + "\n")
+                for event in self.events:
+                    f.write(event + "\n")
+        except OSError as e:
+            self.add_event("save", f"error: {e}")
+
+    def run(self, stdscr):
+        """Main application loop"""
+        # Initialize curses
+        curses.curs_set(0)
+        stdscr.nodelay(1)
+        stdscr.timeout(100)
+
+        # Initialize colors
+        curses.start_color()
+        curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)   # Success
+        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)     # Failure
+        curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Warning
+        curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)   # Hotkey
+
+        self.start_monitoring()
+
+        try:
+            while self.running:
+                stdscr.clear()
+                height, width = stdscr.getmaxyx()
+
+                # Adaptive layout: prioritise host rows, then header, then menu, then events
+                num_hosts = len(self.monitors)
+
+                # Show menu bar only if there is room for menu(1)+blank(1)+header(1)+all hosts
+                show_menu = height >= num_hosts + 3
+                hosts_start = 2 if show_menu else 0
+
+                # Show column header only if there is room for it above all host rows
+                show_header = height >= hosts_start + num_hosts + 1
+
+                # How many host data rows actually fit
+                available = height - hosts_start - (1 if show_header else 0)
+                visible_hosts = min(num_hosts, max(0, available))
+
+                # Events get whatever space remains (need at least header + 1 line)
+                section_end = hosts_start + (1 if show_header else 0) + visible_hosts
+                events_start = section_end + 1
+                show_events = events_start + 2 <= height
+
+                # Draw sections
+                if show_menu:
+                    self.draw_menu_bar(stdscr, width)
+                self.draw_hosts(stdscr, hosts_start, visible_hosts, width,
+                                show_header=show_header)
+                if show_events:
+                    self.draw_events(stdscr, events_start, height, width)
+
+                stdscr.refresh()
+
+                # Handle input
+                key = stdscr.getch()
+                if key == ord('q') or key == ord('Q'):
+                    self.running = False
+                    break
+                elif key == ord('d') or key == ord('D'):
+                    self.toggle_dns()
+                elif key == ord('s') or key == ord('S'):
+                    self.cycle_stats()
+                elif key == ord('o') or key == ord('O'):
+                    self.cycle_sort()
+                elif key == ord('p') or key == ord('P'):
+                    self.paused = not self.paused
+                elif key == ord('t') or key == ord('T'):
+                    # Cycle time scale (not implemented in ping loop yet)
+                    pass
+                elif key == ord('w') or key == ord('W'):
+                    self.prompt_save(stdscr, height, width)
+                # History scrolling (left/right arrows)
+                elif key == curses.KEY_LEFT:
+                    self.scroll_history(1)
+                elif key == curses.KEY_RIGHT:
+                    self.scroll_history(-1)
+                # Event log scrolling (up/down arrows and PgUp/PgDn)
+                elif key == curses.KEY_UP:
+                    self.scroll_log(1)
+                elif key == curses.KEY_DOWN:
+                    self.scroll_log(-1)
+                elif key == curses.KEY_PPAGE:   # Page Up — scroll log back
+                    log_page_size = max(1, height - events_start - 2)
+                    self.scroll_log(log_page_size)
+                elif key == curses.KEY_NPAGE:   # Page Down — scroll log forward
+                    log_page_size = max(1, height - events_start - 2)
+                    self.scroll_log(-log_page_size)
+
+        finally:
+            for monitor in self.monitors:
+                monitor.running = False
+
+
+def main(stdscr):
+    # Get hosts from command line or use defaults
+    hosts = sys.argv[1:] if len(sys.argv) > 1 else []
+
+    if not hosts:
+        print("Usage: ping-bulk [host ...]")
+        return
+
+    app = Application(hosts)
+    app.run(stdscr)
+
+if __name__ == "__main__":
+    curses.wrapper(main)
