@@ -21,14 +21,26 @@ HISTORY_MODES = ['success', 'rtt', 'scaled']
 # ip       — resolve every entry to its IP address
 DNS_MODES = ['off', 'hostname', 'ip']
 
+# Stderr substrings that indicate a permanent (non-retryable) ping failure.
+_FATAL_PING_ERRORS = (
+    'name or service not known',
+    'unknown host',
+    'operation not permitted',
+    'network is unreachable',
+    'no such device',
+)
+
 
 def _history_char(val, mode):
-    """Convert a raw history value (float ms or None) to a single display character.
+    """Convert a raw history value (float ms, None, or 'ERR') to a single display character.
 
-    success — '.' for any successful ping, 'X' for failure
-    rtt     — last digit of int(ms) for success, 'X' for failure
-    scaled  — digit 0-9 mapping 10 ms buckets (0=<10ms … 9=90+ms), 'X' for failure
+    success — '.' for any successful ping, 'X' for timeout, '?' for process error
+    rtt     — last digit of int(ms) for success, 'X' for timeout, '?' for process error
+    scaled  — digit 0-9 mapping 10 ms buckets (0=<10ms … 9=90+ms), 'X' for timeout,
+              '?' for process error
     """
+    if val == 'ERR':
+        return '?'
     if val is None:
         return 'X'
     if mode == 'rtt':
@@ -54,6 +66,9 @@ class PingMonitor:
         self.ping_count = 0    # total pings ever sent (never capped, unlike history deque)
         self.running = True
         self.lock = threading.Lock()
+        self.error = None          # str when a fatal process-level error occurred, else None
+        self.error_logged = False  # True once the error has been added to the event log
+        self._proc = None          # active Popen handle for the persistent ping subprocess
 
     def resolve_dns(self):
         """Resolve the host to both its IP address and its hostname.
@@ -78,51 +93,114 @@ class PingMonitor:
             self.resolved_hostname = None
 
     def ping(self):
-        """Ping the host and update stats"""
-        while self.running:
-            cycle_start = time.monotonic()
-            try:
-                result = subprocess.run(
-                    ['ping', '-c', '1', '-W', '1', self.host],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
+        """Continuously ping the host using a single persistent subprocess.
 
+        Launches 'ping -O -D <host>' once and reads its stdout line-by-line,
+        updating stats on each success ('time=') or -O timeout
+        ('no answer yet') line.  The '-D' Unix-timestamp prefix is stripped
+        before parsing.
+
+        Fatal errors (e.g. unknown host, permission denied) set self.error
+        and stop the loop permanently.  Unexpected exits are retried with
+        exponential backoff (1 s → 2 s → 4 s … capped at 30 s); the backoff
+        resets whenever any ping-result output is received.
+        """
+        backoff = 1  # seconds; doubles on each unexpected exit, capped at 30
+
+        while self.running:
+            try:
+                self._proc = subprocess.Popen(
+                    ['ping', '-O', '-D', self.host],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,  # line-buffered; iputils-ping flushes per line
+                )
+            except Exception as exc:
+                self.error = str(exc)
                 with self.lock:
-                    if result.returncode == 0:
-                        # Extract latency from output
-                        for line in result.stdout.split('\n'):
-                            if 'time=' in line:
-                                latency_str = line.split('time=')[1].split()[0]
-                                self.latency = float(latency_str)
-                                break
+                    self.history.append('ERR')
+                break
+
+            got_output = False  # True once any ping-result line is received
+
+            for raw_line in self._proc.stdout:
+                if not self.running:
+                    break
+
+                line = raw_line.rstrip()
+
+                # Strip the '-D' Unix-timestamp prefix: '[1234567890.123] rest'
+                if line.startswith('['):
+                    close = line.find(']')
+                    if close != -1:
+                        line = line[close + 2:]  # skip past '] '
+
+                if 'time=' in line:
+                    # Successful reply — extract RTT
+                    try:
+                        latency = float(line.split('time=')[1].split()[0])
+                    except (IndexError, ValueError):
+                        continue
+                    with self.lock:
+                        self.latency = latency
                         self.alive = True
-                        self.history.append(self.latency)  # float
+                        self.history.append(latency)
                         self.rx_count += 1
-                        self.latencies.append(self.latency)
-                    else:
+                        self.latencies.append(latency)
+                    self.ping_count += 1
+                    got_output = True
+                    backoff = 1  # reset on any successful output
+                elif 'no answer yet' in line:
+                    # '-O' timeout line — one per missed icmp_seq
+                    with self.lock:
                         self.alive = False
                         self.latency = None
-                        self.history.append(None)  # failure
+                        self.history.append(None)
                         self.xx_count += 1
+                    self.ping_count += 1
+                    got_output = True
+                    backoff = 1  # reset on any output
 
-            except (subprocess.TimeoutExpired, Exception):
+            # Stdout closed — process has exited (or we broke out on shutdown)
+            if not self.running:
+                break
+
+            # Drain stderr to check for a fatal error message
+            try:
+                stderr_text = self._proc.stderr.read()
+            except Exception:
+                stderr_text = ''
+            self._proc.wait()
+
+            if self._is_fatal_error(stderr_text):
+                self.error = stderr_text.strip()
                 with self.lock:
-                    self.alive = False
-                    self.latency = None
-                    self.history.append(None)  # failure
-                    self.xx_count += 1
+                    self.history.append('ERR')
+                break  # do not restart for fatal errors
 
-            self.ping_count += 1
+            # Unexpected (non-fatal) exit — restart after backoff
+            if not got_output:
+                # Process exited before producing any result lines;
+                # keep the current backoff penalty instead of resetting.
+                pass
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
-            # Sleep only the remainder of the 1-second cycle so that both
-            # successful pings (fast) and timed-out pings (slow) produce the
-            # same number of samples per second.
-            elapsed = time.monotonic() - cycle_start
-            remaining = 1.0 - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
+    def stop(self):
+        """Stop the ping loop and terminate the subprocess cleanly."""
+        self.running = False
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_fatal_error(stderr_text):
+        """Return True if stderr_text contains a known non-retryable error pattern."""
+        text = stderr_text.lower()
+        return any(pattern in text for pattern in _FATAL_PING_ERRORS)
 
     def get_history_string(self, length=50, offset=0, mode='success', cell_width=1):
         """Get history as a string of given length ending offset steps from the newest sample.
@@ -133,7 +211,8 @@ class PingMonitor:
 
         When cell_width > 1 (rtt mode) each cell is exactly cell_width characters wide:
           success  -> right-justified integer in (cell_width-1) chars + one trailing space
-          failure  -> 'X' repeated (cell_width-1) times + one trailing space
+          timeout  -> 'X' repeated (cell_width-1) times + one trailing space
+          error    -> '?' repeated (cell_width-1) times + one trailing space
           blank    -> cell_width spaces
         The returned string therefore has length * cell_width characters.
         """
@@ -153,6 +232,8 @@ class PingMonitor:
                         num_w = cell_width - 1  # digits field width
                         if val is None:
                             cell = 'X' * num_w + ' '
+                        elif val == 'ERR':
+                            cell = '?' * num_w + ' '
                         else:
                             # Cap at the max representable value so the field never overflows
                             # (Python's str.format does NOT truncate, it just widens).
@@ -223,6 +304,11 @@ class Application:
         """Monitor state changes and log events"""
         while self.running:
             for monitor in self.monitors:
+                # Log a fatal process error exactly once, as soon as it is detected.
+                if monitor.error is not None and not monitor.error_logged:
+                    monitor.error_logged = True
+                    self.add_event(monitor.host, f"error: {monitor.error}")
+
                 current_state = monitor.alive
                 if monitor.last_state is None:
                     monitor.last_state = current_state
@@ -438,10 +524,14 @@ class Application:
             if not show_all:
                 if show_single:
                     stat_str = self._compute_stat(monitor, mode_name)
-                    stdscr.addstr(row, stat_col, stat_str)
+                    # _compute_stat() returns '    ??' when monitor.error is set
+                    stat_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
+                    stdscr.addstr(row, stat_col, stat_str, stat_color)
                 else:
-                    # off mode — show Last latency with color
-                    if monitor.latency is not None:
+                    # off mode — show Last latency with color; '    ??' in bright red on error
+                    if monitor.error is not None:
+                        stdscr.addstr(row, stat_col, "    ??", curses.color_pair(2) | curses.A_BOLD)
+                    elif monitor.latency is not None:
                         color = curses.color_pair(1) if monitor.latency < 50 else curses.color_pair(3)
                         stdscr.addstr(row, stat_col, f"{monitor.latency:6.1f}", color)
                     else:
@@ -490,6 +580,8 @@ class Application:
                         stdscr.addstr(row, col, cell)
                     elif content[0] == 'X':
                         stdscr.addstr(row, col, cell, curses.color_pair(2))  # red
+                    elif content[0] == '?':
+                        stdscr.addstr(row, col, cell, curses.color_pair(2) | curses.A_BOLD)  # bright red — process error
                     elif content[0] == '>':
                         stdscr.addstr(row, col, cell, curses.color_pair(3))  # yellow — >100 ms
                     else:
@@ -508,6 +600,8 @@ class Application:
                         break
                     if char == 'X':
                         stdscr.addstr(row, col, char, curses.color_pair(2))  # red
+                    elif char == '?':
+                        stdscr.addstr(row, col, char, curses.color_pair(2) | curses.A_BOLD)  # bright red — process error
                     elif char == '.':
                         stdscr.addstr(row, col, char, curses.color_pair(1))  # green
                     elif char in '01234':
@@ -522,7 +616,9 @@ class Application:
 
             # All-stats block flush-left after hostname
             if show_all and all_stats_col < width:
-                stdscr.addstr(row, all_stats_col, self._compute_all_stats(monitor))
+                all_str = self._compute_all_stats(monitor)
+                all_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
+                stdscr.addstr(row, all_stats_col, all_str, all_color)
 
             row += 1
 
@@ -530,7 +626,12 @@ class Application:
 
     @staticmethod
     def _compute_stat(monitor, mode):
-        """Compute a formatted stat string for a given STATS_MODES label."""
+        """Compute a formatted stat string for a given STATS_MODES label.
+
+        Returns '    ??' (6 chars) for all fields when monitor.error is set.
+        """
+        if monitor.error is not None:
+            return "    ??"
         with monitor.lock:
             lats = list(monitor.latencies)
             rx = monitor.rx_count
@@ -575,9 +676,15 @@ class Application:
     def _compute_all_stats(monitor):
         """Compute a compact all-stats string for 'All' mode.
 
+        Returns a row of '    ??' placeholders (9 fields, 70 chars total) when
+        monitor.error is set.
         Format (aligned to match the header in draw_hosts):
-          Avg    Min    Max    Loss%   StDev  RX     TX     XX
+          ms     Avg    Min    Max    Loss%  StDev  RX     TX     XX
         """
+        if monitor.error is not None:
+            placeholder = "    ??"
+            sep = "  "
+            return (sep.join([placeholder] * 9))
         with monitor.lock:
             lats = list(monitor.latencies)
             rx = monitor.rx_count
@@ -815,7 +922,7 @@ class Application:
 
         finally:
             for monitor in self.monitors:
-                monitor.running = False
+                monitor.stop()
 
 
 def main(stdscr):
