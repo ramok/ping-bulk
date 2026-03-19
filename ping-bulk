@@ -232,19 +232,19 @@ class Application:
                     thread = threading.Thread(target=monitor.resolve_dns, daemon=True)
                     thread.start()
 
-    def cycle_stats(self):
-        """Cycle through stats display modes"""
-        self.stats_mode = (self.stats_mode + 1) % len(STATS_MODES)
+    def cycle_stats(self, direction=1):
+        """Cycle through stats display modes. direction=1 forward, -1 backward."""
+        self.stats_mode = (self.stats_mode + direction) % len(STATS_MODES)
 
-    def cycle_sort(self):
-        """Cycle through sort options"""
+    def cycle_sort(self, direction=1):
+        """Cycle through sort options. direction=1 forward, -1 backward."""
         sorts = ['none', 'name', 'status', 'latency']
         current_idx = sorts.index(self.sort_by)
-        self.sort_by = sorts[(current_idx + 1) % len(sorts)]
+        self.sort_by = sorts[(current_idx + direction) % len(sorts)]
 
-    def cycle_history_mode(self):
-        """Cycle through history display modes"""
-        self.history_mode = (self.history_mode + 1) % len(HISTORY_MODES)
+    def cycle_history_mode(self, direction=1):
+        """Cycle through history display modes. direction=1 forward, -1 backward."""
+        self.history_mode = (self.history_mode + direction) % len(HISTORY_MODES)
 
     def scroll_history(self, delta):
         """Scroll history view by delta steps (positive = back in time)"""
@@ -754,14 +754,20 @@ class Application:
                     break
                 elif key == ord('d') or key == ord('D'):
                     self.toggle_dns()
-                elif key == ord('s') or key == ord('S'):
-                    self.cycle_stats()
-                elif key == ord('o') or key == ord('O'):
-                    self.cycle_sort()
+                elif key == ord('s'):
+                    self.cycle_stats(1)
+                elif key == ord('S'):
+                    self.cycle_stats(-1)
+                elif key == ord('o'):
+                    self.cycle_sort(1)
+                elif key == ord('O'):
+                    self.cycle_sort(-1)
                 elif key == ord('p') or key == ord('P'):
                     self.paused = not self.paused
-                elif key == ord('h') or key == ord('H'):
-                    self.cycle_history_mode()
+                elif key == ord('h'):
+                    self.cycle_history_mode(1)
+                elif key == ord('H'):
+                    self.cycle_history_mode(-1)
                 elif key == ord('w') or key == ord('W'):
                     self.prompt_save(stdscr, height, width)
                 # History scrolling (left/right arrows)
