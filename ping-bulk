@@ -203,7 +203,7 @@ class Application:
 
     def scroll_history(self, delta):
         """Scroll history view by delta steps (positive = back in time)"""
-        max_offset = 100  # matches history deque maxlen
+        max_offset = self.monitors[0].history.maxlen if self.monitors else 100
         self.history_offset = max(0, min(max_offset, self.history_offset + delta))
 
     def scroll_log(self, delta):
@@ -320,6 +320,14 @@ class Application:
         row = data_start
         sorted_monitors = self.get_sorted_monitors()
 
+        # Resize every monitor's history deque to match the current terminal width
+        # so that recorded history always fills the full available column.
+        normal_history_length = max(1, width - hist_col - 1)
+        for m in self.monitors:
+            with m.lock:
+                if m.history.maxlen != normal_history_length:
+                    m.history = deque(m.history, maxlen=normal_history_length)
+
         for monitor in sorted_monitors:
             if row >= data_start + max_rows:
                 break
@@ -343,31 +351,28 @@ class Application:
 
             # Ping history — full screen width in normal modes; narrower in All mode
             if show_all:
-                history_length = max(0, min(self.STATS_COL - hist_col - 1, 100))
+                history_length = max(0, self.STATS_COL - hist_col - 1)
             else:
                 # Extend to the right edge of the terminal; no 100-col cap so the
                 # bar fills the whole screen.  get_history_string() pads with spaces
                 # for columns beyond the actual deque content.
                 history_length = max(0, width - hist_col - 1)
 
-            # Sweep mode: fill 0→data_cap once, then snap to half and grow again.
-            # data_cap is capped at 100 (the history deque maxlen) so the animation
-            # runs at a consistent speed regardless of terminal width.
+            # Sweep mode: fill 0→history_length once, then snap to half and grow again.
             # ping_count is never capped (unlike the history deque).
-            data_cap = min(history_length, 100)
-            half = max(1, data_cap // 2)
+            half = max(1, history_length // 2)
 
             if self.history_offset > 0:
                 # Scrolled view: always show the full available width
                 display_count = history_length
             else:
                 max_pings = max((m.ping_count for m in self.monitors), default=0)
-                if max_pings < data_cap:
-                    # Initial fill phase: grow from 0 to data_cap
+                if max_pings < history_length:
+                    # Initial fill phase: grow from 0 to history_length
                     display_count = max_pings
                 else:
-                    # Sweep phase: snap to half, grow back to data_cap-1, repeat
-                    display_count = half + ((max_pings - data_cap) % half)
+                    # Sweep phase: snap to half, grow back to history_length-1, repeat
+                    display_count = half + ((max_pings - history_length) % half)
 
             history = monitor.get_history_string(display_count, self.history_offset)
 
