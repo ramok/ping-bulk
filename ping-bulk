@@ -318,9 +318,6 @@ class Application:
                 stdscr.addstr(0, col, sep)
                 col += len(sep)
 
-    # Column where the 'All' stats block starts
-    STATS_COL = 84
-
     def _rtt_cell_width(self):
         """Compute the cell width needed for rtt mode based on max RTT across all monitors.
 
@@ -342,7 +339,7 @@ class Application:
         Layout per stats mode:
           off         — stat_col: Last latency (colored), history full width
           single mode — stat_col: stat value (replaces Last), history full width
-          All         — stat_col: hidden, history narrows to STATS_COL, all stats at right
+          All         — all stats flush-left after hostname, history fills remaining width
         """
         mode_name = STATS_MODES[self.stats_mode]
         show_all = (mode_name == 'All')
@@ -355,6 +352,13 @@ class Application:
         name_col_width = max(len("Hostname"), max_name_len)
         stat_col = name_col_width + 1   # stat value starts 1 col after hostname
         hist_col = stat_col + 7         # history starts 7 cols after stat (6-char value + 1 gap)
+
+        # In 'All' mode the stats block sits flush-left immediately after the hostname;
+        # the ping history bar then fills the remaining screen width to the right.
+        # 9 × 6-char fields + 8 × 2-char separators = 70 characters total.
+        ALL_STATS_WIDTH = 70
+        all_stats_col = stat_col  # stats start right after the hostname column
+        hist_col_effective = (all_stats_col + ALL_STATS_WIDTH + 1) if show_all else hist_col
 
         if show_header:
             stdscr.addstr(start_row, 0, "Hostname", curses.A_BOLD)
@@ -371,12 +375,12 @@ class Application:
             history_header = f"Ping history [{display_label}]"
             if self.history_offset > 0:
                 history_header = f"Ping history [{display_label}] [<{self.history_offset}s]"
-            stdscr.addstr(start_row, hist_col, history_header, curses.A_BOLD)
+            stdscr.addstr(start_row, hist_col_effective, history_header, curses.A_BOLD)
 
-            if show_all and self.STATS_COL < width:
+            if show_all and all_stats_col < width:
                 all_header = (f"{'ms':>6}  {'Avg':>6}  {'Min':>6}  {'Max':>6}  "
                               f"{'Loss%':>6}  {'StDev':>6}  {'RX':>6}  {'TX':>6}  {'XX':>6}")
-                stdscr.addstr(start_row, self.STATS_COL, all_header, curses.A_BOLD)
+                stdscr.addstr(start_row, all_stats_col, all_header, curses.A_BOLD)
 
         data_start = start_row + (1 if show_header else 0)
         row = data_start
@@ -419,14 +423,9 @@ class Application:
                     else:
                         stdscr.addstr(row, stat_col, "     -", curses.color_pair(2))
 
-            # Ping history — full screen width in normal modes; narrower in All mode
-            if show_all:
-                col_length = max(0, self.STATS_COL - hist_col - 1)
-            else:
-                # Extend to the right edge of the terminal; no 100-col cap so the
-                # bar fills the whole screen.  get_history_string() pads with spaces
-                # for columns beyond the actual deque content.
-                col_length = max(0, width - hist_col - 1)
+            # Ping history — full screen width in all modes; extends to right edge.
+            # get_history_string() pads with spaces for columns beyond actual deque content.
+            col_length = max(0, width - hist_col_effective - 1)
 
             # Number of ping samples that fit in the available columns.
             # In rtt mode each sample occupies cell_width columns; other modes use 1.
@@ -453,7 +452,7 @@ class Application:
             )
 
             # Color code the history.
-            col = hist_col
+            col = hist_col_effective
             if cell_width > 1:
                 # rtt mode: iterate cell_width characters at a time.
                 # Each cell is (cell_width-1) digit chars + 1 trailing space.
@@ -497,9 +496,9 @@ class Application:
                         stdscr.addstr(row, col, char)
                     col += 1
 
-            # All-stats block at right
-            if show_all and self.STATS_COL < width:
-                stdscr.addstr(row, self.STATS_COL, self._compute_all_stats(monitor))
+            # All-stats block flush-left after hostname
+            if show_all and all_stats_col < width:
+                stdscr.addstr(row, all_stats_col, self._compute_all_stats(monitor))
 
             row += 1
 
