@@ -322,6 +322,7 @@ class Application:
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
         self.log_file = log_file  # path to append event log, or None
+        self.prompt = None        # None = no prompt; dict = prompt is open (see _open_prompt_*)
         self.running = True
         self.threads = []
 
@@ -479,7 +480,7 @@ class Application:
             ("[q]uit", False),
         ]
 
-        prefix = "Ping-Multi: "
+        prefix = "ping-bulk: "
         stdscr.addstr(0, 0, prefix)
         col = len(prefix)
 
@@ -872,105 +873,86 @@ class Application:
             stdscr.addstr(row, 0, event[:width - 1])
             row += 1
 
-    def prompt_save(self, stdscr, height, width):
-        """Prompt user for a log filename, pre-filled with the current log file if set.
+    def _open_prompt_save(self):
+        """Open the save-log prompt (non-blocking; state stored in self.prompt)."""
+        self.prompt = {
+            'type': 'save',
+            'chars': list(self.log_file) if self.log_file else [],
+        }
 
-        On confirmation the event log is written to the chosen file and
-        self.log_file is updated so that future events stream there too.
+    def _open_prompt_clear(self):
+        """Open the clear-log confirmation prompt (non-blocking)."""
+        self.prompt = {'type': 'clear', 'chars': []}
+
+    def _draw_prompt(self, stdscr, height, width):
+        """Draw the active prompt on the bottom line and position the text cursor.
+
+        Called every frame (after all other drawing) when self.prompt is not None.
+        The caller is responsible for calling curses.curs_set(1) before refresh.
         """
-        prompt = "Write log to: "
-        # Pre-fill with the current log-file path so the user can accept or edit it
-        filename_chars = list(self.log_file) if self.log_file else []
-        cursor_col = len(prompt) + len(filename_chars)
+        p = self.prompt
+        if p['type'] == 'save':
+            label = "Write log to: "
+            text  = ''.join(p['chars'])
+            line  = (label + text).ljust(width - 1)[:width - 1]
+            stdscr.addstr(height - 1, 0, line, curses.A_REVERSE)
+            cursor_x = min(len(label) + len(text), width - 2)
+            stdscr.move(height - 1, cursor_x)
+        elif p['type'] == 'save_confirm':
+            line = "File exists: [t]runcate  [a]ppend  Esc=cancel"
+            stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
+            stdscr.move(height - 1, min(len(line), width - 2))
+        elif p['type'] == 'clear':
+            line = "Clear event log? [y/N]: "
+            stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
+            stdscr.move(height - 1, min(len(line), width - 2))
 
-        # Draw the initial prompt line (reverse-video background across full width)
-        blank = " " * (width - len(prompt) - 1)
-        stdscr.addstr(height - 1, 0, prompt + blank, curses.A_REVERSE)
-        # Render any pre-filled text
-        if filename_chars:
-            stdscr.addstr(height - 1, len(prompt), ''.join(filename_chars), curses.A_REVERSE)
-        stdscr.refresh()
+    def _handle_prompt_key(self, key):
+        """Process one keypress while a prompt is active.
 
-        curses.curs_set(1)
-        stdscr.nodelay(0)  # blocking input during prompt
+        Updates self.prompt in place; sets self.prompt = None when the prompt
+        is dismissed (confirmed or cancelled).
+        """
+        p = self.prompt
 
-        while True:
-            ch = stdscr.getch()
-            if ch in (curses.KEY_ENTER, ord('\n'), ord('\r')):
-                break
-            elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                if filename_chars:
-                    filename_chars.pop()
-                    cursor_col -= 1
-                    stdscr.addstr(height - 1, cursor_col, " ", curses.A_REVERSE)
-                    stdscr.move(height - 1, cursor_col)
-            elif ch == 27:  # Escape — cancel
-                filename_chars = []
-                break
-            elif 32 <= ch < 127:
-                filename_chars.append(chr(ch))
-                stdscr.addstr(height - 1, cursor_col, chr(ch), curses.A_REVERSE)
-                cursor_col += 1
+        if p['type'] == 'save':
+            if key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+                filename = ''.join(p['chars']).strip()
+                if filename:
+                    if os.path.exists(filename):
+                        # Advance to the truncate/append confirmation step
+                        self.prompt = {'type': 'save_confirm', 'filename': filename, 'chars': []}
+                    else:
+                        self.save_to_file(filename)
+                        self.log_file = filename
+                        self.prompt = None
+                else:
+                    self.prompt = None  # empty filename — cancel
+            elif key == 27:  # Escape — cancel
+                self.prompt = None
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if p['chars']:
+                    p['chars'].pop()
+            elif 32 <= key < 127:
+                p['chars'].append(chr(key))
 
-            stdscr.refresh()
-
-        curses.curs_set(0)
-        stdscr.nodelay(1)
-
-        filename = ''.join(filename_chars).strip()
-        if not filename:
-            return
-
-        # If the file already exists ask the user whether to truncate or append.
-        if os.path.exists(filename):
-            sub_prompt = "File exists: [t]runcate  [a]ppend  Esc=cancel"
-            blank = " " * max(0, width - len(sub_prompt) - 1)
-            stdscr.addstr(height - 1, 0, sub_prompt + blank, curses.A_REVERSE)
-            stdscr.refresh()
-
-            curses.curs_set(1)
-            stdscr.nodelay(0)
-            action = stdscr.getch()
-            curses.curs_set(0)
-            stdscr.nodelay(1)
-
-            if action in (ord('t'), ord('T')):
+        elif p['type'] == 'save_confirm':
+            filename = p['filename']
+            if key in (ord('t'), ord('T')):
                 self.save_to_file(filename, append=False)
-            elif action in (ord('a'), ord('A')):
-                if self.log_file == filename:
-                    return  # already streaming here — nothing to append
-                self.save_to_file(filename, append=True, write_separator=True)
-            else:
-                return  # Esc or any other key — cancel without saving
-        else:
-            self.save_to_file(filename)
+                self.log_file = filename
+            elif key in (ord('a'), ord('A')):
+                if self.log_file != filename:
+                    self.save_to_file(filename, append=True, write_separator=True)
+                self.log_file = filename
+            # Any other key (Esc, Enter, …) — cancel without saving
+            self.prompt = None
 
-        # Switch real-time streaming to the newly chosen file
-        self.log_file = filename
-
-    def prompt_clear(self, stdscr, height, width):
-        """Prompt the user to confirm clearing the in-memory event log.
-
-        Shows a [y/N] prompt on the bottom line.  Only 'y' or 'Y' confirms;
-        any other key (including Escape and Enter) cancels without clearing.
-        The log file on disk is NOT modified — only self.events is cleared.
-        """
-        prompt = "Clear event log? [y/N]: "
-        blank = " " * (width - len(prompt) - 1)
-        stdscr.addstr(height - 1, 0, prompt + blank, curses.A_REVERSE)
-        stdscr.refresh()
-
-        curses.curs_set(1)
-        stdscr.nodelay(0)  # blocking input during prompt
-
-        ch = stdscr.getch()
-
-        curses.curs_set(0)
-        stdscr.nodelay(1)
-
-        if ch in (ord('y'), ord('Y')):
-            self.events.clear()
-            self.log_offset = 0  # reset scroll position after clearing
+        elif p['type'] == 'clear':
+            if key in (ord('y'), ord('Y')):
+                self.events.clear()
+                self.log_offset = 0  # reset scroll position after clearing
+            self.prompt = None  # any key closes the clear prompt
 
     def save_to_file(self, filename, append=False, write_separator=True):
         """Write the current event log to a file.
@@ -1050,10 +1032,20 @@ class Application:
                 if show_events:
                     self.draw_events(stdscr, events_start, height, width)
 
+                if self.prompt is not None:
+                    self._draw_prompt(stdscr, height, width)
+                    curses.curs_set(1)
+                else:
+                    curses.curs_set(0)
+
                 stdscr.refresh()
 
                 # Handle input
                 key = stdscr.getch()
+                if self.prompt is not None:
+                    if key != -1:
+                        self._handle_prompt_key(key)
+                    continue
                 if key == ord('q') or key == ord('Q'):
                     self.running = False
                     break
@@ -1076,11 +1068,11 @@ class Application:
                 elif key == ord('H'):
                     self.cycle_history_mode(-1)
                 elif key == ord('w') or key == ord('W'):
-                    self.prompt_save(stdscr, height, width)
+                    self._open_prompt_save()
                 elif key == ord(' '):
                     self.mark_seen()
                 elif key == ord('C'):
-                    self.prompt_clear(stdscr, height, width)
+                    self._open_prompt_clear()
                 # History scrolling (left/right arrows)
                 elif key == curses.KEY_LEFT:
                     self.scroll_history(1)
