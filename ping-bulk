@@ -307,13 +307,17 @@ def parse_hosts_file(filename):
 
     Each tuple is one of:
       ('host',    'hostname-or-ip')  — a host to ping
-      ('section', 'Title text')      — a ## section header (display-only row)
+      ('section', 'Title text')      — a section header (display-only row)
+      ('cmd',     ':cmd [args]')     — a startup command applied before monitoring begins
 
     File format rules:
-      ## Title   — section header; 'Title' is everything after '## ' (stripped)
-      # ...      — comment line; ignored entirely
-      (empty)    — blank line; ignored
-      anything else — treated as a host/IP address
+      ## Title        — section header (legacy); 'Title' is everything after '## '
+      :title Title    — section header (preferred); 'Title' is everything after ':title '
+      :cmd [args]     — any other ':'-prefixed line is treated as a startup command
+                        (same syntax as the interactive ':' command line)
+      # ...           — comment line; ignored entirely
+      (empty)         — blank line; ignored
+      anything else   — treated as a host/IP address to ping
     """
     entries = []
     with open(filename) as f:
@@ -326,6 +330,14 @@ def parse_hosts_file(filename):
                 entries.append(('section', title))
             elif line.startswith('#'):
                 continue  # comment — skip
+            elif line.startswith(':'):
+                parts = line.split(None, 1)
+                cmd_word = parts[0][1:].lower()  # strip leading ':'
+                if cmd_word == 'title':
+                    title = parts[1].strip() if len(parts) > 1 else ''
+                    entries.append(('section', title))
+                else:
+                    entries.append(('cmd', line))
             else:
                 entries.append(('host', line))
     return entries
@@ -335,21 +347,18 @@ class Application:
     def __init__(self, entries, log_file=None):
         """Initialise the application from an ordered list of entry tuples.
 
-        entries  — list of ('host', name) or ('section', title) tuples, as
-                   returned by parse_hosts_file() or built from argv.
+        entries  — list of ('host', name), ('section', title), or ('cmd', text)
+                   tuples, as returned by parse_hosts_file() or built from argv.
         log_file — optional path; new events are appended here in real time.
         self.monitors — PingMonitor instances only (used for stats/threading).
         self.entries  — ordered display list mixing PingMonitor and SectionLabel.
+
+        ('cmd', text) entries are applied as startup commands after all hosts
+        and section labels have been registered, so they may reference any
+        monitor that was defined earlier in the file.
         """
         self.entries = []   # ordered display list: PingMonitor | SectionLabel
         self.monitors = []  # pure PingMonitor list for stats, threading, DNS
-        for kind, value in entries:
-            if kind == 'host':
-                m = PingMonitor(value)
-                self.monitors.append(m)
-                self.entries.append(m)
-            else:  # 'section'
-                self.entries.append(SectionLabel(value))
         self.events = deque(maxlen=50)
         self.paused = False
         self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
@@ -364,6 +373,21 @@ class Application:
         self.help_open = False    # True while the help overlay is visible
         self.running = True
         self.threads = []
+
+        # First pass: register hosts and section labels in order
+        for kind, value in entries:
+            if kind == 'host':
+                m = PingMonitor(value)
+                self.monitors.append(m)
+                self.entries.append(m)
+            elif kind == 'section':
+                self.entries.append(SectionLabel(value))
+            # 'cmd' entries are deferred to the second pass
+
+        # Second pass: apply startup commands (e.g. :dns, :stats, :log from the hosts file)
+        for kind, value in entries:
+            if kind == 'cmd':
+                self._dispatch_cmd(value)
 
     def add_event(self, host, message):
         """Add an event to the in-memory log and, if a log file is configured,
@@ -1432,7 +1456,10 @@ def main(stdscr):
             return
 
     for host in args.hosts:
-        entries.append(('host', host))
+        if host.startswith(':'):
+            entries.append(('cmd', host))
+        else:
+            entries.append(('host', host))
 
     if not entries:
         print("Usage: ping-bulk [-f FILE] [HOST ...]", file=sys.stderr)
