@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import curses
 import math
+import os
 import subprocess
 import threading
 import time
@@ -294,11 +295,12 @@ def parse_hosts_file(filename):
 
 
 class Application:
-    def __init__(self, entries):
+    def __init__(self, entries, log_file=None):
         """Initialise the application from an ordered list of entry tuples.
 
-        entries — list of ('host', name) or ('section', title) tuples, as
-                  returned by parse_hosts_file() or built from argv.
+        entries  — list of ('host', name) or ('section', title) tuples, as
+                   returned by parse_hosts_file() or built from argv.
+        log_file — optional path; new events are appended here in real time.
         self.monitors — PingMonitor instances only (used for stats/threading).
         self.entries  — ordered display list mixing PingMonitor and SectionLabel.
         """
@@ -319,14 +321,26 @@ class Application:
         self.history_mode = 0  # index into HISTORY_MODES
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
+        self.log_file = log_file  # path to append event log, or None
         self.running = True
         self.threads = []
 
     def add_event(self, host, message):
-        """Add event to log"""
-        timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+        """Add an event to the in-memory log and, if a log file is configured,
+        append it immediately to that file.
+
+        Timestamp format: ISO 8601 with timezone offset (e.g. 2026-03-20T14:05:32+0200).
+        """
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
         max_host_len = max((len(m.host) for m in self.monitors), default=len(host))
-        self.events.append(f"{timestamp}   {host:<{max_host_len}} {message}")
+        line = f"{timestamp}   {host:<{max_host_len}} {message}"
+        self.events.append(line)
+        if self.log_file:
+            try:
+                with open(self.log_file, 'a') as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass  # silently ignore file write errors to avoid recursive events
 
     def start_monitoring(self):
         """Start all ping threads"""
@@ -416,6 +430,21 @@ class Application:
         max_offset = max(0, total - 1)
         self.log_offset = max(0, min(max_offset, self.log_offset + delta))
 
+    def mark_seen(self):
+        """Append a visual 'seen' separator line to the event log (and log file if set).
+
+        The marker is a plain divider with no timestamp or host column so it
+        stands out clearly from regular event lines.
+        """
+        line = "══════════════════════════ seen ══════════════════════════"
+        self.events.append(line)
+        if self.log_file:
+            try:
+                with open(self.log_file, 'a') as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass
+
     def get_sorted_monitors(self):
         """Get display entries sorted by current sort option.
 
@@ -444,7 +473,9 @@ class Application:
             (f"[o]rder by {self.sort_by}", False),
             (f"[h]istory:{HISTORY_MODES[self.history_mode]}", False),
             (f"[p]ause {'on' if self.paused else 'off'}", self.paused),
-            ("[w]rite to file", False),
+            ("[w]rite log", False),
+            ("[Space]seen", False),
+            ("[C]lear log", False),
             ("[q]uit", False),
         ]
 
@@ -461,15 +492,32 @@ class Application:
             while i < len(label) and col < width - 1:
                 ch = label[i]
                 if ch == '[':
-                    # Next char is the hotkey, skip the brackets
                     i += 1
+                    # Collect everything up to the closing ']'
+                    token = []
+                    while i < len(label) and label[i] != ']':
+                        token.append(label[i])
+                        i += 1
                     if i < len(label):
-                        stdscr.addstr(0, col, label[i], curses.color_pair(4) | curses.A_BOLD)
-                        col += 1
-                        i += 1
-                    # Skip the closing ']'
-                    if i < len(label) and label[i] == ']':
-                        i += 1
+                        i += 1  # skip ']'
+
+                    if len(token) == 1:
+                        # Single-char hotkey: highlight without brackets (standard look)
+                        if col < width - 1:
+                            stdscr.addstr(0, col, token[0], curses.color_pair(4) | curses.A_BOLD)
+                            col += 1
+                    else:
+                        # Multi-char hotkey (e.g. "Space"): show '[…]' with all chars highlighted
+                        if col < width - 1:
+                            stdscr.addstr(0, col, '[')
+                            col += 1
+                        for tc in token:
+                            if col < width - 1:
+                                stdscr.addstr(0, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                                col += 1
+                        if col < width - 1:
+                            stdscr.addstr(0, col, ']')
+                            col += 1
                 else:
                     stdscr.addstr(0, col, ch)
                     col += 1
@@ -796,10 +844,14 @@ class Application:
         total = len(self.events)
         event_list = list(self.events)
 
+        overflows = total > page_size  # True when the log cannot fit on screen
+
         if self.log_offset == 0:
             # Live tail mode
             visible = event_list[-page_size:]
             header = "Events"
+            if overflows:
+                header += " [↑/PgUp to scroll]"
         else:
             end = total - self.log_offset
             start = max(0, end - page_size)
@@ -807,6 +859,9 @@ class Application:
             line_start = start + 1
             line_end = end
             header = f"Events [lines {line_start}-{line_end}/{total}  ↓/PgDn to resume]"
+
+        if self.log_file:
+            header += f" → {self.log_file}"
 
         stdscr.addstr(start_row, 0, header[:width - 1], curses.A_BOLD)
 
@@ -818,18 +873,26 @@ class Application:
             row += 1
 
     def prompt_save(self, stdscr, height, width):
-        """Prompt user for a filename and save current state to it"""
-        prompt = "Save to file: "
-        stdscr.addstr(height - 1, 0, prompt + " " * (width - len(prompt) - 1),
-                      curses.A_REVERSE)
-        stdscr.addstr(height - 1, len(prompt), "")
+        """Prompt user for a log filename, pre-filled with the current log file if set.
+
+        On confirmation the event log is written to the chosen file and
+        self.log_file is updated so that future events stream there too.
+        """
+        prompt = "Write log to: "
+        # Pre-fill with the current log-file path so the user can accept or edit it
+        filename_chars = list(self.log_file) if self.log_file else []
+        cursor_col = len(prompt) + len(filename_chars)
+
+        # Draw the initial prompt line (reverse-video background across full width)
+        blank = " " * (width - len(prompt) - 1)
+        stdscr.addstr(height - 1, 0, prompt + blank, curses.A_REVERSE)
+        # Render any pre-filled text
+        if filename_chars:
+            stdscr.addstr(height - 1, len(prompt), ''.join(filename_chars), curses.A_REVERSE)
         stdscr.refresh()
 
-        # Read filename character by character
         curses.curs_set(1)
         stdscr.nodelay(0)  # blocking input during prompt
-        filename_chars = []
-        cursor_col = len(prompt)
 
         while True:
             ch = stdscr.getch()
@@ -858,38 +921,83 @@ class Application:
         if not filename:
             return
 
-        self.save_to_file(filename)
+        # If the file already exists ask the user whether to truncate or append.
+        if os.path.exists(filename):
+            sub_prompt = "File exists: [t]runcate  [a]ppend  Esc=cancel"
+            blank = " " * max(0, width - len(sub_prompt) - 1)
+            stdscr.addstr(height - 1, 0, sub_prompt + blank, curses.A_REVERSE)
+            stdscr.refresh()
 
-    def save_to_file(self, filename):
-        """Write current ping history and event log to a file"""
-        timestamp = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        sorted_monitors = self.get_sorted_monitors()
+            curses.curs_set(1)
+            stdscr.nodelay(0)
+            action = stdscr.getch()
+            curses.curs_set(0)
+            stdscr.nodelay(1)
 
+            if action in (ord('t'), ord('T')):
+                self.save_to_file(filename, append=False)
+            elif action in (ord('a'), ord('A')):
+                if self.log_file == filename:
+                    return  # already streaming here — nothing to append
+                self.save_to_file(filename, append=True, write_separator=True)
+            else:
+                return  # Esc or any other key — cancel without saving
+        else:
+            self.save_to_file(filename)
+
+        # Switch real-time streaming to the newly chosen file
+        self.log_file = filename
+
+    def prompt_clear(self, stdscr, height, width):
+        """Prompt the user to confirm clearing the in-memory event log.
+
+        Shows a [y/N] prompt on the bottom line.  Only 'y' or 'Y' confirms;
+        any other key (including Escape and Enter) cancels without clearing.
+        The log file on disk is NOT modified — only self.events is cleared.
+        """
+        prompt = "Clear event log? [y/N]: "
+        blank = " " * (width - len(prompt) - 1)
+        stdscr.addstr(height - 1, 0, prompt + blank, curses.A_REVERSE)
+        stdscr.refresh()
+
+        curses.curs_set(1)
+        stdscr.nodelay(0)  # blocking input during prompt
+
+        ch = stdscr.getch()
+
+        curses.curs_set(0)
+        stdscr.nodelay(1)
+
+        if ch in (ord('y'), ord('Y')):
+            self.events.clear()
+            self.log_offset = 0  # reset scroll position after clearing
+
+    def save_to_file(self, filename, append=False, write_separator=True):
+        """Write the current event log to a file.
+
+        Each line is already fully formatted by add_event() with an ISO 8601
+        timestamp, so the file is a plain sequence of event lines preceded by
+        a one-line header.
+
+        append=False         — overwrite the file with a header + all events.
+        append=True          — append events to the existing file.
+        write_separator=True — when appending, prepend a separator line with a
+                               timestamp; set to False when the file is already
+                               the active streaming log (no gap to mark).
+        """
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
         try:
-            with open(filename, 'w') as f:
-                f.write(f"Ping-Multi snapshot — {timestamp}\n")
-                f.write("=" * 70 + "\n\n")
-
-                ping_entries = [e for e in sorted_monitors if isinstance(e, PingMonitor)]
-                max_name_len = max((len(m.host) for m in ping_entries), default=8)
-                name_col = max(len("Hostname"), max_name_len)
-                f.write(f"{'Hostname':<{name_col}} {'Last':>6}  {'History (newest right)'}\n")
-                f.write("-" * 70 + "\n")
-                for item in sorted_monitors:
-                    if isinstance(item, SectionLabel):
-                        f.write(f"── {item.title}\n")
-                        continue
-                    monitor = item
-                    with monitor.lock:
-                        history = ''.join(_history_char(v, 'success') for v in monitor.history)
-                        latency = f"{monitor.latency:6.1f}" if monitor.latency is not None else "     -"
-                    f.write(f"{monitor.host:<{name_col}} {latency:>6}  {history}\n")
-
-                f.write("\n" + "=" * 70 + "\n")
-                f.write("Events\n")
-                f.write("-" * 70 + "\n")
-                for event in self.events:
-                    f.write(event + "\n")
+            if append:
+                with open(filename, 'a') as f:
+                    if write_separator:
+                        f.write(f"\n# ========== appended {timestamp} ==========\n")
+                    for event in self.events:
+                        f.write(event + "\n")
+            else:
+                with open(filename, 'w') as f:
+                    f.write(f"# ping-bulk event log — saved {timestamp}\n")
+                    for event in self.events:
+                        f.write(event + "\n")
         except OSError as e:
             self.add_event("save", f"error: {e}")
 
@@ -969,22 +1077,31 @@ class Application:
                     self.cycle_history_mode(-1)
                 elif key == ord('w') or key == ord('W'):
                     self.prompt_save(stdscr, height, width)
+                elif key == ord(' '):
+                    self.mark_seen()
+                elif key == ord('C'):
+                    self.prompt_clear(stdscr, height, width)
                 # History scrolling (left/right arrows)
                 elif key == curses.KEY_LEFT:
                     self.scroll_history(1)
                 elif key == curses.KEY_RIGHT:
                     self.scroll_history(-1)
                 # Event log scrolling (up/down arrows and PgUp/PgDn)
+                # Only active when the log overflows the visible area.
                 elif key == curses.KEY_UP:
-                    self.scroll_log(1)
+                    if len(self.events) > max(1, height - events_start - 2):
+                        self.scroll_log(1)
                 elif key == curses.KEY_DOWN:
-                    self.scroll_log(-1)
+                    if len(self.events) > max(1, height - events_start - 2):
+                        self.scroll_log(-1)
                 elif key == curses.KEY_PPAGE:   # Page Up — scroll log back
                     log_page_size = max(1, height - events_start - 2)
-                    self.scroll_log(log_page_size)
+                    if len(self.events) > log_page_size:
+                        self.scroll_log(log_page_size)
                 elif key == curses.KEY_NPAGE:   # Page Down — scroll log forward
                     log_page_size = max(1, height - events_start - 2)
-                    self.scroll_log(-log_page_size)
+                    if len(self.events) > log_page_size:
+                        self.scroll_log(-log_page_size)
 
         finally:
             for monitor in self.monitors:
@@ -1002,6 +1119,11 @@ def _parse_args():
         '-f', '--file',
         metavar='FILE',
         help='hosts file (# comment, ## section header, one host per line)',
+    )
+    parser.add_argument(
+        '-l', '--log-file',
+        metavar='LOGFILE',
+        help='append event log entries to this file in real time',
     )
     parser.add_argument(
         'hosts',
@@ -1032,7 +1154,7 @@ def main(stdscr):
         print("Usage: ping-bulk [-f FILE] [HOST ...]", file=sys.stderr)
         return
 
-    app = Application(entries)
+    app = Application(entries, log_file=args.log_file)
     app.run(stdscr)
 
 if __name__ == "__main__":
