@@ -912,7 +912,7 @@ class Application:
 
         try:
             while self.running:
-                stdscr.clear()
+                stdscr.erase()
                 height, width = stdscr.getmaxyx()
 
                 # Adaptive layout: prioritise host rows, then header, then menu, then events
