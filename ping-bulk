@@ -258,10 +258,59 @@ class PingMonitor:
         return self.host  # 'off'
 
 
+class SectionLabel:
+    """A non-pingable display row for ## section headers from a hosts file."""
+    def __init__(self, title):
+        self.title = title
+
+
+def parse_hosts_file(filename):
+    """Parse a hosts file and return an ordered list of entry tuples.
+
+    Each tuple is one of:
+      ('host',    'hostname-or-ip')  — a host to ping
+      ('section', 'Title text')      — a ## section header (display-only row)
+
+    File format rules:
+      ## Title   — section header; 'Title' is everything after '## ' (stripped)
+      # ...      — comment line; ignored entirely
+      (empty)    — blank line; ignored
+      anything else — treated as a host/IP address
+    """
+    entries = []
+    with open(filename) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('##'):
+                title = line[2:].strip()
+                entries.append(('section', title))
+            elif line.startswith('#'):
+                continue  # comment — skip
+            else:
+                entries.append(('host', line))
+    return entries
+
+
 class Application:
-    def __init__(self, hosts):
-        self.hosts = hosts
-        self.monitors = [PingMonitor(host) for host in hosts]
+    def __init__(self, entries):
+        """Initialise the application from an ordered list of entry tuples.
+
+        entries — list of ('host', name) or ('section', title) tuples, as
+                  returned by parse_hosts_file() or built from argv.
+        self.monitors — PingMonitor instances only (used for stats/threading).
+        self.entries  — ordered display list mixing PingMonitor and SectionLabel.
+        """
+        self.entries = []   # ordered display list: PingMonitor | SectionLabel
+        self.monitors = []  # pure PingMonitor list for stats, threading, DNS
+        for kind, value in entries:
+            if kind == 'host':
+                m = PingMonitor(value)
+                self.monitors.append(m)
+                self.entries.append(m)
+            else:  # 'section'
+                self.entries.append(SectionLabel(value))
         self.events = deque(maxlen=50)
         self.paused = False
         self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
@@ -368,7 +417,11 @@ class Application:
         self.log_offset = max(0, min(max_offset, self.log_offset + delta))
 
     def get_sorted_monitors(self):
-        """Get monitors sorted by current sort option"""
+        """Get display entries sorted by current sort option.
+
+        none    — return self.entries preserving original order, including SectionLabels.
+        other   — return sorted self.monitors only (SectionLabels are omitted when sorting).
+        """
         if self.sort_by == 'name':
             return sorted(self.monitors, key=lambda m: m.host)
         elif self.sort_by == 'status':
@@ -377,7 +430,7 @@ class Application:
             return sorted(self.monitors, key=lambda m: (
                 m.latency if m.latency is not None else float('inf'), m.host
             ))
-        return self.monitors
+        return self.entries  # 'none': preserve original order with section labels
 
     def draw_menu_bar(self, stdscr, width):
         """Draw the top menu bar with highlighted hotkeys.
@@ -512,9 +565,17 @@ class Application:
                 if m.history.maxlen != normal_history_length:
                     m.history = deque(m.history, maxlen=normal_history_length)
 
-        for monitor in sorted_monitors:
+        for item in sorted_monitors:
             if row >= data_start + max_rows:
                 break
+
+            # Section label — render as a bold divider row and skip to the next entry
+            if isinstance(item, SectionLabel):
+                stdscr.addstr(row, 0, f"── {item.title}"[:width - 1], curses.A_BOLD)
+                row += 1
+                continue
+
+            monitor = item
 
             # Hostname
             display_name = monitor.get_display_name(DNS_MODES[self.dns_mode])
@@ -809,11 +870,16 @@ class Application:
                 f.write(f"Ping-Multi snapshot — {timestamp}\n")
                 f.write("=" * 70 + "\n\n")
 
-                max_name_len = max((len(m.host) for m in sorted_monitors), default=8)
+                ping_entries = [e for e in sorted_monitors if isinstance(e, PingMonitor)]
+                max_name_len = max((len(m.host) for m in ping_entries), default=8)
                 name_col = max(len("Hostname"), max_name_len)
                 f.write(f"{'Hostname':<{name_col}} {'Last':>6}  {'History (newest right)'}\n")
                 f.write("-" * 70 + "\n")
-                for monitor in sorted_monitors:
+                for item in sorted_monitors:
+                    if isinstance(item, SectionLabel):
+                        f.write(f"── {item.title}\n")
+                        continue
+                    monitor = item
                     with monitor.lock:
                         history = ''.join(_history_char(v, 'success') for v in monitor.history)
                         latency = f"{monitor.latency:6.1f}" if monitor.latency is not None else "     -"
@@ -850,7 +916,7 @@ class Application:
                 height, width = stdscr.getmaxyx()
 
                 # Adaptive layout: prioritise host rows, then header, then menu, then events
-                num_hosts = len(self.monitors)
+                num_hosts = len(self.entries)
 
                 # Show menu bar only if there is room for menu(1)+blank(1)+header(1)+all hosts
                 show_menu = height >= num_hosts + 3
@@ -925,15 +991,48 @@ class Application:
                 monitor.stop()
 
 
-def main(stdscr):
-    # Get hosts from command line or use defaults
-    hosts = sys.argv[1:] if len(sys.argv) > 1 else []
+def _parse_args():
+    """Parse command-line arguments outside of curses so errors print cleanly."""
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog='ping-bulk',
+        description='Monitor multiple hosts with continuous ping.',
+    )
+    parser.add_argument(
+        '-f', '--file',
+        metavar='FILE',
+        help='hosts file (# comment, ## section header, one host per line)',
+    )
+    parser.add_argument(
+        'hosts',
+        nargs='*',
+        metavar='HOST',
+        help='hosts/IPs to ping',
+    )
+    return parser.parse_args()
 
-    if not hosts:
-        print("Usage: ping-bulk [host ...]")
+
+def main(stdscr):
+    args = _parse_args()
+
+    entries = []
+
+    # Load entries from file first, then append positional hosts
+    if args.file:
+        try:
+            entries.extend(parse_hosts_file(args.file))
+        except OSError as e:
+            print(f"ping-bulk: cannot open '{args.file}': {e}", file=sys.stderr)
+            return
+
+    for host in args.hosts:
+        entries.append(('host', host))
+
+    if not entries:
+        print("Usage: ping-bulk [-f FILE] [HOST ...]", file=sys.stderr)
         return
 
-    app = Application(hosts)
+    app = Application(entries)
     app.run(stdscr)
 
 if __name__ == "__main__":
