@@ -22,6 +22,43 @@ HISTORY_MODES = ['success', 'rtt', 'scaled']
 # ip       — resolve every entry to its IP address
 DNS_MODES = ['off', 'hostname', 'ip']
 
+# Help overlay content — displayed in a popup window, never written to the event log.
+# Each string is padded/truncated to _HELP_INNER_W characters when rendered.
+_HELP_INNER_W = 70
+_HELP_LINES = [
+    "  ping-bulk — keyboard reference                      [q / Esc] close",
+    "─" * _HELP_INNER_W,
+    "  Hotkeys",
+    "  q / Q         quit",
+    "  d / D         cycle DNS mode forward / backward",
+    "  s / S         cycle stats column forward / backward",
+    "  o / O         cycle sort order forward / backward",
+    "  h / H         cycle history mode forward / backward",
+    "  p / P         toggle pause",
+    "  Space          insert 'seen' marker in event log",
+    "  C              clear event log",
+    "  :              open command line",
+    "  ?              show this help",
+    "  ← / →          scroll history back / forward",
+    "  ↑ / ↓          scroll event log up / down",
+    "  PgUp / PgDn    scroll event log by page",
+    "─" * _HELP_INNER_W,
+    "  Commands",
+    "  :q  :quit                quit",
+    "  :dns [off|hostname|ip]   cycle or set DNS display mode",
+    "  :stats [mode]            cycle or set stats column",
+    f"                           modes: {' | '.join(STATS_MODES)}",
+    "  :sort [mode]             cycle or set sort order",
+    "                           modes: none | name | status | latency",
+    "  :history [mode]          cycle or set history display mode",
+    f"                           modes: {' | '.join(HISTORY_MODES)}",
+    "  :pause                   toggle pause on/off",
+    "  :seen                    insert 'seen' marker in event log",
+    "  :clear                   clear event log",
+    "  :log [file|off]          show active log file, set/save log to file, or disable logging",
+    "  :help  or  ?             show this help",
+]
+
 # Stderr substrings that indicate a permanent (non-retryable) ping failure.
 _FATAL_PING_ERRORS = (
     'name or service not known',
@@ -323,6 +360,8 @@ class Application:
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
         self.log_file = log_file  # path to append event log, or None
         self.prompt = None        # None = no prompt; dict = prompt is open (see _open_prompt_*)
+        self.cmd = None           # None = inactive; dict = command mode open (text buffer + cursor)
+        self.help_open = False    # True while the help overlay is visible
         self.running = True
         self.threads = []
 
@@ -474,7 +513,6 @@ class Application:
             (f"[o]rder by {self.sort_by}", False),
             (f"[h]istory:{HISTORY_MODES[self.history_mode]}", False),
             (f"[p]ause {'on' if self.paused else 'off'}", self.paused),
-            ("[w]rite log", False),
             ("[Space]seen", False),
             ("[C]lear log", False),
             ("[q]uit", False),
@@ -983,6 +1021,241 @@ class Application:
         except OSError as e:
             self.add_event("save", f"error: {e}")
 
+    def _draw_cmd(self, stdscr, height, width):
+        """Draw the active command line on the bottom row with a text cursor.
+
+        Renders ':' followed by the typed text, reversed-video style, and
+        positions the terminal cursor at the insertion point.
+        """
+        text = ''.join(self.cmd['chars'])
+        line = (':' + text).ljust(width - 1)[:width - 1]
+        stdscr.addstr(height - 1, 0, line, curses.A_REVERSE)
+        cursor_x = min(1 + self.cmd['cursor'], width - 2)
+        stdscr.move(height - 1, cursor_x)
+
+    def _handle_cmd_key(self, key):
+        """Process one keypress while command mode is active (readline-style editing).
+
+        Supported bindings:
+          Enter          — dispatch the command (if non-empty)
+          Esc            — cancel and close command line
+          Backspace/^H   — delete character before cursor
+          Delete         — delete character at cursor
+          Left / Right   — move cursor one character
+          Home / Ctrl+A  — move cursor to start
+          End  / Ctrl+E  — move cursor to end
+          Ctrl+K         — kill from cursor to end of line
+          Ctrl+U         — kill from start of line to cursor
+          Ctrl+W         — kill word backward (stop at whitespace boundary)
+          printable char — insert at cursor position
+        """
+        c = self.cmd
+        chars = c['chars']
+        cursor = c['cursor']
+
+        if key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+            text = ''.join(chars).strip()
+            self.cmd = None
+            if text:
+                self._dispatch_cmd(text)
+        elif key == 27:  # Escape — cancel
+            self.cmd = None
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            if cursor > 0:
+                del chars[cursor - 1]
+                c['cursor'] -= 1
+        elif key == curses.KEY_DC:  # Delete key
+            if cursor < len(chars):
+                del chars[cursor]
+        elif key == curses.KEY_LEFT:
+            if cursor > 0:
+                c['cursor'] -= 1
+        elif key == curses.KEY_RIGHT:
+            if cursor < len(chars):
+                c['cursor'] += 1
+        elif key in (curses.KEY_HOME, 1):  # Home / Ctrl+A
+            c['cursor'] = 0
+        elif key in (curses.KEY_END, 5):  # End / Ctrl+E
+            c['cursor'] = len(chars)
+        elif key == 11:  # Ctrl+K — kill to end of line
+            del chars[cursor:]
+        elif key == 21:  # Ctrl+U — kill to start of line
+            del chars[:cursor]
+            c['cursor'] = 0
+        elif key == 23:  # Ctrl+W — kill word backward
+            end = cursor
+            while cursor > 0 and chars[cursor - 1] == ' ':
+                cursor -= 1
+            while cursor > 0 and chars[cursor - 1] != ' ':
+                cursor -= 1
+            del chars[cursor:end]
+            c['cursor'] = cursor
+        elif 32 <= key < 127:
+            chars.insert(cursor, chr(key))
+            c['cursor'] += 1
+
+    def _dispatch_cmd(self, text):
+        """Dispatch a command string entered via the ':' command line.
+
+        Parses the first word as the command name (stripping any leading ':')
+        and passes the remainder as arguments.  Supported commands:
+
+          q / quit               — quit the application
+          dns  [off|hostname|ip] — cycle (no arg) or set DNS display mode
+          stats [mode]           — cycle (no arg) or set stats column mode
+          sort  [mode]           — cycle (no arg) or set sort order
+          history/hist [mode]    — cycle (no arg) or set history display mode
+          pause                  — toggle pause
+          seen                   — insert 'seen' marker in event log
+          clear                  — clear event log
+          log [file]             — show active log file; or save/stream log to file
+          help                   — open the help overlay
+
+        Unknown commands are reported to the event log.
+        """
+        parts = text.split(None, 1)
+        cmd  = parts[0].lstrip(':').lower()
+        args = parts[1].strip() if len(parts) > 1 else ''
+
+        if cmd in ('q', 'quit'):
+            self.running = False
+
+        elif cmd == 'dns':
+            if args:
+                modes_lower = [m.lower() for m in DNS_MODES]
+                if args.lower() in modes_lower:
+                    self.dns_mode = modes_lower.index(args.lower())
+                    # Start DNS resolution threads if a resolve mode was activated
+                    if DNS_MODES[self.dns_mode] in ('hostname', 'ip'):
+                        for monitor in self.monitors:
+                            if monitor.resolved_ip is None:
+                                threading.Thread(
+                                    target=monitor.resolve_dns, daemon=True
+                                ).start()
+                else:
+                    self.add_event("cmd",
+                        f"dns: unknown mode '{args}' — choices: {' '.join(DNS_MODES)}")
+            else:
+                self.cycle_dns(1)
+
+        elif cmd == 'stats':
+            if args:
+                modes_lower = [m.lower() for m in STATS_MODES]
+                if args.lower() in modes_lower:
+                    self.stats_mode = modes_lower.index(args.lower())
+                else:
+                    self.add_event("cmd",
+                        f"stats: unknown mode '{args}' — choices: {' '.join(STATS_MODES)}")
+            else:
+                self.cycle_stats(1)
+
+        elif cmd == 'sort':
+            sorts = ['none', 'name', 'status', 'latency']
+            if args:
+                if args.lower() in sorts:
+                    self.sort_by = args.lower()
+                else:
+                    self.add_event("cmd",
+                        f"sort: unknown mode '{args}' — choices: {' '.join(sorts)}")
+            else:
+                self.cycle_sort(1)
+
+        elif cmd in ('history', 'hist'):
+            if args:
+                modes_lower = [m.lower() for m in HISTORY_MODES]
+                if args.lower() in modes_lower:
+                    self.history_mode = modes_lower.index(args.lower())
+                else:
+                    self.add_event("cmd",
+                        f"history: unknown mode '{args}' — choices: {' '.join(HISTORY_MODES)}")
+            else:
+                self.cycle_history_mode(1)
+
+        elif cmd == 'pause':
+            self.paused = not self.paused
+
+        elif cmd == 'seen':
+            self.mark_seen()
+
+        elif cmd == 'clear':
+            self.events.clear()
+            self.log_offset = 0
+
+        elif cmd == 'log':
+            if args:
+                if args.lower() == 'off':
+                    # Disable logging — stop appending to the current log file.
+                    if self.log_file:
+                        self.add_event("log", f"logging stopped (was: {self.log_file})")
+                        self.log_file = None
+                    else:
+                        self.add_event("log", "logging is already off")
+                elif os.path.exists(args):
+                    # File already exists — skip filename entry and go straight to
+                    # the truncate/append confirmation step.
+                    self.prompt = {'type': 'save_confirm', 'filename': args, 'chars': []}
+                else:
+                    # New file — activate streaming immediately without any prompt.
+                    self.save_to_file(args)
+                    self.log_file = args
+            else:
+                # No argument — report the currently active log file (or lack thereof).
+                if self.log_file:
+                    self.add_event("log", f"active log file: {self.log_file}")
+                else:
+                    self.add_event("log", "no log file active")
+
+        elif cmd == 'help':
+            self._cmd_help()
+
+        else:
+            self.add_event("cmd",
+                f"unknown command: {cmd}" + (f" {args}" if args else "")
+                + "  (try :help)")
+
+    def _cmd_help(self):
+        """Open the help overlay (sets self.help_open = True).
+
+        The overlay is drawn by _draw_help_overlay() and is never written to
+        the event log or the log file.
+        """
+        self.help_open = True
+
+    def _draw_help_overlay(self, stdscr, height, width):
+        """Draw the help overlay as a centered bordered popup.
+
+        Uses _HELP_LINES as content; each line is padded / truncated to
+        _HELP_INNER_W characters.  The box is drawn with box-drawing characters
+        and rendered in reverse-video so it floats visually above the main UI.
+        The overlay is closed by pressing q, Q, or Esc (handled in run()).
+        """
+        box_w = _HELP_INNER_W + 2   # inner width + two border chars
+        box_h = len(_HELP_LINES) + 2  # content rows + top and bottom border
+
+        col0 = max(0, (width - box_w) // 2)
+        row0 = max(0, (height - box_h) // 2)
+
+        attr = curses.A_REVERSE
+
+        # Top border
+        if row0 < height:
+            stdscr.addstr(row0, col0,
+                          ('┌' + '─' * _HELP_INNER_W + '┐')[:width - col0], attr)
+
+        # Content rows
+        for i, line in enumerate(_HELP_LINES):
+            r = row0 + 1 + i
+            if r >= height:
+                break
+            padded = line.ljust(_HELP_INNER_W)[:_HELP_INNER_W]
+            stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
+
+        # Bottom border
+        r = row0 + 1 + len(_HELP_LINES)
+        if r < height:
+            stdscr.addstr(r, col0,
+                          ('└' + '─' * _HELP_INNER_W + '┘')[:width - col0], attr)
+
     def run(self, stdscr):
         """Main application loop"""
         # Initialize curses
@@ -1032,16 +1305,33 @@ class Application:
                 if show_events:
                     self.draw_events(stdscr, events_start, height, width)
 
-                if self.prompt is not None:
+                if self.cmd is not None:
+                    self._draw_cmd(stdscr, height, width)
+                    curses.curs_set(1)
+                elif self.prompt is not None:
                     self._draw_prompt(stdscr, height, width)
                     curses.curs_set(1)
                 else:
+                    curses.curs_set(0)
+
+                # Help overlay drawn last so it floats above everything else
+                if self.help_open:
+                    self._draw_help_overlay(stdscr, height, width)
                     curses.curs_set(0)
 
                 stdscr.refresh()
 
                 # Handle input
                 key = stdscr.getch()
+                if self.help_open:
+                    # Only q, Q, or Esc close the overlay; all other keys are swallowed
+                    if key in (ord('q'), ord('Q'), 27):
+                        self.help_open = False
+                    continue
+                if self.cmd is not None:
+                    if key != -1:
+                        self._handle_cmd_key(key)
+                    continue
                 if self.prompt is not None:
                     if key != -1:
                         self._handle_prompt_key(key)
@@ -1067,12 +1357,14 @@ class Application:
                     self.cycle_history_mode(1)
                 elif key == ord('H'):
                     self.cycle_history_mode(-1)
-                elif key == ord('w') or key == ord('W'):
-                    self._open_prompt_save()
                 elif key == ord(' '):
                     self.mark_seen()
                 elif key == ord('C'):
                     self._open_prompt_clear()
+                elif key == ord(':'):
+                    self.cmd = {'chars': [], 'cursor': 0}
+                elif key == ord('?'):
+                    self._cmd_help()
                 # History scrolling (left/right arrows)
                 elif key == curses.KEY_LEFT:
                     self.scroll_history(1)
