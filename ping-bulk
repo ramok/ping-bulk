@@ -2,6 +2,7 @@
 import curses
 import math
 import os
+import shlex
 import subprocess
 import threading
 import time
@@ -57,6 +58,7 @@ _HELP_LINES = [
     "  :clear                   clear event log",
     "  :log [file|off]          show active log file, set/save log to file, or disable logging",
     "  :hosts <ip> <hostname>   static DNS override (like /etc/hosts)",
+    "  :ssh [opts] <dest> <host>   remote ping over SSH (BatchMode, no password)",
     "  :help  or  ?             show this help",
 ]
 
@@ -67,6 +69,16 @@ _FATAL_PING_ERRORS = (
     'operation not permitted',
     'network is unreachable',
     'no such device',
+)
+
+# Stderr substrings that indicate a permanent (non-retryable) SSH failure.
+# Network-level errors (no route, refused, timed out) are NOT listed here
+# because they may be transient and should be retried.
+_FATAL_SSH_ERRORS = (
+    'permission denied',
+    'host key verification failed',
+    'too many authentication failures',
+    'no supported authentication methods available',
 )
 
 
@@ -151,6 +163,15 @@ class PingMonitor:
         except Exception:
             self.resolved_hostname = None
 
+    def _build_ping_cmd(self):
+        """Return the command list used to launch the ping subprocess.
+
+        Subclasses override this to run ping over a different transport
+        (e.g. SSH).  The default implementation runs the local system ping
+        with '-O' (report unanswered probes) and '-D' (Unix-timestamp prefix).
+        """
+        return ['ping', '-O', '-D', self.host]
+
     def ping(self):
         """Continuously ping the host using a single persistent subprocess.
 
@@ -169,7 +190,7 @@ class PingMonitor:
         while self.running:
             try:
                 self._proc = subprocess.Popen(
-                    ['ping', '-O', '-D', self.host],
+                    self._build_ping_cmd(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -317,6 +338,48 @@ class PingMonitor:
         return self.host  # 'off'
 
 
+class SshPingMonitor(PingMonitor):
+    """A PingMonitor that runs ping remotely over an SSH connection.
+
+    Connects to the remote host using 'ssh -o BatchMode=yes' (no interactive
+    password prompts) and executes 'ping -O -D <ping_host>' on the remote side.
+
+    Constructor arguments:
+      ssh_args   — list of SSH argument tokens (everything after 'ssh'),
+                   e.g. ['-J', 'bastion', 'user@remote'] or ['user@remote'].
+                   The SSH destination (last non-flag token) is extracted
+                   automatically.
+      ping_host  — the host that the remote ping will target.
+      label      — display name shown in the UI (e.g. 'user@remote').
+
+    The remote ping command is:
+      ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>
+
+    Fatal SSH errors (permission denied, host-key mismatch, …) stop the
+    monitor permanently.  Network-level failures (connection refused, no
+    route, timeout) are transient and trigger the normal retry/backoff loop.
+    """
+
+    def __init__(self, ssh_args, ping_host='localhost', label=None):
+        # Use label (the SSH destination) as the display name; fall back to ping_host.
+        display = label or ping_host
+        super().__init__(display)
+        self._ssh_args = ssh_args      # e.g. ['-J', 'bastion', 'user@remote']
+        self._ping_host = ping_host    # host that the remote ping targets
+
+    def _build_ping_cmd(self):
+        """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
+        return ['ssh', '-o', 'BatchMode=yes'] + self._ssh_args + [
+            'ping', '-O', '-D', self._ping_host
+        ]
+
+    @staticmethod
+    def _is_fatal_error(stderr_text):
+        """Return True if stderr_text contains a known non-retryable SSH or ping error."""
+        text = stderr_text.lower()
+        return any(pattern in text for pattern in _FATAL_SSH_ERRORS + _FATAL_PING_ERRORS)
+
+
 class SectionLabel:
     """A non-pingable display row for ## section headers from a hosts file."""
     def __init__(self, title):
@@ -395,6 +458,7 @@ class Application:
         self.help_open = False    # True while the help overlay is visible
         self.running = True
         self.threads = []
+        self._monitoring_started = False  # set True once start_monitoring() is called
 
         # First pass: register hosts and section labels in order
         for kind, value in entries:
@@ -430,6 +494,7 @@ class Application:
 
     def start_monitoring(self):
         """Start all ping threads"""
+        self._monitoring_started = True
         for monitor in self.monitors:
             thread = threading.Thread(target=monitor.ping, daemon=True)
             thread.start()
@@ -1290,6 +1355,42 @@ class Application:
                     f"hosts: first argument must be an IP address, got '{parts[0]}'")
             else:
                 self._apply_hosts_entry(parts[0], parts[1])
+
+        elif cmd == 'ssh':
+            # :ssh [ssh-opts] <dest> <ping-host>
+            # All tokens except the last form the SSH arguments (including the destination).
+            # The last token is the host that the remote ping will target.
+            # At least two tokens are required: the SSH destination and the ping target.
+            # Examples:
+            #   :ssh user@host 8.8.8.8          → ssh user@host, ping 8.8.8.8
+            #   :ssh -J bastion user@host 8.8.8.8
+            if not args:
+                self.add_event("cmd",
+                    "ssh: usage: :ssh [opts] <dest> <ping-host>")
+            else:
+                try:
+                    tokens = shlex.split(args)
+                except ValueError as e:
+                    self.add_event("cmd", f"ssh: parse error: {e}")
+                else:
+                    if len(tokens) < 2:
+                        self.add_event("cmd",
+                            "ssh: usage: :ssh [opts] <dest> <ping-host>")
+                    else:
+                        # Last token is the ping target; everything else is SSH args
+                        ping_host = tokens[-1]
+                        ssh_args = tokens[:-1]
+                        ssh_dest = ssh_args[-1]  # last SSH arg is the destination
+                        label = f"{ssh_dest}→{ping_host}"
+                        monitor = SshPingMonitor(ssh_args, ping_host, label=label)
+                        self.monitors.append(monitor)
+                        self.entries.append(monitor)
+                        if self._monitoring_started:
+                            thread = threading.Thread(
+                                target=monitor.ping, daemon=True
+                            )
+                            thread.start()
+                            self.threads.append(thread)
 
         else:
             self.add_event("cmd",
