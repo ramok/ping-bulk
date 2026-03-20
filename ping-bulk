@@ -56,6 +56,7 @@ _HELP_LINES = [
     "  :seen                    insert 'seen' marker in event log",
     "  :clear                   clear event log",
     "  :log [file|off]          show active log file, set/save log to file, or disable logging",
+    "  :hosts <ip> <hostname>   static DNS override (like /etc/hosts)",
     "  :help  or  ?             show this help",
 ]
 
@@ -67,6 +68,26 @@ _FATAL_PING_ERRORS = (
     'network is unreachable',
     'no such device',
 )
+
+
+def _is_ip(s):
+    """Return True if *s* looks like an IPv4 or IPv6 address (not a hostname).
+
+    IPv4: four dot-separated decimal octets (0-255).
+    IPv6: any string containing a colon (covers full, compressed, and
+          link-local forms without requiring a full parser).
+    """
+    if ':' in s:
+        return True  # IPv6
+    parts = s.split('.')
+    if len(parts) != 4:
+        return False
+    for p in parts:
+        if not p.isdigit():
+            return False
+        if not (0 <= int(p) <= 255):
+            return False
+    return True
 
 
 def _history_char(val, mode):
@@ -359,6 +380,7 @@ class Application:
         """
         self.entries = []   # ordered display list: PingMonitor | SectionLabel
         self.monitors = []  # pure PingMonitor list for stats, threading, DNS
+        self.hosts_map = {}  # static DNS overrides: ip→(ip, hostname) and hostname→(ip, hostname)
         self.events = deque(maxlen=50)
         self.paused = False
         self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
@@ -1118,6 +1140,32 @@ class Application:
             chars.insert(cursor, chr(key))
             c['cursor'] += 1
 
+    def _apply_hosts_entry(self, ip, hostname):
+        """Apply a static DNS override pair to any matching monitors.
+
+        Stores the mapping in self.hosts_map (keyed by both ip and hostname so
+        either can be used as monitor.host) and sets resolved_ip /
+        resolved_hostname directly on any PingMonitor whose host matches either
+        the ip or the hostname.
+
+        This is called at startup (via _dispatch_cmd from hosts-file :hosts
+        lines) and interactively.  Silent on success; reports a warning to the
+        event log only when no monitor matches.
+        """
+        self.hosts_map[ip] = (ip, hostname)
+        self.hosts_map[hostname] = (ip, hostname)
+
+        matched = 0
+        for monitor in self.monitors:
+            if monitor.host == ip or monitor.host == hostname:
+                monitor.resolved_ip = ip
+                monitor.resolved_hostname = hostname
+                matched += 1
+
+        if matched == 0:
+            self.add_event("hosts",
+                f"no monitor matched '{ip}' / '{hostname}' — mapping stored for future use")
+
     def _dispatch_cmd(self, text):
         """Dispatch a command string entered via the ':' command line.
 
@@ -1231,6 +1279,17 @@ class Application:
 
         elif cmd == 'help':
             self._cmd_help()
+
+        elif cmd == 'hosts':
+            # :hosts IP hostname — static DNS override (like /etc/hosts)
+            parts = args.split()
+            if len(parts) != 2:
+                self.add_event("cmd", "hosts: usage: :hosts <ip> <hostname>")
+            elif not _is_ip(parts[0]):
+                self.add_event("cmd",
+                    f"hosts: first argument must be an IP address, got '{parts[0]}'")
+            else:
+                self._apply_hosts_entry(parts[0], parts[1])
 
         else:
             self.add_event("cmd",
