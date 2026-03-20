@@ -460,7 +460,11 @@ class Application:
         self.threads = []
         self._monitoring_started = False  # set True once start_monitoring() is called
 
-        # First pass: register hosts and section labels in order
+        # First pass: register hosts, section labels, and structural commands in order.
+        # Structural commands (:ssh) create new display entries and must be processed
+        # inline to preserve the correct display order.  Configuration-only commands
+        # (:dns, :stats, :log, …) are deferred to the second pass.
+        _STRUCTURAL_CMDS = {'ssh'}
         for kind, value in entries:
             if kind == 'host':
                 m = PingMonitor(value)
@@ -468,12 +472,18 @@ class Application:
                 self.entries.append(m)
             elif kind == 'section':
                 self.entries.append(SectionLabel(value))
-            # 'cmd' entries are deferred to the second pass
+            elif kind == 'cmd':
+                cmd_word = value.split(None, 1)[0].lstrip(':').lower()
+                if cmd_word in _STRUCTURAL_CMDS:
+                    self._dispatch_cmd(value)
 
-        # Second pass: apply startup commands (e.g. :dns, :stats, :log from the hosts file)
+        # Second pass: apply configuration commands (e.g. :dns, :stats, :log from the
+        # hosts file).  Structural commands are skipped here — already handled above.
         for kind, value in entries:
             if kind == 'cmd':
-                self._dispatch_cmd(value)
+                cmd_word = value.split(None, 1)[0].lstrip(':').lower()
+                if cmd_word not in _STRUCTURAL_CMDS:
+                    self._dispatch_cmd(value)
 
     def add_event(self, host, message):
         """Add an event to the in-memory log and, if a log file is configured,
