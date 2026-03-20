@@ -437,9 +437,14 @@ class Application:
         self.monitors — PingMonitor instances only (used for stats/threading).
         self.entries  — ordered display list mixing PingMonitor and SectionLabel.
 
-        ('cmd', text) entries are applied as startup commands after all hosts
-        and section labels have been registered, so they may reference any
-        monitor that was defined earlier in the file.
+        All entry types are processed in a single pass in document order:
+          • 'host'    — creates a PingMonitor; any static DNS override stored in
+                        hosts_map by an earlier :hosts command is applied immediately.
+          • 'section' — creates a SectionLabel display row.
+          • 'cmd'     — dispatched inline via _dispatch_cmd() so that structural
+                        commands (:ssh) appear at their correct position in the
+                        display list, and configuration commands (:dns, :hosts, …)
+                        take effect at the point they are encountered in the file.
         """
         self.entries = []   # ordered display list: PingMonitor | SectionLabel
         self.monitors = []  # pure PingMonitor list for stats, threading, DNS
@@ -460,30 +465,21 @@ class Application:
         self.threads = []
         self._monitoring_started = False  # set True once start_monitoring() is called
 
-        # First pass: register hosts, section labels, and structural commands in order.
-        # Structural commands (:ssh) create new display entries and must be processed
-        # inline to preserve the correct display order.  Configuration-only commands
-        # (:dns, :stats, :log, …) are deferred to the second pass.
-        _STRUCTURAL_CMDS = {'ssh'}
         for kind, value in entries:
             if kind == 'host':
                 m = PingMonitor(value)
+                # Apply any :hosts static DNS override that was processed earlier
+                # in the same file (hosts_map is populated by _apply_hosts_entry).
+                if value in self.hosts_map:
+                    ip, hostname = self.hosts_map[value]
+                    m.resolved_ip = ip
+                    m.resolved_hostname = hostname
                 self.monitors.append(m)
                 self.entries.append(m)
             elif kind == 'section':
                 self.entries.append(SectionLabel(value))
             elif kind == 'cmd':
-                cmd_word = value.split(None, 1)[0].lstrip(':').lower()
-                if cmd_word in _STRUCTURAL_CMDS:
-                    self._dispatch_cmd(value)
-
-        # Second pass: apply configuration commands (e.g. :dns, :stats, :log from the
-        # hosts file).  Structural commands are skipped here — already handled above.
-        for kind, value in entries:
-            if kind == 'cmd':
-                cmd_word = value.split(None, 1)[0].lstrip(':').lower()
-                if cmd_word not in _STRUCTURAL_CMDS:
-                    self._dispatch_cmd(value)
+                self._dispatch_cmd(value)
 
     def add_event(self, host, message):
         """Add an event to the in-memory log and, if a log file is configured,
@@ -1237,7 +1233,9 @@ class Application:
                 monitor.resolved_hostname = hostname
                 matched += 1
 
-        if matched == 0:
+        if matched == 0 and self._monitoring_started:
+            # Only warn when running interactively — during __init__ the host entry
+            # may simply appear later in the file and will pick up the mapping then.
             self.add_event("hosts",
                 f"no monitor matched '{ip}' / '{hostname}' — mapping stored for future use")
 
