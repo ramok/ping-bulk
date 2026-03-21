@@ -191,6 +191,7 @@ class PingMonitor:
             try:
                 self._proc = subprocess.Popen(
                     self._build_ping_cmd(),
+                    stdin=subprocess.DEVNULL,   # never let the child read the terminal
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
