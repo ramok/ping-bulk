@@ -57,7 +57,7 @@ _HELP_LINES = [
     "  :seen                    insert 'seen' marker in event log",
     "  :clear                   clear event log",
     "  :log [file|off]          show active log file, set/save log to file, or disable logging",
-    "  :hosts <ip> <hostname>   static DNS override (like /etc/hosts)",
+    "  :resolv <ip> <hostname>  static name→IP mapping (overrides DNS for ping and SSH)",
     "  :ssh [opts] <dest> <host>   remote ping over SSH (BatchMode, no password)",
     "  :help  or  ?             show this help",
 ]
@@ -140,6 +140,7 @@ class PingMonitor:
         self.error = None          # str when a fatal process-level error occurred, else None
         self.error_logged = False  # True once the error has been added to the event log
         self._proc = None          # active Popen handle for the persistent ping subprocess
+        self.resolv_static = False  # True when a :resolv static mapping overrides DNS
 
     def resolve_dns(self):
         """Resolve the host to both its IP address and its hostname.
@@ -169,8 +170,12 @@ class PingMonitor:
         Subclasses override this to run ping over a different transport
         (e.g. SSH).  The default implementation runs the local system ping
         with '-O' (report unanswered probes) and '-D' (Unix-timestamp prefix).
+
+        When resolv_static is True a :resolv mapping has been applied, so ping
+        targets the resolved IP directly instead of the original hostname.
         """
-        return ['ping', '-O', '-D', self.host]
+        target = self.resolved_ip if (self.resolv_static and self.resolved_ip) else self.host
+        return ['ping', '-O', '-D', target]
 
     def ping(self):
         """Continuously ping the host using a single persistent subprocess.
@@ -440,11 +445,11 @@ class Application:
 
         All entry types are processed in a single pass in document order:
           • 'host'    — creates a PingMonitor; any static DNS override stored in
-                        hosts_map by an earlier :hosts command is applied immediately.
+                        hosts_map by an earlier :resolv command is applied immediately.
           • 'section' — creates a SectionLabel display row.
           • 'cmd'     — dispatched inline via _dispatch_cmd() so that structural
                         commands (:ssh) appear at their correct position in the
-                        display list, and configuration commands (:dns, :hosts, …)
+                        display list, and configuration commands (:dns, :resolv, …)
                         take effect at the point they are encountered in the file.
         """
         self.entries = []   # ordered display list: PingMonitor | SectionLabel
@@ -469,12 +474,13 @@ class Application:
         for kind, value in entries:
             if kind == 'host':
                 m = PingMonitor(value)
-                # Apply any :hosts static DNS override that was processed earlier
+                # Apply any :resolv static DNS override that was processed earlier
                 # in the same file (hosts_map is populated by _apply_hosts_entry).
                 if value in self.hosts_map:
                     ip, hostname = self.hosts_map[value]
                     m.resolved_ip = ip
                     m.resolved_hostname = hostname
+                    m.resolv_static = True
                 self.monitors.append(m)
                 self.entries.append(m)
             elif kind == 'section':
@@ -1219,9 +1225,10 @@ class Application:
         Stores the mapping in self.hosts_map (keyed by both ip and hostname so
         either can be used as monitor.host) and sets resolved_ip /
         resolved_hostname directly on any PingMonitor whose host matches either
-        the ip or the hostname.
+        the ip or the hostname.  Also sets resolv_static = True so that the
+        ping subprocess targets the IP address directly instead of the hostname.
 
-        This is called at startup (via _dispatch_cmd from hosts-file :hosts
+        This is called at startup (via _dispatch_cmd from hosts-file :resolv
         lines) and interactively.  Silent on success; reports a warning to the
         event log only when no monitor matches.
         """
@@ -1233,12 +1240,13 @@ class Application:
             if monitor.host == ip or monitor.host == hostname:
                 monitor.resolved_ip = ip
                 monitor.resolved_hostname = hostname
+                monitor.resolv_static = True
                 matched += 1
 
         if matched == 0 and self._monitoring_started:
             # Only warn when running interactively — during __init__ the host entry
             # may simply appear later in the file and will pick up the mapping then.
-            self.add_event("hosts",
+            self.add_event("resolv",
                 f"no monitor matched '{ip}' / '{hostname}' — mapping stored for future use")
 
     def _dispatch_cmd(self, text):
@@ -1355,14 +1363,14 @@ class Application:
         elif cmd == 'help':
             self._cmd_help()
 
-        elif cmd == 'hosts':
-            # :hosts IP hostname — static DNS override (like /etc/hosts)
+        elif cmd == 'resolv':
+            # :resolv IP hostname — static DNS override (like /etc/hosts)
             parts = args.split()
             if len(parts) != 2:
-                self.add_event("cmd", "hosts: usage: :hosts <ip> <hostname>")
+                self.add_event("cmd", "resolv: usage: :resolv <ip> <hostname>")
             elif not _is_ip(parts[0]):
                 self.add_event("cmd",
-                    f"hosts: first argument must be an IP address, got '{parts[0]}'")
+                    f"resolv: first argument must be an IP address, got '{parts[0]}'")
             else:
                 self._apply_hosts_entry(parts[0], parts[1])
 
@@ -1391,8 +1399,12 @@ class Application:
                         ping_host = tokens[-1]
                         ssh_args = tokens[:-1]
                         ssh_dest = ssh_args[-1]  # last SSH arg is the destination
+                        # Apply a static :resolv mapping if one exists for ping_host.
+                        # The label always shows the original name so the user can
+                        # tell which host they asked for; the subprocess targets the IP.
+                        actual_ping_host = self.hosts_map[ping_host][0] if ping_host in self.hosts_map else ping_host
                         label = f"{ssh_dest}→{ping_host}"
-                        monitor = SshPingMonitor(ssh_args, ping_host, label=label)
+                        monitor = SshPingMonitor(ssh_args, actual_ping_host, label=label)
                         self.monitors.append(monitor)
                         self.entries.append(monitor)
                         if self._monitoring_started:
