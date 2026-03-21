@@ -591,10 +591,11 @@ class Application:
     def mark_seen(self):
         """Append a visual 'seen' separator line to the event log (and log file if set).
 
-        The marker is a plain divider with no timestamp or host column so it
-        stands out clearly from regular event lines.
+        The marker includes the current timestamp so the user can tell exactly
+        when they last reviewed the log.
         """
-        line = "══════════════════════════ seen ══════════════════════════"
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+        line = f"{timestamp}   ══════════════════ seen ══════════════════"
         self.events.append(line)
         if self.log_file:
             try:
