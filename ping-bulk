@@ -56,7 +56,8 @@ _HELP_LINES = [
     "  :pause                   toggle pause on/off",
     "  :seen                    insert 'seen' marker in event log",
     "  :clear                   clear event log",
-    "  :log [file|off]          show active log file, set/save log to file, or disable logging",
+      "  :log [file|off]          show active log file, set/save log to file, or disable logging",
+        "  :saveconfig              save current settings to config file",
     "  :resolv <ip-pat> <host>  static name→IP mapping (overrides DNS for ping and SSH)",
     "                           ip-pat may use brace expansion; \\N in host = brace group N",
     "  :ssh [opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
@@ -321,6 +322,17 @@ def _apply_backref(template, captures):
         return captures[idx - 1] if 1 <= idx <= len(captures) else m.group(0)
 
     return re.sub(r'\\(\d)', _sub, template)
+
+
+def _config_path():
+    """Return the XDG-compliant config file path for ping-bulk.
+
+    Respects ``$XDG_CONFIG_HOME`` when set; falls back to ``~/.config``.
+    The returned path is ``<base>/ping-bulk/config``.
+    """
+    xdg = os.environ.get('XDG_CONFIG_HOME', '')
+    base = xdg if xdg else os.path.join(os.path.expanduser('~'), '.config')
+    return os.path.join(base, 'ping-bulk', 'config')
 
 
 def _history_char(val, mode):
@@ -713,7 +725,12 @@ class Application:
         self.history_mode = 0  # index into HISTORY_MODES
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
-        self.log_file = log_file  # path to append event log, or None
+        self.log_file = None        # path to append event log, or None
+        self._load_config()         # apply config-file settings (before hosts-file commands)
+        if log_file is not None:    # command-line -l/--log-file always overrides config
+            self.log_file = log_file
+        if not os.path.exists(_config_path()):
+            self._create_default_config()
         self.prompt = None        # None = no prompt; dict = prompt is open (see _open_prompt_*)
         self.cmd = None           # None = inactive; dict = command mode open (text buffer + cursor)
         self.help_open = False    # True while the help overlay is visible
@@ -757,6 +774,95 @@ class Application:
                     f.write(line + "\n")
             except OSError:
                 pass  # silently ignore file write errors to avoid recursive events
+
+    def _load_config(self):
+        """Load settings from the XDG config file, silently ignoring a missing file.
+
+        Recognised keys (case-insensitive; unknown keys are silently skipped):
+          dns      — one of DNS_MODES ('off', 'hostname', 'ip')
+          stats    — one of STATS_MODES ('off', 'Loss%', 'Avg', …, 'All')
+          sort     — one of 'none', 'name', 'status', 'latency'
+          history  — one of HISTORY_MODES ('success', 'rtt', 'scaled')
+          log      — file path to stream events to; empty value disables logging
+
+        Lines starting with '#' are comments; lines without '=' are ignored.
+        """
+        path = _config_path()
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if '=' not in line:
+                        continue
+                    key, _, val = line.partition('=')
+                    key = key.strip().lower()
+                    val = val.strip()
+                    if key == 'dns':
+                        modes_lower = [m.lower() for m in DNS_MODES]
+                        if val.lower() in modes_lower:
+                            self.dns_mode = modes_lower.index(val.lower())
+                    elif key == 'stats':
+                        modes_lower = [m.lower() for m in STATS_MODES]
+                        if val.lower() in modes_lower:
+                            self.stats_mode = modes_lower.index(val.lower())
+                    elif key == 'sort':
+                        sorts = ['none', 'name', 'status', 'latency']
+                        if val.lower() in sorts:
+                            self.sort_by = val.lower()
+                    elif key == 'history':
+                        modes_lower = [m.lower() for m in HISTORY_MODES]
+                        if val.lower() in modes_lower:
+                            self.history_mode = modes_lower.index(val.lower())
+                    elif key == 'log':
+                        self.log_file = val if val else None
+        except OSError:
+            pass  # missing or unreadable config file is not an error
+
+    def _save_config(self):
+        """Write current settings to the XDG config file, creating dirs as needed.
+
+        Returns True on success, False on failure (error is also logged to events).
+        """
+        path = _config_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                f.write("# ping-bulk configuration\n")
+                f.write(f"dns = {DNS_MODES[self.dns_mode]}\n")
+                f.write(f"stats = {STATS_MODES[self.stats_mode]}\n")
+                f.write(f"sort = {self.sort_by}\n")
+                f.write(f"history = {HISTORY_MODES[self.history_mode]}\n")
+                if self.log_file:
+                    f.write(f"log = {self.log_file}\n")
+                else:
+                    f.write("# log =\n")
+        except OSError as e:
+            self.add_event("config", f"error saving config: {e}")
+            return False
+        return True
+
+    def _create_default_config(self):
+        """Create a config file with commented defaults on first run.
+
+        Silently ignores errors (e.g. read-only filesystem or no home directory)
+        so a failed write never prevents the app from starting.
+        """
+        path = _config_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                f.write("# ping-bulk configuration\n")
+                f.write("# Generated on first run — edit as needed.\n")
+                f.write("#\n")
+                f.write(f"# dns = off          # choices: {' | '.join(DNS_MODES)}\n")
+                f.write(f"# stats = off        # choices: {' | '.join(STATS_MODES)}\n")
+                f.write( "# sort = none        # choices: none | name | status | latency\n")
+                f.write(f"# history = success  # choices: {' | '.join(HISTORY_MODES)}\n")
+                f.write( "# log =              # path to stream event log; leave blank to disable\n")
+        except OSError:
+            pass  # silently ignore — e.g. read-only filesystem or missing home directory
 
     def start_monitoring(self):
         """Start all ping threads"""
@@ -1630,6 +1736,10 @@ class Application:
 
         elif cmd == 'help':
             self._cmd_help()
+
+        elif cmd == 'saveconfig':
+            if self._save_config():
+                self.add_event("config", f"settings saved to {_config_path()}")
 
         elif cmd == 'resolv':
             # :resolv <ip-pattern> <hostname-template> — static DNS override.

@@ -5,22 +5,22 @@ on the rendered pane content.
 
 Geometry recap
 --------------
-_HELP_LINES has 46 lines; _HELP_INNER_W = 70; box_w = 72.
+_HELP_LINES has 47 lines; _HELP_INNER_W = 70; box_w = 72.
 
   height | box_h_available | visible_count | max_scroll | indicator at scroll=0
   -------+-----------------+---------------+------------+----------------------
-    40   |      40         |      38       |     8      |  ↑↓ 1-38/46
-    50   |      48         |      46       |     0      |  none
-    15   |      15         |      13       |    33      |  ↑↓ 1-13/46
+    40   |      40         |      38       |     9      |  ↑↓ 1-38/47
+    50   |      49         |      47       |     0      |  none
+    15   |      15         |      13       |    34      |  ↑↓ 1-13/47
 
 Scroll sequences at 120×40:
-  scroll=0 → Down → scroll=1: '2-39/46'
-  scroll=0 → NPage (+10) → clamped to 8: '9-46/46'
-  scroll=8 → Up → scroll=7: '8-45/46'
-  scroll=8 → PPage (-10) → clamped to 0: '1-38/46'
+  scroll=0 → Down → scroll=1: '2-39/47'
+  scroll=0 → NPage (+10) → clamped to 9: '10-47/47'
+  scroll=9 → Up → scroll=8: '9-46/47'
+  scroll=9 → PPage (-10) → clamped to 0: '1-38/47'
 
 At 120×15:
-  scroll=0 → NPage (+10) → scroll=10 (< max_scroll=33, no clamp): '11-23/46'
+  scroll=0 → NPage (+10) → scroll=10 (< max_scroll=34, no clamp): '11-23/47'
 """
 
 import pytest
@@ -79,48 +79,48 @@ class TestOpenClose:
 # ===========================================================================
 
 class TestScrollIndicatorAt40Rows:
-    """At 120×40 the overlay cannot show all 46 lines → scroll indicator present."""
+    """At 120×40 the overlay cannot show all 47 lines → scroll indicator present."""
 
     def test_indicator_present_at_open(self, tmux_app_40):
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
 
     def test_indicator_shows_initial_range(self, tmux_app_40):
-        """Indicator at scroll=0: '↑↓ 1-38/46'."""
+        """Indicator at scroll=0: '↑↓ 1-38/47'."""
         tmux_app_40.send_keys('?')
-        tmux_app_40.wait_for('1-38/46')
+        tmux_app_40.wait_for('1-38/47')
 
     def test_scroll_down_one_line(self, tmux_app_40):
-        """Pressing ↓ once advances to scroll=1: '↑↓ 2-39/46'."""
+        """Pressing ↓ once advances to scroll=1: '↑↓ 2-39/47'."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
         tmux_app_40.send_keys('Down')
-        tmux_app_40.wait_for('2-39/46')
+        tmux_app_40.wait_for('2-39/47')
 
     def test_npage_clamps_to_max_scroll(self, tmux_app_40):
-        """NPage adds 10 but max_scroll=8, so it clamps: '↑↓ 9-46/46'."""
+        """NPage adds 10 but max_scroll=9, so it clamps: '↑↓ 10-47/47'."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
         tmux_app_40.send_keys('NPage')
-        tmux_app_40.wait_for('9-46/46')
+        tmux_app_40.wait_for('10-47/47')
 
     def test_scroll_up_from_bottom(self, tmux_app_40):
-        """After clamping to max_scroll=8, ↑ gives scroll=7: '↑↓ 8-45/46'."""
+        """After clamping to max_scroll=9, ↑ gives scroll=8: '↑↓ 9-46/47'."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
-        tmux_app_40.send_keys('NPage')   # → clamped to 8
-        tmux_app_40.wait_for('9-46/46')
+        tmux_app_40.send_keys('NPage')   # → clamped to 9
+        tmux_app_40.wait_for('10-47/47')
         tmux_app_40.send_keys('Up')
-        tmux_app_40.wait_for('8-45/46')
+        tmux_app_40.wait_for('9-46/47')
 
     def test_ppage_from_bottom_returns_to_top(self, tmux_app_40):
-        """PPage from scroll=8 subtracts 10, clamped to 0: '↑↓ 1-38/46'."""
+        """PPage from scroll=9 subtracts 10, clamped to 0: '↑↓ 1-38/47'."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
-        tmux_app_40.send_keys('NPage')   # → clamped to 8
-        tmux_app_40.wait_for('9-46/46')
-        tmux_app_40.send_keys('PPage')   # → 8-10 = -2, clamped to 0
-        tmux_app_40.wait_for('1-38/46')
+        tmux_app_40.send_keys('NPage')   # → clamped to 9
+        tmux_app_40.wait_for('10-47/47')
+        tmux_app_40.send_keys('PPage')   # → 9-10 = -1, clamped to 0
+        tmux_app_40.wait_for('1-38/47')
 
 
 # ===========================================================================
@@ -128,7 +128,7 @@ class TestScrollIndicatorAt40Rows:
 # ===========================================================================
 
 class TestNoIndicatorAt50Rows:
-    """At 120×50 all 46 lines fit → no scroll indicator in the border."""
+    """At 120×50 all 47 lines fit → no scroll indicator in the border."""
 
     def test_no_indicator_at_open(self, tmux_app_50):
         tmux_app_50.send_keys('?')
@@ -150,23 +150,23 @@ class TestNoIndicatorAt50Rows:
 # ===========================================================================
 
 class TestScrollIndicatorAt15Rows:
-    """At 120×15 only 13 lines fit → large scroll range (max_scroll=33)."""
+    """At 120×15 only 13 lines fit → large scroll range (max_scroll=34)."""
 
     def test_indicator_present_at_open(self, tmux_app_15):
         tmux_app_15.send_keys('?')
         tmux_app_15.wait_for(SCROLL_PREFIX)
 
     def test_indicator_shows_1_to_13(self, tmux_app_15):
-        """Initial indicator: '↑↓ 1-13/46'."""
+        """Initial indicator: '↑↓ 1-13/47'."""
         tmux_app_15.send_keys('?')
-        tmux_app_15.wait_for('1-13/46')
+        tmux_app_15.wait_for('1-13/47')
 
     def test_npage_not_clamped(self, tmux_app_15):
-        """NPage adds 10; scroll=10 < max_scroll=33 so no clamping: '↑↓ 11-23/46'."""
+        """NPage adds 10; scroll=10 < max_scroll=34 so no clamping: '↑↓ 11-23/47'."""
         tmux_app_15.send_keys('?')
         tmux_app_15.wait_for(SCROLL_PREFIX)
         tmux_app_15.send_keys('NPage')
-        tmux_app_15.wait_for('11-23/46')
+        tmux_app_15.wait_for('11-23/47')
 
 
 # ===========================================================================
@@ -177,18 +177,18 @@ class TestResize:
     """Resizing the terminal while the overlay is open updates the indicator."""
 
     def test_shrink_changes_indicator(self, tmux_app_40):
-        """Shrink 120×40 → 120×15: indicator changes from '1-38/46' to '1-13/46'."""
+        """Shrink 120×40 → 120×15: indicator changes from '1-38/47' to '1-13/47'."""
         tmux_app_40.send_keys('?')
-        tmux_app_40.wait_for('1-38/46')
+        tmux_app_40.wait_for('1-38/47')
         tmux_app_40.resize(width=120, height=15)
-        tmux_app_40.wait_for('1-13/46')
+        tmux_app_40.wait_for('1-13/47')
 
     def test_grow_removes_indicator(self, tmux_app_40):
         """Grow 120×40 → 120×15 → 120×50: indicator disappears at full size."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
         tmux_app_40.resize(width=120, height=15)
-        tmux_app_40.wait_for('1-13/46')
+        tmux_app_40.wait_for('1-13/47')
         tmux_app_40.resize(width=120, height=50)
         tmux_app_40.wait_for_absence(SCROLL_PREFIX)
         # Overlay is still open — the close marker must still be visible.
