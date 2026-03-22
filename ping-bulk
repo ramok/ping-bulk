@@ -1322,13 +1322,23 @@ class Application:
             line = "Clear event log? [y/N]: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
+        elif p['type'] == 'quit_confirm':
+            line = "Quit? [y/N]: "
+            stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
+            stdscr.move(height - 1, min(len(line), width - 2))
 
     def _handle_prompt_key(self, key):
         """Process one keypress while a prompt is active.
 
         Updates self.prompt in place; sets self.prompt = None when the prompt
         is dismissed (confirmed or cancelled).
+        Ctrl+C (key == 3) always cancels any prompt immediately.
         """
+        # Ctrl+C — cancel any prompt unconditionally
+        if key == 3:
+            self.prompt = None
+            return
+
         p = self.prompt
 
         if p['type'] == 'save':
@@ -1369,6 +1379,11 @@ class Application:
                 self.events.clear()
                 self.log_offset = 0  # reset scroll position after clearing
             self.prompt = None  # any key closes the clear prompt
+
+        elif p['type'] == 'quit_confirm':
+            if key in (ord('y'), ord('Y')):
+                self.running = False
+            self.prompt = None  # any key closes the quit prompt
 
     def save_to_file(self, filename, append=False, write_separator=True):
         """Write the current event log to a file.
@@ -1436,7 +1451,7 @@ class Application:
             self.cmd = None
             if text:
                 self._dispatch_cmd(text)
-        elif key == 27:  # Escape — cancel
+        elif key in (27, 3):  # Escape / Ctrl+C — cancel
             self.cmd = None
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             if cursor > 0:
@@ -1843,10 +1858,14 @@ class Application:
 
                 stdscr.refresh()
 
-                # Handle input
-                key = stdscr.getch()
+                # Handle input — map Ctrl+C (KeyboardInterrupt) to key code 3
+                # so modal layers can handle it uniformly as "cancel / dismiss".
+                try:
+                    key = stdscr.getch()
+                except KeyboardInterrupt:
+                    key = 3
                 if self.help_open:
-                    if key in (ord('q'), ord('Q'), 27):
+                    if key in (ord('q'), ord('Q'), 27, 3):
                         self.help_open = False
                     elif key == curses.KEY_UP:
                         self.help_scroll = max(0, self.help_scroll - 1)
@@ -1868,6 +1887,8 @@ class Application:
                 if key == ord('q') or key == ord('Q'):
                     self.running = False
                     break
+                elif key == 3:  # Ctrl+C — ask for confirmation before quitting
+                    self.prompt = {'type': 'quit_confirm', 'chars': []}
                 elif key == ord('d'):
                     self.cycle_dns(1)
                 elif key == ord('D'):
