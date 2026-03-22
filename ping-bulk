@@ -59,6 +59,8 @@ _HELP_LINES = [
     "  :log [file|off]          show active log file, set/save log to file, or disable logging",
     "  :resolv <ip> <hostname>  static name→IP mapping (overrides DNS for ping and SSH)",
     "  :ssh [opts] <dest> <host>   remote ping over SSH (BatchMode, no password)",
+    "  :ssh-begin [opts] <dest>   host lines → :ssh [opts] <dest> <host>",
+    "  :ssh-end                   close :ssh-begin block (hosts file only)",
     "  :help  or  ?             show this help",
 ]
 
@@ -403,13 +405,20 @@ def parse_hosts_file(filename):
     File format rules:
       ## Title        — section header (legacy); 'Title' is everything after '## '
       :title Title    — section header (preferred); 'Title' is everything after ':title '
+      :ssh-begin [ssh-opts] <dest>
+                      — open an SSH block; all plain host lines until :ssh-end are
+                        expanded into ':ssh [ssh-opts] <dest> <host>' commands.
+                        Blocks may not be nested.
+      :ssh-end        — close the current SSH block
       :cmd [args]     — any other ':'-prefixed line is treated as a startup command
                         (same syntax as the interactive ':' command line)
       # ...           — comment line; ignored entirely
       (empty)         — blank line; ignored
-      anything else   — treated as a host/IP address to ping
+      anything else   — treated as a host/IP address to ping (or, inside an
+                        :ssh-begin block, expanded to an :ssh command)
     """
     entries = []
+    ssh_block_args = None  # None = not inside an :ssh-begin block; str = SSH args
     with open(filename) as f:
         for line in f:
             line = line.strip()
@@ -426,10 +435,19 @@ def parse_hosts_file(filename):
                 if cmd_word == 'title':
                     title = parts[1].strip() if len(parts) > 1 else ''
                     entries.append(('section', title))
+                elif cmd_word == 'ssh-begin':
+                    # Start SSH block — remainder of line is the SSH args (opts + dest)
+                    ssh_block_args = parts[1].strip() if len(parts) > 1 else ''
+                elif cmd_word == 'ssh-end':
+                    ssh_block_args = None
                 else:
                     entries.append(('cmd', line))
             else:
-                entries.append(('host', line))
+                if ssh_block_args is not None:
+                    # Inside an :ssh-begin block — expand to an :ssh command
+                    entries.append(('cmd', f':ssh {ssh_block_args} {line}'))
+                else:
+                    entries.append(('host', line))
     return entries
 
 
@@ -1373,6 +1391,13 @@ class Application:
                     f"resolv: first argument must be an IP address, got '{parts[0]}'")
             else:
                 self._apply_hosts_entry(parts[0], parts[1])
+
+        elif cmd in ('ssh-begin', 'ssh-end'):
+            # These are hosts-file-only block directives and cannot be used
+            # interactively (there is no mechanism to add plain host lines in
+            # the command line).  Give a helpful message instead of "unknown command".
+            self.add_event("cmd",
+                f"{cmd}: only supported in hosts files — use :ssh for interactive SSH")
 
         elif cmd == 'ssh':
             # :ssh [ssh-opts] <dest> <ping-host>
