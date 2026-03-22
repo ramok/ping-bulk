@@ -717,6 +717,7 @@ class Application:
         self.prompt = None        # None = no prompt; dict = prompt is open (see _open_prompt_*)
         self.cmd = None           # None = inactive; dict = command mode open (text buffer + cursor)
         self.help_open = False    # True while the help overlay is visible
+        self.help_scroll = 0      # first visible line index in the help overlay
         self.running = True
         self.threads = []
         self._monitoring_started = False  # set True once start_monitoring() is called
@@ -1702,33 +1703,60 @@ class Application:
         """Open the help overlay (sets self.help_open = True).
 
         The overlay is drawn by _draw_help_overlay() and is never written to
-        the event log or the log file.
+        the event log or the log file.  Scroll position is reset to the top
+        each time the overlay is opened.
         """
         self.help_open = True
+        self.help_scroll = 0
 
     def _draw_help_overlay(self, stdscr, height, width):
-        """Draw the help overlay as a centered bordered popup.
+        """Draw the help overlay as a centered bordered popup with scroll support.
 
         Uses _HELP_LINES as content; each line is padded / truncated to
         _HELP_INNER_W characters.  The box is drawn with box-drawing characters
         and rendered in reverse-video so it floats visually above the main UI.
         The overlay is closed by pressing q, Q, or Esc (handled in run()).
+
+        Scrolling:
+          self.help_scroll = 0  — top of content
+          self.help_scroll > 0  — scrolled down by that many lines
+        When the content is taller than the terminal the top border embeds a
+        scroll indicator ' ↑↓ n-m/total ' centered in the dashes so the user
+        can see where they are.  The scroll position is clamped here so callers
+        may increment it freely without worrying about bounds.
         """
         box_w = _HELP_INNER_W + 2   # inner width + two border chars
-        box_h = len(_HELP_LINES) + 2  # content rows + top and bottom border
+
+        # Limit the box height to the terminal; always keep room for both borders.
+        box_h_available = min(len(_HELP_LINES) + 2, height)
+        visible_count = max(0, box_h_available - 2)
+
+        # Clamp scroll position so it never exceeds the last valid window start.
+        max_scroll = max(0, len(_HELP_LINES) - visible_count)
+        self.help_scroll = max(0, min(self.help_scroll, max_scroll))
 
         col0 = max(0, (width - box_w) // 2)
-        row0 = max(0, (height - box_h) // 2)
+        row0 = max(0, (height - box_h_available) // 2)
 
         attr = curses.A_REVERSE
 
-        # Top border
+        # Top border — embed a scroll indicator when not all lines fit on screen.
         if row0 < height:
-            stdscr.addstr(row0, col0,
-                          ('┌' + '─' * _HELP_INNER_W + '┐')[:width - col0], attr)
+            if max_scroll > 0:
+                line_first = self.help_scroll + 1
+                line_last  = self.help_scroll + visible_count
+                indicator  = f' ↑↓ {line_first}-{line_last}/{len(_HELP_LINES)} '
+                left_w  = (_HELP_INNER_W - len(indicator)) // 2
+                right_w = _HELP_INNER_W - left_w - len(indicator)
+                inner = '─' * left_w + indicator + '─' * right_w
+                top_border = '┌' + inner + '┐'
+            else:
+                top_border = '┌' + '─' * _HELP_INNER_W + '┐'
+            stdscr.addstr(row0, col0, top_border[:width - col0], attr)
 
-        # Content rows
-        for i, line in enumerate(_HELP_LINES):
+        # Content rows — show only the slice selected by help_scroll.
+        visible_lines = _HELP_LINES[self.help_scroll:self.help_scroll + visible_count]
+        for i, line in enumerate(visible_lines):
             r = row0 + 1 + i
             if r >= height:
                 break
@@ -1736,7 +1764,7 @@ class Application:
             stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
 
         # Bottom border
-        r = row0 + 1 + len(_HELP_LINES)
+        r = row0 + 1 + visible_count
         if r < height:
             stdscr.addstr(r, col0,
                           ('└' + '─' * _HELP_INNER_W + '┘')[:width - col0], attr)
@@ -1809,9 +1837,16 @@ class Application:
                 # Handle input
                 key = stdscr.getch()
                 if self.help_open:
-                    # Only q, Q, or Esc close the overlay; all other keys are swallowed
                     if key in (ord('q'), ord('Q'), 27):
                         self.help_open = False
+                    elif key == curses.KEY_UP:
+                        self.help_scroll = max(0, self.help_scroll - 1)
+                    elif key == curses.KEY_DOWN:
+                        self.help_scroll += 1  # upper bound clamped in _draw_help_overlay
+                    elif key == curses.KEY_PPAGE:
+                        self.help_scroll = max(0, self.help_scroll - 10)
+                    elif key == curses.KEY_NPAGE:
+                        self.help_scroll += 10  # upper bound clamped in _draw_help_overlay
                     continue
                 if self.cmd is not None:
                     if key != -1:
@@ -1878,11 +1913,36 @@ class Application:
 
 
 def _parse_args():
-    """Parse command-line arguments outside of curses so errors print cleanly."""
+    """Parse command-line arguments outside of curses so errors print cleanly.
+
+    When invoked with no arguments (no hosts and no -f/--file), the usage/help
+    is printed and the program exits immediately — curses is never started.
+    Press '?' inside the running app for the full keyboard reference.
+    """
     import argparse
     parser = argparse.ArgumentParser(
         prog='ping-bulk',
         description='Monitor multiple hosts with continuous ping.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+examples:
+  ping-bulk 8.8.8.8 1.1.1.1
+  ping-bulk -f hosts.txt
+  ping-bulk -l events.log 8.8.8.8 192.168.1.{1..10}
+
+hosts file format:
+  # comment line (ignored)
+  ## Section title          — section divider in the UI
+  :title Section title      — preferred section divider syntax
+  10.0.0.1                  — host or IP to ping
+  10.0.0.{1..5}             — brace range expansion (5 hosts)
+  :resolv <ip> <hostname>   — static DNS override
+  :ssh [opts] <dest> <host> — ping via SSH
+  :ssh-begin [opts] <dest>  — open SSH block (plain lines → :ssh commands)
+  :ssh-end                  — close SSH block
+
+press '?' inside the app for the full keyboard reference.\
+""",
     )
     parser.add_argument(
         '-f', '--file',
@@ -1900,12 +1960,14 @@ def _parse_args():
         metavar='HOST',
         help='hosts/IPs to ping',
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.hosts and not args.file:
+        parser.print_help()
+        sys.exit(0)
+    return args
 
 
-def main(stdscr):
-    args = _parse_args()
-
+def main(stdscr, args):
     entries = []
 
     # Load entries from file first, then append positional hosts
@@ -1923,11 +1985,12 @@ def main(stdscr):
             entries.append(('host', host))
 
     if not entries:
-        print("Usage: ping-bulk [-f FILE] [HOST ...]", file=sys.stderr)
+        print("ping-bulk: no hosts to monitor", file=sys.stderr)
         return
 
     app = Application(entries, log_file=args.log_file)
     app.run(stdscr)
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    _args = _parse_args()
+    curses.wrapper(main, _args)
