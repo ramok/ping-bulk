@@ -1752,7 +1752,10 @@ class Application:
                 top_border = '┌' + inner + '┐'
             else:
                 top_border = '┌' + '─' * _HELP_INNER_W + '┐'
-            stdscr.addstr(row0, col0, top_border[:width - col0], attr)
+            try:
+                stdscr.addstr(row0, col0, top_border[:width - col0], attr)
+            except curses.error:
+                pass
 
         # Content rows — show only the slice selected by help_scroll.
         visible_lines = _HELP_LINES[self.help_scroll:self.help_scroll + visible_count]
@@ -1761,13 +1764,19 @@ class Application:
             if r >= height:
                 break
             padded = line.ljust(_HELP_INNER_W)[:_HELP_INNER_W]
-            stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
+            try:
+                stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
+            except curses.error:
+                pass
 
         # Bottom border
         r = row0 + 1 + visible_count
         if r < height:
-            stdscr.addstr(r, col0,
-                          ('└' + '─' * _HELP_INNER_W + '┘')[:width - col0], attr)
+            try:
+                stdscr.addstr(r, col0,
+                              ('└' + '─' * _HELP_INNER_W + '┘')[:width - col0], attr)
+            except curses.error:
+                pass
 
     def run(self, stdscr):
         """Main application loop"""
