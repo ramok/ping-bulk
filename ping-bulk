@@ -62,6 +62,14 @@ _HELP_LINES = [
     "  :ssh-begin [opts] <dest>   host lines → :ssh [opts] <dest> <host>",
     "  :ssh-end                   close :ssh-begin block (hosts file only)",
     "  :help  or  ?             show this help",
+    "─" * _HELP_INNER_W,
+    "  Host / range expansion  (hosts file and :ssh ping-host argument)",
+    "  10.0.0.{1,2,5}          brace list  → 10.0.0.1, 10.0.0.2, 10.0.0.5",
+    "  10.0.0.{1..4}           brace range → 10.0.0.1 … 10.0.0.4",
+    "  10.0.0.{1-4}            brace range → 10.0.0.1 … 10.0.0.4  (zsh style)",
+    "  10.{1..2}.0.{1,5}       multi-group → cartesian product (4 addresses)",
+    "  web{1..3}.example.com   brace range → web1.example.com … web3.example.com",
+    "  web{a,b,c}.example.com  brace list  → weba, webb, webc .example.com",
 ]
 
 # Stderr substrings that indicate a permanent (non-retryable) ping failure.
@@ -102,6 +110,60 @@ def _is_ip(s):
         if not (0 <= int(p) <= 255):
             return False
     return True
+
+
+def _expand_host(s):
+    """Expand a host/IP string that may contain brace range/list notation.
+
+    Works for both IP addresses and hostnames.  Supported forms (may be
+    combined; multiple brace groups produce the cartesian product of all
+    expansions):
+
+      10.0.0.{1,2,5}          — brace list  → 10.0.0.1, 10.0.0.2, 10.0.0.5
+      10.0.0.{1..4}           — brace range → 10.0.0.1 … 10.0.0.4
+      10.{1..2}.0.{1,5}       — two groups  → 2×2 = 4 addresses (cartesian)
+      web{1..3}.example.com   — brace range → web1.example.com … web3.example.com
+      web{a,b,c}.example.com  — brace list  → weba, webb, webc .example.com
+
+    Strings without any expansion syntax are returned as a single-item list.
+    Invalid ranges (start > end, non-integer bounds) are left unexpanded.
+    """
+    import itertools
+    import re
+
+    # --- brace expansion ---
+    # Split into literal segments and brace groups, preserving order.
+    # e.g. "10.0.{1..3}.{4,5}" → ["10.0.", "{1..3}", ".", "{4,5}", ""]
+    segments = re.split(r'(\{[^}]*\})', s)
+
+    # Build a list of alternatives for each segment.
+    alternatives = []
+    has_brace = False
+    for seg in segments:
+        m = re.fullmatch(r'\{([^}]*)\}', seg)
+        if m:
+            has_brace = True
+            inner = m.group(1)
+            # Range: {n..m}  or  {n-m}  (zsh-style dash separator)
+            range_m = re.fullmatch(r'(-?\d+)(?:\.\.|-)(-?\d+)', inner)
+            if range_m:
+                try:
+                    lo, hi = int(range_m.group(1)), int(range_m.group(2))
+                    step = 1 if lo <= hi else -1
+                    alternatives.append([str(v) for v in range(lo, hi + step, step)])
+                except ValueError:
+                    alternatives.append([seg])  # leave unexpanded
+            else:
+                # List: {a,b,c}
+                items = inner.split(',')
+                alternatives.append(items if items else [seg])
+        else:
+            alternatives.append([seg])
+
+    if has_brace:
+        return [''.join(combo) for combo in itertools.product(*alternatives)]
+
+    return [s]
 
 
 def _history_char(val, mode):
@@ -444,10 +506,13 @@ def parse_hosts_file(filename):
                     entries.append(('cmd', line))
             else:
                 if ssh_block_args is not None:
-                    # Inside an :ssh-begin block — expand to an :ssh command
-                    entries.append(('cmd', f':ssh {ssh_block_args} {line}'))
+                    # Inside an :ssh-begin block — expand each host and emit an :ssh command
+                    for host in _expand_host(line):
+                        entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
                 else:
-                    entries.append(('host', line))
+                    # Plain host line — expand brace notation into individual entries
+                    for host in _expand_host(line):
+                        entries.append(('host', host))
     return entries
 
 
@@ -1420,24 +1485,27 @@ class Application:
                         self.add_event("cmd",
                             "ssh: usage: :ssh [opts] <dest> <ping-host>")
                     else:
-                        # Last token is the ping target; everything else is SSH args
-                        ping_host = tokens[-1]
+                        # Last token is the ping target; everything else is SSH args.
+                        # The ping target may contain brace/dash expansion notation,
+                        # producing one monitor per expanded host.
+                        ping_host_pattern = tokens[-1]
                         ssh_args = tokens[:-1]
                         ssh_dest = ssh_args[-1]  # last SSH arg is the destination
-                        # Apply a static :resolv mapping if one exists for ping_host.
-                        # The label always shows the original name so the user can
-                        # tell which host they asked for; the subprocess targets the IP.
-                        actual_ping_host = self.hosts_map[ping_host][0] if ping_host in self.hosts_map else ping_host
-                        label = f"{ssh_dest}→{ping_host}"
-                        monitor = SshPingMonitor(ssh_args, actual_ping_host, label=label)
-                        self.monitors.append(monitor)
-                        self.entries.append(monitor)
-                        if self._monitoring_started:
-                            thread = threading.Thread(
-                                target=monitor.ping, daemon=True
-                            )
-                            thread.start()
-                            self.threads.append(thread)
+                        for ping_host in _expand_host(ping_host_pattern):
+                            # Apply a static :resolv mapping if one exists for ping_host.
+                            # The label always shows the original name so the user can
+                            # tell which host they asked for; the subprocess targets the IP.
+                            actual_ping_host = self.hosts_map[ping_host][0] if ping_host in self.hosts_map else ping_host
+                            label = f"{ssh_dest}→{ping_host}"
+                            monitor = SshPingMonitor(ssh_args, actual_ping_host, label=label)
+                            self.monitors.append(monitor)
+                            self.entries.append(monitor)
+                            if self._monitoring_started:
+                                thread = threading.Thread(
+                                    target=monitor.ping, daemon=True
+                                )
+                                thread.start()
+                                self.threads.append(thread)
 
         else:
             self.add_event("cmd",
