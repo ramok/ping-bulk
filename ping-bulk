@@ -57,10 +57,11 @@ _HELP_LINES = [
     "  :seen                    insert 'seen' marker in event log",
     "  :clear                   clear event log",
     "  :log [file|off]          show active log file, set/save log to file, or disable logging",
-    "  :resolv <ip> <hostname>  static name→IP mapping (overrides DNS for ping and SSH)",
-    "  :ssh [opts] <dest> <host>   remote ping over SSH (BatchMode, no password)",
-    "  :ssh-begin [opts] <dest>   host lines → :ssh [opts] <dest> <host>",
-    "  :ssh-end                   close :ssh-begin block (hosts file only)",
+    "  :resolv <ip-pat> <host>  static name→IP mapping (overrides DNS for ping and SSH)",
+    "                           ip-pat may use brace expansion; \\N in host = brace group N",
+    "  :ssh [opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
+    "  :ssh-begin [opts] <dest> host lines → :ssh [opts] <dest> <host>",
+    "  :ssh-end                 close :ssh-begin block (hosts file only)",
     "  :help  or  ?             show this help",
     "─" * _HELP_INNER_W,
     "  Host / range expansion  (hosts file and :ssh ping-host argument)",
@@ -181,6 +182,145 @@ def _expand_host(s):
         expanded = s[:m.start()] + alt + s[m.end():]
         result.extend(_expand_host(expanded))  # recurse for remaining braces
     return result
+
+
+def _expand_host_with_captures(pattern):
+    """Expand *pattern* and return a list of ``(expanded_str, captures)`` pairs.
+
+    Like :func:`_expand_host` but also tracks *which value each top-level
+    brace group contributed* to every result, enabling ``\\N`` back-references
+    in companion strings (e.g. the hostname side of a ``:resolv`` command).
+
+    Algorithm
+    ---------
+    1. Walk the pattern once and locate every **top-level** ``{…}`` group
+       (balanced, left-to-right; nested braces are skipped over).
+    2. For each group, split its inner content on top-level commas, then
+       expand each item: range notation (``n..m`` or ``n-m``) → integer
+       sequence; anything else → via :func:`_expand_host` (handles nested
+       braces recursively).  The result is the list of *alternative values*
+       for that group.
+    3. Compute the cartesian product across all groups.  For each combination
+       ``(v1, v2, …)`` build the substituted string and record the captures.
+
+    Returns
+    -------
+    list of ``(str, list[str])``
+        ``expanded_str`` is the fully substituted string (same as what
+        :func:`_expand_host` would return).
+        ``captures`` is ``[v1, v2, …]`` where ``vi`` is the string value
+        that the *i*-th top-level group (1-based) produced for this row.
+
+    Patterns without any brace groups return ``[(pattern, [])]``.
+
+    Raises :exc:`ValueError` for empty groups or empty comma-separated items
+    (same contract as :func:`_expand_brace_group`).
+    """
+    import re
+    import itertools
+
+    # ── Step 1: find every top-level balanced brace group ─────────────────
+    groups = []  # list of (start, end) — half-open slice, pattern[start:end] == '{…}'
+    i = 0
+    while i < len(pattern):
+        if pattern[i] == '{':
+            depth = 1
+            j = i + 1
+            while j < len(pattern) and depth > 0:
+                if pattern[j] == '{':
+                    depth += 1
+                elif pattern[j] == '}':
+                    depth -= 1
+                j += 1
+            if depth == 0:
+                groups.append((i, j))  # j is one past the closing '}'
+                i = j
+                continue
+        i += 1
+
+    if not groups:
+        return [(pattern, [])]
+
+    # ── Step 2: expand each group to its list of alternative strings ───────
+    group_alts = []
+    for start, end in groups:
+        inner = pattern[start + 1:end - 1]
+        if not inner:
+            raise ValueError("empty brace group '{}'")
+
+        # Split inner content on *top-level* commas (ignore commas inside
+        # nested braces).
+        items = []
+        depth = 0
+        buf = []
+        for ch in inner:
+            if ch == '{':
+                depth += 1
+                buf.append(ch)
+            elif ch == '}':
+                depth -= 1
+                buf.append(ch)
+            elif ch == ',' and depth == 0:
+                items.append(''.join(buf))
+                buf = []
+            else:
+                buf.append(ch)
+        items.append(''.join(buf))
+
+        alts = []
+        for item in items:
+            if not item:
+                raise ValueError(f"empty item in brace group '{{{inner}}}'")
+            # Range notation: n..m or n-m
+            range_m = re.fullmatch(r'(-?\d+)(?:\.\.|-)(-?\d+)', item)
+            if range_m:
+                lo, hi = int(range_m.group(1)), int(range_m.group(2))
+                step = 1 if lo <= hi else -1
+                alts.extend(str(v) for v in range(lo, hi + step, step))
+            else:
+                # Recurse into nested braces (if any) via the existing helper.
+                alts.extend(_expand_host(item))
+        group_alts.append(alts)
+
+    # ── Step 3: cartesian product → substituted strings + captures ─────────
+    results = []
+    for combo in itertools.product(*group_alts):
+        # Replace groups right-to-left so earlier offsets stay valid.
+        s = pattern
+        for (start, end), val in zip(reversed(groups), reversed(combo)):
+            s = s[:start] + val + s[end:]
+        results.append((s, list(combo)))
+
+    return results
+
+
+def _apply_backref(template, captures):
+    r"""Substitute ``\1``…``\9`` in *template* with values from *captures*.
+
+    ``\N`` (1-based) is replaced by ``captures[N-1]``.  References to
+    groups that do not exist (index out of range) are left unchanged so
+    the user can see the un-substituted placeholder rather than silently
+    getting wrong output.
+
+    Parameters
+    ----------
+    template : str
+        String that may contain ``\1`` … ``\9`` placeholders.
+    captures : list[str]
+        Values produced by :func:`_expand_host_with_captures` for one row.
+
+    Returns
+    -------
+    str
+        *template* with all in-range ``\N`` sequences replaced.
+    """
+    import re
+
+    def _sub(m):
+        idx = int(m.group(1))
+        return captures[idx - 1] if 1 <= idx <= len(captures) else m.group(0)
+
+    return re.sub(r'\\(\d)', _sub, template)
 
 
 def _history_char(val, mode):
@@ -1476,15 +1616,27 @@ class Application:
             self._cmd_help()
 
         elif cmd == 'resolv':
-            # :resolv IP hostname — static DNS override (like /etc/hosts)
-            parts = args.split()
+            # :resolv <ip-pattern> <hostname-template> — static DNS override.
+            # The IP side may contain brace expansion (e.g. 10.0.{1..4}.1).
+            # \N in the hostname template is substituted with the value that
+            # brace group N (1-based, left-to-right) produced for each row.
+            parts = args.split(None, 1)
             if len(parts) != 2:
                 self.add_event("cmd", "resolv: usage: :resolv <ip> <hostname>")
-            elif not _is_ip(parts[0]):
-                self.add_event("cmd",
-                    f"resolv: first argument must be an IP address, got '{parts[0]}'")
             else:
-                self._apply_hosts_entry(parts[0], parts[1])
+                ip_pattern, hostname_tmpl = parts[0], parts[1].strip()
+                try:
+                    rows = _expand_host_with_captures(ip_pattern)
+                except ValueError as e:
+                    self.add_event("cmd", f"resolv: brace expansion error: {e}")
+                else:
+                    for expanded_ip, captures in rows:
+                        if not _is_ip(expanded_ip):
+                            self.add_event("cmd",
+                                f"resolv: '{expanded_ip}' is not a valid IP address — skipped")
+                            continue
+                        hostname = _apply_backref(hostname_tmpl, captures)
+                        self._apply_hosts_entry(expanded_ip, hostname)
 
         elif cmd in ('ssh-begin', 'ssh-end'):
             # These are hosts-file-only block directives and cannot be used
