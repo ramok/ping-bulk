@@ -25,6 +25,15 @@ class TmuxSession:
         self.width = width
         self.height = height
 
+        # Kill any stale session with this name left over from a previous
+        # test run that crashed without cleanup.
+        stale = subprocess.run(
+            ['tmux', 'has-session', '-t', name],
+            check=False,
+        )
+        if stale.returncode == 0:
+            subprocess.run(['tmux', 'kill-session', '-t', name], check=False)
+
         # Create a new detached session with the requested dimensions.
         subprocess.run(
             [

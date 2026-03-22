@@ -53,12 +53,16 @@ tests/
 
 | Fixture | Window size | Notes |
 |---|---|---|
-| `tmux_app_40` | 120 × 40 | Overlay scroll indicator visible (38/46 lines fit) |
-| `tmux_app_50` | 120 × 50 | All 46 overlay lines fit; no scroll indicator |
-| `tmux_app_15` | 120 × 15 | Only 13 lines fit; large scroll range (max=33) |
+| `tmux_app_40` | 120 × 40 | Overlay scroll indicator visible (38/47 lines fit) |
+| `tmux_app_50` | 120 × 50 | All 47 overlay lines fit; no scroll indicator |
+| `tmux_app_15` | 120 × 15 | Only 13 lines fit; large scroll range (max=34) |
 
 All `tmux_app_*` fixtures are **function-scoped**: each test gets a fresh
 ping-bulk session and the session is killed automatically after the test.
+
+All `tmux_app_*` fixtures also depend on `check_integration_deps` (session-scoped):
+if `tmux` or `ping` are not on `PATH` the integration tests are skipped automatically
+and `test_cli.py` continues to run unaffected.
 
 ## Test files
 

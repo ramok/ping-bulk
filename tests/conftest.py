@@ -22,6 +22,7 @@ in the menu bar).  The session is killed automatically after the test.
 """
 
 import os
+import shutil
 import sys
 import pytest
 
@@ -42,6 +43,34 @@ def app_path() -> str:
     path = os.path.join(repo_root, 'ping-bulk')
     assert os.path.isfile(path), f"ping-bulk not found at {path}"
     return path
+
+
+# ---------------------------------------------------------------------------
+# Dependency check fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope='session')
+def check_integration_deps():
+    """Skip integration tests when required system tools are not on PATH.
+
+    Checks for ``tmux`` (drives the curses UI) and ``ping`` (used by the app
+    itself).  Both must be present for the tmux-based tests to work.
+
+    Install hints:
+      tmux  — apt install tmux  /  brew install tmux
+      ping  — usually pre-installed; on Debian: apt install iputils-ping
+    """
+    missing = [tool for tool in ('tmux', 'ping') if shutil.which(tool) is None]
+    if missing:
+        tools = ', '.join(missing)
+        hints = {
+            'tmux': 'apt install tmux  /  brew install tmux',
+            'ping': 'apt install iputils-ping',
+        }
+        hint_lines = '; '.join(hints[t] for t in missing)
+        pytest.skip(
+            f"Integration tests require {tools} on PATH — {hint_lines}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -73,25 +102,25 @@ def _make_app_session(name: str, app_path: str, width: int, height: int) -> Tmux
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def tmux_app_40(app_path: str):
+def tmux_app_40(app_path: str, check_integration_deps):
     """ping-bulk in a 120×40 window.  Help overlay shows a scroll indicator."""
-    sess = _make_app_session('pb-test-40', app_path, width=120, height=40)
+    sess = _make_app_session('ping-bulk-test-40', app_path, width=120, height=40)
     yield sess
     sess.kill()
 
 
 @pytest.fixture
-def tmux_app_50(app_path: str):
+def tmux_app_50(app_path: str, check_integration_deps):
     """ping-bulk in a 120×50 window.  Help overlay fits without scrolling."""
-    sess = _make_app_session('pb-test-50', app_path, width=120, height=50)
+    sess = _make_app_session('ping-bulk-test-50', app_path, width=120, height=50)
     yield sess
     sess.kill()
 
 
 @pytest.fixture
-def tmux_app_15(app_path: str):
+def tmux_app_15(app_path: str, check_integration_deps):
     """ping-bulk in a 120×15 window.  Very short; larger scroll range."""
-    sess = _make_app_session('pb-test-15', app_path, width=120, height=15)
+    sess = _make_app_session('ping-bulk-test-15', app_path, width=120, height=15)
     yield sess
     sess.kill()
 
