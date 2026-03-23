@@ -651,7 +651,26 @@ def parse_hosts_file(filename):
     entries = []
     ssh_block_args = None  # None = not inside an :ssh-begin block; str = SSH args
     with open(filename) as f:
-        for line in f:
+        # Pre-process: join continuation lines (a line ending with '\' is
+        # concatenated with the next line, with the backslash removed).
+        # This enables the portable self-executing hosts-file idiom:
+        #   # \
+        #   exec ping-bulk -f "$0" "$@"
+        # Shell ignores '# \' as a comment and runs the exec; ping-bulk joins
+        # the two lines into '# exec ping-bulk …' which it then skips as a comment.
+        raw_lines = []
+        buf = ''
+        for raw in f:
+            stripped = raw.rstrip('\n')
+            if stripped.endswith('\\'):
+                buf += stripped[:-1]
+            else:
+                raw_lines.append(buf + stripped)
+                buf = ''
+        if buf:
+            raw_lines.append(buf)
+
+        for line in raw_lines:
             line = line.strip()
             if not line:
                 continue
