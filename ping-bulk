@@ -335,6 +335,17 @@ def _config_path():
     return os.path.join(base, 'ping-bulk', 'config')
 
 
+def _history_path():
+    """Return the XDG-compliant command history file path for ping-bulk.
+
+    Respects ``$XDG_STATE_HOME`` when set; falls back to ``~/.local/state``.
+    The returned path is ``<base>/ping-bulk/history``.
+    """
+    xdg = os.environ.get('XDG_STATE_HOME', '')
+    base = xdg if xdg else os.path.join(os.path.expanduser('~'), '.local', 'state')
+    return os.path.join(base, 'ping-bulk', 'history')
+
+
 def _history_char(val, mode):
     """Convert a raw history value (float ms, None, or 'ERR') to a single display character.
 
@@ -753,9 +764,11 @@ class Application:
             self._create_default_config()
         self.prompt = None        # None = no prompt; dict = prompt is open (see _open_prompt_*)
         self.cmd = None           # None = inactive; dict = command mode open (text buffer + cursor)
+        self.cmd_history = []     # persistent command history (most recent last)
         self.help_open = False    # True while the help overlay is visible
         self.help_scroll = 0      # first visible line index in the help overlay
         self.running = True
+        self._load_cmd_history()  # populate self.cmd_history from disk
         self.threads = []
 
         for kind, value in entries:
@@ -871,6 +884,34 @@ class Application:
                 f.write( "# :log              # path to stream event log; leave blank to disable\n")
         except OSError:
             pass  # silently ignore — e.g. read-only filesystem or missing home directory
+
+    def _load_cmd_history(self):
+        """Load command history from the XDG state file into self.cmd_history.
+
+        Each non-empty line in the file is one history entry (most recent last).
+        Silently ignores a missing or unreadable file.
+        """
+        path = _history_path()
+        try:
+            with open(path) as f:
+                self.cmd_history = [line.rstrip('\n') for line in f if line.strip()]
+        except OSError:
+            pass  # missing history file is not an error
+
+    def _save_cmd_history(self):
+        """Persist self.cmd_history to the XDG state file, creating dirs as needed.
+
+        Writes at most 500 entries (most recent) to cap disk usage.
+        Silently ignores write errors.
+        """
+        path = _history_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                for entry in self.cmd_history[-500:]:
+                    f.write(entry + '\n')
+        except OSError:
+            pass  # silently ignore — e.g. read-only filesystem
 
     def start_monitoring(self):
         """Start all ping threads"""
@@ -1564,6 +1605,13 @@ class Application:
             text = ''.join(chars).strip()
             self.cmd = None
             if text:
+                # Deduplicate: remove any previous identical entry, append at the end
+                if self.cmd_history and self.cmd_history[-1] == text:
+                    pass  # already the most recent entry — no change
+                else:
+                    self.cmd_history = [e for e in self.cmd_history if e != text]
+                    self.cmd_history.append(text)
+                self._save_cmd_history()
                 self._dispatch_cmd(text)
         elif key in (27, 3):  # Escape / Ctrl+C — cancel
             self.cmd = None
@@ -1571,24 +1619,57 @@ class Application:
             if cursor > 0:
                 del chars[cursor - 1]
                 c['cursor'] -= 1
+                c['hist_idx'] = -1
         elif key == curses.KEY_DC:  # Delete key
             if cursor < len(chars):
                 del chars[cursor]
+                c['hist_idx'] = -1
         elif key == curses.KEY_LEFT:
             if cursor > 0:
                 c['cursor'] -= 1
         elif key == curses.KEY_RIGHT:
             if cursor < len(chars):
                 c['cursor'] += 1
+        elif key == curses.KEY_UP:
+            # Navigate backward (older) in command history
+            history = self.cmd_history
+            if history:
+                idx = c['hist_idx']
+                if idx == -1:
+                    # Save the current (unsaved) line before entering history
+                    c['saved_line'] = ''.join(chars)
+                    c['hist_idx'] = len(history) - 1
+                elif idx > 0:
+                    c['hist_idx'] -= 1
+                entry = history[c['hist_idx']]
+                c['chars'] = list(entry)
+                c['cursor'] = len(entry)
+        elif key == curses.KEY_DOWN:
+            # Navigate forward (newer) in command history, then restore saved line
+            idx = c['hist_idx']
+            if idx != -1:
+                if idx < len(self.cmd_history) - 1:
+                    c['hist_idx'] += 1
+                    entry = self.cmd_history[c['hist_idx']]
+                    c['chars'] = list(entry)
+                    c['cursor'] = len(entry)
+                else:
+                    # Past the newest entry — restore the line that was there before
+                    c['hist_idx'] = -1
+                    saved = c['saved_line']
+                    c['chars'] = list(saved)
+                    c['cursor'] = len(saved)
         elif key in (curses.KEY_HOME, 1):  # Home / Ctrl+A
             c['cursor'] = 0
         elif key in (curses.KEY_END, 5):  # End / Ctrl+E
             c['cursor'] = len(chars)
         elif key == 11:  # Ctrl+K — kill to end of line
             del chars[cursor:]
+            c['hist_idx'] = -1
         elif key == 21:  # Ctrl+U — kill to start of line
             del chars[:cursor]
             c['cursor'] = 0
+            c['hist_idx'] = -1
         elif key == 23:  # Ctrl+W — kill word backward
             end = cursor
             while cursor > 0 and chars[cursor - 1] == ' ':
@@ -1597,9 +1678,11 @@ class Application:
                 cursor -= 1
             del chars[cursor:end]
             c['cursor'] = cursor
+            c['hist_idx'] = -1
         elif 32 <= key < 127:
             chars.insert(cursor, chr(key))
             c['cursor'] += 1
+            c['hist_idx'] = -1
 
     def _apply_hosts_entry(self, ip, hostname):
         """Apply a static DNS override pair to any matching monitors.
@@ -2031,7 +2114,7 @@ class Application:
                 elif key == ord('C'):
                     self._open_prompt_clear()
                 elif key == ord(':'):
-                    self.cmd = {'chars': [], 'cursor': 0}
+                    self.cmd = {'chars': [], 'cursor': 0, 'hist_idx': -1, 'saved_line': ''}
                 elif key == ord('?'):
                     self._cmd_help()
                 # History scrolling (left/right arrows)
