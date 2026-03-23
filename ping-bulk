@@ -725,6 +725,93 @@ def parse_hosts_file(filename):
     return entries
 
 
+class CmdDef:
+    """Descriptor for a single ':' command: names, handler, completion choices, help text.
+
+    names         — list of accepted command names / aliases (all lower-case)
+    action        — name of the Application method to call: ``method(self, args: str)``
+    arg_choices   — None, a static list[str], or a zero-argument callable returning list[str];
+                    used by _get_completions to offer Tab-completion on the second token
+    arg_completer — None, or a callable ``(prefix: str) -> list[str]`` for dynamic completion
+                    (e.g. filesystem paths); takes priority over arg_choices when set
+    usage         — short argument synopsis shown in help (e.g. '[off|hostname|ip]')
+    help          — one-line description shown in the help overlay
+    """
+    __slots__ = ('names', 'action', 'arg_choices', 'arg_completer', 'usage', 'help', 'completable')
+
+    def __init__(self, names, action, arg_choices=None, usage='', help='', arg_completer=None, completable=True):
+        self.names         = names
+        self.action        = action
+        self.arg_choices   = arg_choices
+        self.arg_completer = arg_completer
+        self.usage         = usage
+        self.help          = help
+        self.completable   = completable
+
+
+def _complete_log_arg(prefix):
+    """Return Tab-completion candidates for the :log command argument.
+
+    Combines the static keyword 'off' with live filesystem completions rooted
+    at *prefix*.  Directories are returned with a trailing '/' so the user can
+    keep pressing Tab to descend into them.
+    """
+    import glob as _glob
+
+    results = []
+    # Static keyword — include when it matches the prefix (case-insensitive)
+    if 'off'.startswith(prefix.lower()):
+        results.append('off')
+    # Filesystem completions
+    pattern = prefix + '*'
+    try:
+        matches = _glob.glob(pattern)
+    except Exception:
+        matches = []
+    for m in sorted(matches):
+        results.append(m + '/' if os.path.isdir(m) else m)
+    return results
+
+
+# Master command registry — single source of truth for names, handlers, and completions.
+CMD_REGISTRY = [
+    CmdDef(['q', 'quit'],        '_cmd_quit',      None,
+           '',                    'quit the application'),
+    CmdDef(['dns'],              '_cmd_dns',        lambda: [m.lower() for m in DNS_MODES],
+           '[off|hostname|ip]',   'cycle or set DNS display mode'),
+    CmdDef(['stats'],            '_cmd_stats',      lambda: [m.lower() for m in STATS_MODES],
+           '[mode]',              'cycle or set stats column'),
+    CmdDef(['sort'],             '_cmd_sort',       ['none', 'name', 'status', 'latency'],
+           '[mode]',              'cycle or set sort order'),
+    CmdDef(['history', 'hist'],  '_cmd_history',    lambda: [m.lower() for m in HISTORY_MODES],
+           '[mode]',              'cycle or set history display mode'),
+    CmdDef(['pause'],            '_cmd_pause',      None,
+           '',                    'toggle pause on/off'),
+    CmdDef(['seen'],             '_cmd_seen',       None,
+           '',                    "insert 'seen' marker in event log"),
+    CmdDef(['clear'],            '_cmd_clear',      None,
+           '',                    'clear event log'),
+    CmdDef(['log'],              '_cmd_log',        None,
+           '[file|off]',          'show/set/disable the streaming log file',
+           arg_completer=_complete_log_arg),
+    CmdDef(['saveconfig'],       '_cmd_saveconfig', None,
+           '',                    'save current settings to config file'),
+    CmdDef(['resolv'],           '_cmd_resolv',     None,
+           '<ip> <host>',         'static name→IP mapping (overrides DNS for ping and SSH)'),
+    CmdDef(['ssh'],              '_cmd_ssh',        None,
+           '[opts] <dest> <host>', 'remote ping over SSH (BatchMode, no password)'),
+    CmdDef(['ssh-begin'],        '_cmd_ssh_begin',  None,
+           '[opts] <dest>',       'open SSH block (hosts file only)',       completable=False),
+    CmdDef(['ssh-end'],          '_cmd_ssh_end',    None,
+           '',                    'close SSH block (hosts file only)',       completable=False),
+    CmdDef(['help'],             '_cmd_help',       None,
+           '',                    'show this help'),
+]
+
+# Flat name/alias → CmdDef lookup used by _dispatch_cmd and _get_completions.
+_CMD_MAP: dict = {name: cmd for cmd in CMD_REGISTRY for name in cmd.names}
+
+
 class Application:
     def __init__(self, entries, log_file=None):
         """Initialise the application from an ordered list of entry tuples.
@@ -764,11 +851,11 @@ class Application:
             self._create_default_config()
         self.prompt = None        # None = no prompt; dict = prompt is open (see _open_prompt_*)
         self.cmd = None           # None = inactive; dict = command mode open (text buffer + cursor)
-        self.cmd_history = []     # persistent command history (most recent last)
+        self.cmd_history = []     # list of previously entered commands (oldest first)
+        self._load_cmd_history()
         self.help_open = False    # True while the help overlay is visible
         self.help_scroll = 0      # first visible line index in the help overlay
         self.running = True
-        self._load_cmd_history()  # populate self.cmd_history from disk
         self.threads = []
 
         for kind, value in entries:
@@ -886,32 +973,89 @@ class Application:
             pass  # silently ignore — e.g. read-only filesystem or missing home directory
 
     def _load_cmd_history(self):
-        """Load command history from the XDG state file into self.cmd_history.
+        """Load command history from the XDG state file, silently ignoring errors.
 
-        Each non-empty line in the file is one history entry (most recent last).
-        Silently ignores a missing or unreadable file.
+        The history file contains one command per line (oldest first).  Blank
+        lines and lines that are only whitespace are skipped.  The most recent
+        _HISTORY_MAXLEN entries are kept in self.cmd_history.
         """
+        _HISTORY_MAXLEN = 500
         path = _history_path()
         try:
             with open(path) as f:
-                self.cmd_history = [line.rstrip('\n') for line in f if line.strip()]
+                lines = [l.rstrip('\n') for l in f if l.strip()]
+            self.cmd_history = lines[-_HISTORY_MAXLEN:]
         except OSError:
-            pass  # missing history file is not an error
+            pass  # missing file is fine
 
     def _save_cmd_history(self):
         """Persist self.cmd_history to the XDG state file, creating dirs as needed.
 
-        Writes at most 500 entries (most recent) to cap disk usage.
-        Silently ignores write errors.
+        Only the most recent _HISTORY_MAXLEN entries are written; errors are
+        silently ignored so a failed write never disrupts interactive use.
         """
+        _HISTORY_MAXLEN = 500
         path = _history_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w') as f:
-                for entry in self.cmd_history[-500:]:
-                    f.write(entry + '\n')
+                for line in self.cmd_history[-_HISTORY_MAXLEN:]:
+                    f.write(line + '\n')
         except OSError:
             pass  # silently ignore — e.g. read-only filesystem
+
+    def _get_completions(self, text):
+        """Return a sorted list of completion candidates for the current cmd-line text.
+
+        Context-sensitive:
+          empty / first token (no trailing space)
+                          — command names matching the typed prefix
+          two tokens / first token + trailing space
+                          — argument values for the recognised command
+          three or more tokens
+                          — no completions (return [])
+        """
+        parts = text.split()
+        completing_cmd = not parts or (len(parts) == 1 and not text.endswith(' '))
+        if completing_cmd:
+            prefix = parts[0].lstrip(':').lower() if parts else ''
+            return sorted(name for name in _CMD_MAP
+                          if name.startswith(prefix) and _CMD_MAP[name].completable)
+
+        cmd = parts[0].lstrip(':').lower()
+        # Offer argument completions for the second token only.
+        # Condition: we have at most 2 tokens and we are NOT positioned after a
+        # completed second token followed by a space (which would be the 3rd).
+        if len(parts) <= 2 and not (len(parts) == 2 and text.endswith(' ')):
+            arg_prefix = parts[1] if len(parts) == 2 else ''
+            cmd_def = _CMD_MAP.get(cmd)
+            if cmd_def and cmd_def.arg_completer is not None:
+                return cmd_def.arg_completer(arg_prefix)
+            if cmd_def and cmd_def.arg_choices is not None:
+                arg_prefix_lower = arg_prefix.lower()
+                choices = (cmd_def.arg_choices()
+                           if callable(cmd_def.arg_choices)
+                           else cmd_def.arg_choices)
+                return [c for c in choices if c.startswith(arg_prefix_lower)]
+
+        return []
+
+    @staticmethod
+    def _apply_completion(c, candidate):
+        """Replace the partial token at the end of c['chars'] with *candidate*.
+
+        The text before the last whitespace-separated token is kept unchanged;
+        only the rightmost token (or empty string after a trailing space) is
+        replaced.  The cursor is moved to the end of the substituted text.
+        """
+        text = ''.join(c['chars'])
+        last_space = text.rfind(' ')
+        if last_space == -1:
+            new_text = candidate
+        else:
+            new_text = text[:last_space + 1] + candidate
+        c['chars'] = list(new_text)
+        c['cursor'] = len(new_text)
 
     def start_monitoring(self):
         """Start all ping threads"""
@@ -1574,19 +1718,49 @@ class Application:
 
         Renders ':' followed by the typed text, reversed-video style, and
         positions the terminal cursor at the insertion point.
+
+        When completions are available (after the first Tab press) a popup
+        menu is drawn immediately above the command line.  The currently
+        highlighted candidate (comp_idx) is shown in bold+reverse; all others
+        are shown in plain reverse.  The popup scrolls so the highlighted entry
+        is always in view.
         """
-        text = ''.join(self.cmd['chars'])
+        c = self.cmd
+        completions = c.get('completions', [])
+        comp_idx = c.get('comp_idx', -1)
+
+        if completions:
+            # How many rows the popup can occupy (leave room for the cmd line itself)
+            max_popup_rows = min(len(completions), height - 2)
+            # Scroll the popup view so the highlighted entry is always visible.
+            if comp_idx < 0:
+                view_start = 0
+            else:
+                view_start = max(0, min(comp_idx, len(completions) - max_popup_rows))
+            for i, candidate in enumerate(completions[view_start:view_start + max_popup_rows]):
+                row = height - 1 - max_popup_rows + i
+                if row < 0:
+                    continue
+                actual_idx = view_start + i
+                attr = (curses.A_REVERSE | curses.A_BOLD) if actual_idx == comp_idx else curses.A_REVERSE
+                try:
+                    stdscr.addstr(row, 0, candidate.ljust(width - 1)[:width - 1], attr)
+                except curses.error:
+                    pass
+
+        text = ''.join(c['chars'])
         line = (':' + text).ljust(width - 1)[:width - 1]
         stdscr.addstr(height - 1, 0, line, curses.A_REVERSE)
-        cursor_x = min(1 + self.cmd['cursor'], width - 2)
+        cursor_x = min(1 + c['cursor'], width - 2)
         stdscr.move(height - 1, cursor_x)
 
     def _handle_cmd_key(self, key):
         """Process one keypress while command mode is active (readline-style editing).
 
         Supported bindings:
-          Enter          — dispatch the command (if non-empty)
-          Esc            — cancel and close command line
+          Tab            — complete to longest common prefix; list all matches (no cycling)
+          Enter          — dispatch the command (if non-empty) and save to history
+          Esc / Ctrl+C   — cancel and close command line
           Backspace/^H   — delete character before cursor
           Delete         — delete character at cursor
           Left / Right   — move cursor one character
@@ -1595,81 +1769,155 @@ class Application:
           Ctrl+K         — kill from cursor to end of line
           Ctrl+U         — kill from start of line to cursor
           Ctrl+W         — kill word backward (stop at whitespace boundary)
+          Up / Down      — navigate command history (Up=older, Down=newer)
           printable char — insert at cursor position
         """
         c = self.cmd
         chars = c['chars']
         cursor = c['cursor']
 
+        # ── Tab — completion (early return; never resets completion state) ─────
+        if key == ord('\t'):
+            text = ''.join(chars)
+
+            if not c['completions']:
+                # First Tab press: compute candidates from current text.
+                c['comp_prefix'] = text
+                c['completions'] = self._get_completions(text)
+                c['comp_idx'] = -1
+
+                if len(c['completions']) == 1:
+                    # Exactly one match — apply it directly and append a trailing
+                    # space so the user can immediately type the next argument.
+                    # Exception: directory paths (ending with '/') get no space
+                    # so the user can keep typing deeper into the path.
+                    c['comp_idx'] = 0
+                    c['chars'] = list(c['comp_prefix'])
+                    c['cursor'] = len(c['comp_prefix'])
+                    self._apply_completion(c, c['completions'][0])
+                    if not c['completions'][0].endswith('/'):
+                        c['chars'].append(' ')
+                        c['cursor'] += 1
+                    c['completions'] = []  # no popup needed for a unique match
+                    return
+
+                if len(c['completions']) > 1:
+                    # Multiple candidates — vim wildmode=longest: complete to the
+                    # longest common prefix (LCP) first.  If the LCP extends the
+                    # current partial token, apply it and leave the popup open so
+                    # the user can see the full candidate list.  If the LCP is no
+                    # longer than what is already typed, the popup stays as-is.
+                    lcp = c['completions'][0]
+                    for s in c['completions'][1:]:
+                        while not s.startswith(lcp):
+                            lcp = lcp[:-1]
+                            if not lcp:
+                                break
+
+                    # The "current token" is whatever _apply_completion would
+                    # replace: everything after the last space (or the whole text).
+                    last_space = text.rfind(' ')
+                    current_token = text[last_space + 1:] if last_space != -1 else text
+
+                    if len(lcp) > len(current_token):
+                        # LCP is longer — fill it in and wait for the next Tab.
+                        c['chars'] = list(c['comp_prefix'])
+                        c['cursor'] = len(c['comp_prefix'])
+                        self._apply_completion(c, lcp)
+                        return  # popup stays visible; next Tab will cycle
+
+                if not c['completions']:
+                    return  # no matches at all
+
+                # LCP gave no extension — popup is already showing; nothing more to do.
+                return  # wildmode=list: no cycling
+
+            # Popup already open — no-op (wildmode=list; Tab does not cycle).
+            return
+
+        # ── All non-Tab keys clear the completion popup ────────────────────────
+        c['completions'] = []
+        c['comp_idx'] = -1
+
         if key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
             text = ''.join(chars).strip()
             self.cmd = None
             if text:
-                # Deduplicate: remove any previous identical entry, append at the end
-                if self.cmd_history and self.cmd_history[-1] == text:
-                    pass  # already the most recent entry — no change
-                else:
-                    self.cmd_history = [e for e in self.cmd_history if e != text]
-                    self.cmd_history.append(text)
+                # Deduplicate: remove an earlier identical entry so the most
+                # recent invocation always sits at the end of the history list.
+                if text in self.cmd_history:
+                    self.cmd_history.remove(text)
+                self.cmd_history.append(text)
                 self._save_cmd_history()
                 self._dispatch_cmd(text)
+
         elif key in (27, 3):  # Escape / Ctrl+C — cancel
             self.cmd = None
+
+        elif key == curses.KEY_UP:
+            hist = self.cmd_history
+            if hist:
+                if c['hist_idx'] == -1:
+                    # First Up press: save the current (unsaved) line so it can
+                    # be restored when the user presses Down past the end.
+                    c['saved_line'] = ''.join(chars)
+                    c['hist_idx'] = len(hist) - 1
+                elif c['hist_idx'] > 0:
+                    c['hist_idx'] -= 1
+                entry = hist[c['hist_idx']]
+                c['chars'] = list(entry)
+                c['cursor'] = len(entry)
+
+        elif key == curses.KEY_DOWN:
+            if c['hist_idx'] != -1:
+                hist = self.cmd_history
+                if c['hist_idx'] < len(hist) - 1:
+                    c['hist_idx'] += 1
+                    entry = hist[c['hist_idx']]
+                    c['chars'] = list(entry)
+                    c['cursor'] = len(entry)
+                else:
+                    # Past the newest history entry — restore the saved line
+                    c['hist_idx'] = -1
+                    entry = c['saved_line']
+                    c['chars'] = list(entry)
+                    c['cursor'] = len(entry)
+
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             if cursor > 0:
                 del chars[cursor - 1]
                 c['cursor'] -= 1
-                c['hist_idx'] = -1
+            c['hist_idx'] = -1  # text edit breaks history navigation
+
         elif key == curses.KEY_DC:  # Delete key
             if cursor < len(chars):
                 del chars[cursor]
-                c['hist_idx'] = -1
+            c['hist_idx'] = -1
+
         elif key == curses.KEY_LEFT:
             if cursor > 0:
                 c['cursor'] -= 1
+            # Cursor movement does NOT reset hist_idx
+
         elif key == curses.KEY_RIGHT:
             if cursor < len(chars):
                 c['cursor'] += 1
-        elif key == curses.KEY_UP:
-            # Navigate backward (older) in command history
-            history = self.cmd_history
-            if history:
-                idx = c['hist_idx']
-                if idx == -1:
-                    # Save the current (unsaved) line before entering history
-                    c['saved_line'] = ''.join(chars)
-                    c['hist_idx'] = len(history) - 1
-                elif idx > 0:
-                    c['hist_idx'] -= 1
-                entry = history[c['hist_idx']]
-                c['chars'] = list(entry)
-                c['cursor'] = len(entry)
-        elif key == curses.KEY_DOWN:
-            # Navigate forward (newer) in command history, then restore saved line
-            idx = c['hist_idx']
-            if idx != -1:
-                if idx < len(self.cmd_history) - 1:
-                    c['hist_idx'] += 1
-                    entry = self.cmd_history[c['hist_idx']]
-                    c['chars'] = list(entry)
-                    c['cursor'] = len(entry)
-                else:
-                    # Past the newest entry — restore the line that was there before
-                    c['hist_idx'] = -1
-                    saved = c['saved_line']
-                    c['chars'] = list(saved)
-                    c['cursor'] = len(saved)
+
         elif key in (curses.KEY_HOME, 1):  # Home / Ctrl+A
             c['cursor'] = 0
+
         elif key in (curses.KEY_END, 5):  # End / Ctrl+E
             c['cursor'] = len(chars)
+
         elif key == 11:  # Ctrl+K — kill to end of line
             del chars[cursor:]
             c['hist_idx'] = -1
+
         elif key == 21:  # Ctrl+U — kill to start of line
             del chars[:cursor]
             c['cursor'] = 0
             c['hist_idx'] = -1
+
         elif key == 23:  # Ctrl+W — kill word backward
             end = cursor
             while cursor > 0 and chars[cursor - 1] == ' ':
@@ -1679,6 +1927,7 @@ class Application:
             del chars[cursor:end]
             c['cursor'] = cursor
             c['hist_idx'] = -1
+
         elif 32 <= key < 127:
             chars.insert(cursor, chr(key))
             c['cursor'] += 1
@@ -1737,186 +1986,180 @@ class Application:
         cmd  = parts[0].lstrip(':').lower()
         args = parts[1].strip() if len(parts) > 1 else ''
 
-        if cmd in ('q', 'quit'):
-            self.running = False
-
-        elif cmd == 'dns':
-            if args:
-                modes_lower = [m.lower() for m in DNS_MODES]
-                if args.lower() in modes_lower:
-                    self.dns_mode = modes_lower.index(args.lower())
-                    # Start DNS resolution threads if a resolve mode was activated
-                    if DNS_MODES[self.dns_mode] in ('hostname', 'ip'):
-                        for monitor in self.monitors:
-                            if monitor.resolved_ip is None:
-                                threading.Thread(
-                                    target=monitor.resolve_dns, daemon=True
-                                ).start()
-                else:
-                    self.add_event("cmd",
-                        f"dns: unknown mode '{args}' — choices: {' '.join(DNS_MODES)}")
-            else:
-                self.cycle_dns(1)
-
-        elif cmd == 'stats':
-            if args:
-                modes_lower = [m.lower() for m in STATS_MODES]
-                if args.lower() in modes_lower:
-                    self.stats_mode = modes_lower.index(args.lower())
-                else:
-                    self.add_event("cmd",
-                        f"stats: unknown mode '{args}' — choices: {' '.join(STATS_MODES)}")
-            else:
-                self.cycle_stats(1)
-
-        elif cmd == 'sort':
-            sorts = ['none', 'name', 'status', 'latency']
-            if args:
-                if args.lower() in sorts:
-                    self.sort_by = args.lower()
-                else:
-                    self.add_event("cmd",
-                        f"sort: unknown mode '{args}' — choices: {' '.join(sorts)}")
-            else:
-                self.cycle_sort(1)
-
-        elif cmd in ('history', 'hist'):
-            if args:
-                modes_lower = [m.lower() for m in HISTORY_MODES]
-                if args.lower() in modes_lower:
-                    self.history_mode = modes_lower.index(args.lower())
-                else:
-                    self.add_event("cmd",
-                        f"history: unknown mode '{args}' — choices: {' '.join(HISTORY_MODES)}")
-            else:
-                self.cycle_history_mode(1)
-
-        elif cmd == 'pause':
-            self.paused = not self.paused
-
-        elif cmd == 'seen':
-            self.mark_seen()
-
-        elif cmd == 'clear':
-            self.events.clear()
-            self.log_offset = 0
-
-        elif cmd == 'log':
-            if args:
-                if args.lower() == 'off':
-                    # Disable logging — stop appending to the current log file.
-                    if self._monitoring_started:
-                        if self.log_file:
-                            self.add_event("log", f"logging stopped (was: {self.log_file})")
-                        else:
-                            self.add_event("log", "logging is already off")
-                    self.log_file = None
-                else:
-                    # Activate streaming to the given file.  add_event() opens the
-                    # file lazily with 'a' mode, creating it on first write — no
-                    # header is written here and no prompt is needed.
-                    old = self.log_file
-                    self.log_file = args
-                    if self._monitoring_started and old != args:
-                        self.add_event("log", f"logging to: {args}")
-            else:
-                # No argument — report the currently active log file (or lack thereof).
-                if self.log_file:
-                    self.add_event("log", f"active log file: {self.log_file}")
-                else:
-                    self.add_event("log", "no log file active")
-
-        elif cmd == 'help':
-            self._cmd_help()
-
-        elif cmd == 'saveconfig':
-            if self._save_config():
-                self.add_event("config", f"settings saved to {_config_path()}")
-
-        elif cmd == 'resolv':
-            # :resolv <ip-pattern> <hostname-template> — static DNS override.
-            # The IP side may contain brace expansion (e.g. 10.0.{1..4}.1).
-            # \N in the hostname template is substituted with the value that
-            # brace group N (1-based, left-to-right) produced for each row.
-            parts = args.split(None, 1)
-            if len(parts) != 2:
-                self.add_event("cmd", "resolv: usage: :resolv <ip> <hostname>")
-            else:
-                ip_pattern, hostname_tmpl = parts[0], parts[1].strip()
-                try:
-                    rows = _expand_host_with_captures(ip_pattern)
-                except ValueError as e:
-                    self.add_event("cmd", f"resolv: brace expansion error: {e}")
-                else:
-                    for expanded_ip, captures in rows:
-                        if not _is_ip(expanded_ip):
-                            self.add_event("cmd",
-                                f"resolv: '{expanded_ip}' is not a valid IP address — skipped")
-                            continue
-                        hostname = _apply_backref(hostname_tmpl, captures)
-                        self._apply_hosts_entry(expanded_ip, hostname)
-
-        elif cmd in ('ssh-begin', 'ssh-end'):
-            # These are hosts-file-only block directives and cannot be used
-            # interactively (there is no mechanism to add plain host lines in
-            # the command line).  Give a helpful message instead of "unknown command".
-            self.add_event("cmd",
-                f"{cmd}: only supported in hosts files — use :ssh for interactive SSH")
-
-        elif cmd == 'ssh':
-            # :ssh [ssh-opts] <dest> <ping-host>
-            # All tokens except the last form the SSH arguments (including the destination).
-            # The last token is the host that the remote ping will target.
-            # At least two tokens are required: the SSH destination and the ping target.
-            # Examples:
-            #   :ssh user@host 8.8.8.8          → ssh user@host, ping 8.8.8.8
-            #   :ssh -J bastion user@host 8.8.8.8
-            if not args:
-                self.add_event("cmd",
-                    "ssh: usage: :ssh [opts] <dest> <ping-host>")
-            else:
-                try:
-                    tokens = shlex.split(args)
-                except ValueError as e:
-                    self.add_event("cmd", f"ssh: parse error: {e}")
-                else:
-                    if len(tokens) < 2:
-                        self.add_event("cmd",
-                            "ssh: usage: :ssh [opts] <dest> <ping-host>")
-                    else:
-                        # Last token is the ping target; everything else is SSH args.
-                        # The ping target may contain brace/dash expansion notation,
-                        # producing one monitor per expanded host.
-                        ping_host_pattern = tokens[-1]
-                        ssh_args = tokens[:-1]
-                        ssh_dest = ssh_args[-1]  # last SSH arg is the destination
-                        try:
-                            expanded_hosts = _expand_host(ping_host_pattern)
-                        except ValueError as e:
-                            self.add_event("cmd", f"ssh: brace expansion error: {e}")
-                        else:
-                            for ping_host in expanded_hosts:
-                                # Apply a static :resolv mapping if one exists for ping_host.
-                                # The label always shows the original name so the user can
-                                # tell which host they asked for; the subprocess targets the IP.
-                                actual_ping_host = self.hosts_map[ping_host][0] if ping_host in self.hosts_map else ping_host
-                                label = f"{ssh_dest}→{ping_host}"
-                                monitor = SshPingMonitor(ssh_args, actual_ping_host, label=label)
-                                self.monitors.append(monitor)
-                                self.entries.append(monitor)
-                                if self._monitoring_started:
-                                    thread = threading.Thread(
-                                        target=monitor.ping, daemon=True
-                                    )
-                                    thread.start()
-                                    self.threads.append(thread)
-
+        cmd_def = _CMD_MAP.get(cmd)
+        if cmd_def:
+            getattr(self, cmd_def.action)(args)
         else:
             self.add_event("cmd",
                 f"unknown command: {cmd}" + (f" {args}" if args else "")
                 + "  (try :help)")
 
-    def _cmd_help(self):
+    def _cmd_quit(self, args=''):
+        """Quit the application."""
+        self.running = False
+
+    def _cmd_dns(self, args=''):
+        """Cycle (no arg) or set DNS display mode."""
+        if args:
+            modes_lower = [m.lower() for m in DNS_MODES]
+            if args.lower() in modes_lower:
+                self.dns_mode = modes_lower.index(args.lower())
+                if DNS_MODES[self.dns_mode] in ('hostname', 'ip'):
+                    for monitor in self.monitors:
+                        if monitor.resolved_ip is None:
+                            threading.Thread(
+                                target=monitor.resolve_dns, daemon=True
+                            ).start()
+            else:
+                self.add_event("cmd",
+                    f"dns: unknown mode '{args}' — choices: {' '.join(DNS_MODES)}")
+        else:
+            self.cycle_dns(1)
+
+    def _cmd_stats(self, args=''):
+        """Cycle (no arg) or set stats column mode."""
+        if args:
+            modes_lower = [m.lower() for m in STATS_MODES]
+            if args.lower() in modes_lower:
+                self.stats_mode = modes_lower.index(args.lower())
+            else:
+                self.add_event("cmd",
+                    f"stats: unknown mode '{args}' — choices: {' '.join(STATS_MODES)}")
+        else:
+            self.cycle_stats(1)
+
+    def _cmd_sort(self, args=''):
+        """Cycle (no arg) or set sort order."""
+        sorts = ['none', 'name', 'status', 'latency']
+        if args:
+            if args.lower() in sorts:
+                self.sort_by = args.lower()
+            else:
+                self.add_event("cmd",
+                    f"sort: unknown mode '{args}' — choices: {' '.join(sorts)}")
+        else:
+            self.cycle_sort(1)
+
+    def _cmd_history(self, args=''):
+        """Cycle (no arg) or set history display mode."""
+        if args:
+            modes_lower = [m.lower() for m in HISTORY_MODES]
+            if args.lower() in modes_lower:
+                self.history_mode = modes_lower.index(args.lower())
+            else:
+                self.add_event("cmd",
+                    f"history: unknown mode '{args}' — choices: {' '.join(HISTORY_MODES)}")
+        else:
+            self.cycle_history_mode(1)
+
+    def _cmd_pause(self, args=''):
+        """Toggle pause on/off."""
+        self.paused = not self.paused
+
+    def _cmd_seen(self, args=''):
+        """Insert a 'seen' marker in the event log."""
+        self.mark_seen()
+
+    def _cmd_clear(self, args=''):
+        """Clear the event log."""
+        self.events.clear()
+        self.log_offset = 0
+
+    def _cmd_log(self, args=''):
+        """Show active log file, set/stream log to file, or disable logging."""
+        if args:
+            if args.lower() == 'off':
+                if self._monitoring_started:
+                    if self.log_file:
+                        self.add_event("log", f"logging stopped (was: {self.log_file})")
+                    else:
+                        self.add_event("log", "logging is already off")
+                self.log_file = None
+            else:
+                old = self.log_file
+                self.log_file = args
+                if self._monitoring_started and old != args:
+                    self.add_event("log", f"logging to: {args}")
+        else:
+            if self.log_file:
+                self.add_event("log", f"active log file: {self.log_file}")
+            else:
+                self.add_event("log", "no log file active")
+
+    def _cmd_saveconfig(self, args=''):
+        """Save current settings to config file."""
+        if self._save_config():
+            self.add_event("config", f"settings saved to {_config_path()}")
+
+    def _cmd_resolv(self, args=''):
+        """Apply a static DNS override: :resolv <ip-pattern> <hostname-template>."""
+        parts = args.split(None, 1)
+        if len(parts) != 2:
+            self.add_event("cmd", "resolv: usage: :resolv <ip> <hostname>")
+        else:
+            ip_pattern, hostname_tmpl = parts[0], parts[1].strip()
+            try:
+                rows = _expand_host_with_captures(ip_pattern)
+            except ValueError as e:
+                self.add_event("cmd", f"resolv: brace expansion error: {e}")
+            else:
+                for expanded_ip, captures in rows:
+                    if not _is_ip(expanded_ip):
+                        self.add_event("cmd",
+                            f"resolv: '{expanded_ip}' is not a valid IP address — skipped")
+                        continue
+                    hostname = _apply_backref(hostname_tmpl, captures)
+                    self._apply_hosts_entry(expanded_ip, hostname)
+
+    def _cmd_ssh(self, args=''):
+        """Add a remote-ping monitor: :ssh [opts] <dest> <ping-host>."""
+        if not args:
+            self.add_event("cmd",
+                "ssh: usage: :ssh [opts] <dest> <ping-host>")
+        else:
+            try:
+                tokens = shlex.split(args)
+            except ValueError as e:
+                self.add_event("cmd", f"ssh: parse error: {e}")
+            else:
+                if len(tokens) < 2:
+                    self.add_event("cmd",
+                        "ssh: usage: :ssh [opts] <dest> <ping-host>")
+                else:
+                    ping_host_pattern = tokens[-1]
+                    ssh_args = tokens[:-1]
+                    ssh_dest = ssh_args[-1]
+                    try:
+                        expanded_hosts = _expand_host(ping_host_pattern)
+                    except ValueError as e:
+                        self.add_event("cmd", f"ssh: brace expansion error: {e}")
+                    else:
+                        for ping_host in expanded_hosts:
+                            actual_ping_host = (self.hosts_map[ping_host][0]
+                                                if ping_host in self.hosts_map
+                                                else ping_host)
+                            label = f"{ssh_dest}→{ping_host}"
+                            monitor = SshPingMonitor(ssh_args, actual_ping_host, label=label)
+                            self.monitors.append(monitor)
+                            self.entries.append(monitor)
+                            if self._monitoring_started:
+                                thread = threading.Thread(
+                                    target=monitor.ping, daemon=True
+                                )
+                                thread.start()
+                                self.threads.append(thread)
+
+    def _cmd_ssh_begin(self, args=''):
+        """Report that :ssh-begin is a hosts-file-only directive."""
+        self.add_event("cmd",
+            "ssh-begin: only supported in hosts files — use :ssh for interactive SSH")
+
+    def _cmd_ssh_end(self, args=''):
+        """Report that :ssh-end is a hosts-file-only directive."""
+        self.add_event("cmd",
+            "ssh-end: only supported in hosts files — use :ssh for interactive SSH")
+
+    def _cmd_help(self, args=''):
         """Open the help overlay (sets self.help_open = True).
 
         The overlay is drawn by _draw_help_overlay() and is never written to
@@ -2114,7 +2357,11 @@ class Application:
                 elif key == ord('C'):
                     self._open_prompt_clear()
                 elif key == ord(':'):
-                    self.cmd = {'chars': [], 'cursor': 0, 'hist_idx': -1, 'saved_line': ''}
+                    self.cmd = {
+                        'chars': [], 'cursor': 0,
+                        'hist_idx': -1, 'saved_line': '',
+                        'completions': [], 'comp_idx': -1, 'comp_prefix': '',
+                    }
                 elif key == ord('?'):
                     self._cmd_help()
                 # History scrolling (left/right arrows)
