@@ -745,6 +745,7 @@ class Application:
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
         self.log_file = None        # path to append event log, or None
+        self._monitoring_started = False  # set True once start_monitoring() is called
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
             self.log_file = log_file
@@ -756,7 +757,6 @@ class Application:
         self.help_scroll = 0      # first visible line index in the help overlay
         self.running = True
         self.threads = []
-        self._monitoring_started = False  # set True once start_monitoring() is called
 
         for kind, value in entries:
             if kind == 'host':
@@ -797,14 +797,20 @@ class Application:
     def _load_config(self):
         """Load settings from the XDG config file, silently ignoring a missing file.
 
-        Recognised keys (case-insensitive; unknown keys are silently skipped):
-          dns      — one of DNS_MODES ('off', 'hostname', 'ip')
-          stats    — one of STATS_MODES ('off', 'Loss%', 'Avg', …, 'All')
-          sort     — one of 'none', 'name', 'status', 'latency'
-          history  — one of HISTORY_MODES ('success', 'rtt', 'scaled')
-          log      — file path to stream events to; empty value disables logging
+        The file uses the same ':cmd [args]' syntax as the interactive command
+        line and hosts files.  Lines starting with '#' are comments; lines that
+        do not start with ':' are silently skipped.
 
-        Lines starting with '#' are comments; lines without '=' are ignored.
+        Supported commands:
+          :dns [off|hostname|ip]   — set DNS display mode
+          :stats [mode]            — set stats column mode
+          :sort [mode]             — set sort order
+          :history [mode]          — set history display mode
+          :log [path|off]          — set or disable the streaming log file
+
+        All commands are dispatched through _dispatch_cmd().  Because
+        _monitoring_started is False at this point, no add_event() calls are
+        made and no side-effects (prompts, file I/O) are triggered.
         """
         path = _config_path()
         try:
@@ -813,34 +819,17 @@ class Application:
                     line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    if '=' not in line:
-                        continue
-                    key, _, val = line.partition('=')
-                    key = key.strip().lower()
-                    val = val.strip()
-                    if key == 'dns':
-                        modes_lower = [m.lower() for m in DNS_MODES]
-                        if val.lower() in modes_lower:
-                            self.dns_mode = modes_lower.index(val.lower())
-                    elif key == 'stats':
-                        modes_lower = [m.lower() for m in STATS_MODES]
-                        if val.lower() in modes_lower:
-                            self.stats_mode = modes_lower.index(val.lower())
-                    elif key == 'sort':
-                        sorts = ['none', 'name', 'status', 'latency']
-                        if val.lower() in sorts:
-                            self.sort_by = val.lower()
-                    elif key == 'history':
-                        modes_lower = [m.lower() for m in HISTORY_MODES]
-                        if val.lower() in modes_lower:
-                            self.history_mode = modes_lower.index(val.lower())
-                    elif key == 'log':
-                        self.log_file = val if val else None
+                    if not line.startswith(':'):
+                        continue  # silently ignore non-command lines
+                    self._dispatch_cmd(line)
         except OSError:
             pass  # missing or unreadable config file is not an error
 
     def _save_config(self):
         """Write current settings to the XDG config file, creating dirs as needed.
+
+        Uses the same ':cmd args' syntax as the interactive command line so the
+        file can be edited by hand with the same commands used at the ':' prompt.
 
         Returns True on success, False on failure (error is also logged to events).
         """
@@ -849,14 +838,14 @@ class Application:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w') as f:
                 f.write("# ping-bulk configuration\n")
-                f.write(f"dns = {DNS_MODES[self.dns_mode]}\n")
-                f.write(f"stats = {STATS_MODES[self.stats_mode]}\n")
-                f.write(f"sort = {self.sort_by}\n")
-                f.write(f"history = {HISTORY_MODES[self.history_mode]}\n")
+                f.write(f":dns {DNS_MODES[self.dns_mode]}\n")
+                f.write(f":stats {STATS_MODES[self.stats_mode]}\n")
+                f.write(f":sort {self.sort_by}\n")
+                f.write(f":history {HISTORY_MODES[self.history_mode]}\n")
                 if self.log_file:
-                    f.write(f"log = {self.log_file}\n")
+                    f.write(f":log {self.log_file}\n")
                 else:
-                    f.write("# log =\n")
+                    f.write("# :log\n")
         except OSError as e:
             self.add_event("config", f"error saving config: {e}")
             return False
@@ -875,11 +864,11 @@ class Application:
                 f.write("# ping-bulk configuration\n")
                 f.write("# Generated on first run — edit as needed.\n")
                 f.write("#\n")
-                f.write(f"# dns = off          # choices: {' | '.join(DNS_MODES)}\n")
-                f.write(f"# stats = off        # choices: {' | '.join(STATS_MODES)}\n")
-                f.write( "# sort = none        # choices: none | name | status | latency\n")
-                f.write(f"# history = success  # choices: {' | '.join(HISTORY_MODES)}\n")
-                f.write( "# log =              # path to stream event log; leave blank to disable\n")
+                f.write(f"# :dns off          # choices: {' | '.join(DNS_MODES)}\n")
+                f.write(f"# :stats off        # choices: {' | '.join(STATS_MODES)}\n")
+                f.write( "# :sort none        # choices: none | name | status | latency\n")
+                f.write(f"# :history success  # choices: {' | '.join(HISTORY_MODES)}\n")
+                f.write( "# :log              # path to stream event log; leave blank to disable\n")
         except OSError:
             pass  # silently ignore — e.g. read-only filesystem or missing home directory
 
@@ -1733,19 +1722,20 @@ class Application:
             if args:
                 if args.lower() == 'off':
                     # Disable logging — stop appending to the current log file.
-                    if self.log_file:
-                        self.add_event("log", f"logging stopped (was: {self.log_file})")
-                        self.log_file = None
-                    else:
-                        self.add_event("log", "logging is already off")
-                elif os.path.exists(args):
-                    # File already exists — skip filename entry and go straight to
-                    # the truncate/append confirmation step.
-                    self.prompt = {'type': 'save_confirm', 'filename': args, 'chars': []}
+                    if self._monitoring_started:
+                        if self.log_file:
+                            self.add_event("log", f"logging stopped (was: {self.log_file})")
+                        else:
+                            self.add_event("log", "logging is already off")
+                    self.log_file = None
                 else:
-                    # New file — activate streaming immediately without any prompt.
-                    self.save_to_file(args)
+                    # Activate streaming to the given file.  add_event() opens the
+                    # file lazily with 'a' mode, creating it on first write — no
+                    # header is written here and no prompt is needed.
+                    old = self.log_file
                     self.log_file = args
+                    if self._monitoring_started and old != args:
+                        self.add_event("log", f"logging to: {args}")
             else:
                 # No argument — report the currently active log file (or lack thereof).
                 if self.log_file:

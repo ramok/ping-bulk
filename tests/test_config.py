@@ -120,7 +120,7 @@ class TestLoadConfig:
 
     def test_dns_mode_loaded(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, 'dns = hostname\n')
+        app = make_app(pb, cfg, ':dns hostname\n')
         idx = pb.DNS_MODES.index('hostname')
         assert app.dns_mode == idx, (
             f"Expected dns_mode={idx} for 'hostname', got {app.dns_mode}"
@@ -128,7 +128,7 @@ class TestLoadConfig:
 
     def test_stats_mode_loaded(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, 'stats = Loss%\n')
+        app = make_app(pb, cfg, ':stats Loss%\n')
         idx = pb.STATS_MODES.index('Loss%')
         assert app.stats_mode == idx, (
             f"Expected stats_mode={idx} for 'Loss%', got {app.stats_mode}"
@@ -136,14 +136,14 @@ class TestLoadConfig:
 
     def test_sort_loaded(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, 'sort = name\n')
+        app = make_app(pb, cfg, ':sort name\n')
         assert app.sort_by == 'name', (
             f"Expected sort_by='name', got {app.sort_by!r}"
         )
 
     def test_history_mode_loaded(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, 'history = rtt\n')
+        app = make_app(pb, cfg, ':history rtt\n')
         idx = pb.HISTORY_MODES.index('rtt')
         assert app.history_mode == idx, (
             f"Expected history_mode={idx} for 'rtt', got {app.history_mode}"
@@ -152,26 +152,26 @@ class TestLoadConfig:
     def test_log_file_loaded(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         log_path = str(tmp_path / 'events.log')
-        app = make_app(pb, cfg, f'log = {log_path}\n')
+        app = make_app(pb, cfg, f':log {log_path}\n')
         assert app.log_file == log_path, (
             f"Expected log_file={log_path!r}, got {app.log_file!r}"
         )
 
     def test_empty_log_value_disables_logging(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, 'log =\n')
+        app = make_app(pb, cfg, ':log off\n')
         assert app.log_file is None, (
-            f"Expected log_file=None for empty 'log =' value, got {app.log_file!r}"
+            f"Expected log_file=None for ':log off', got {app.log_file!r}"
         )
 
     def test_all_settings_loaded_together(self, pb, tmp_path):
-        """All recognised keys can appear in a single config file."""
+        """All recognised commands can appear in a single config file."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         config_text = (
-            'dns = ip\n'
-            'stats = Avg\n'
-            'sort = latency\n'
-            'history = scaled\n'
+            ':dns ip\n'
+            ':stats Avg\n'
+            ':sort latency\n'
+            ':history scaled\n'
         )
         app = make_app(pb, cfg, config_text)
         assert app.dns_mode  == pb.DNS_MODES.index('ip')
@@ -182,38 +182,38 @@ class TestLoadConfig:
     def test_comment_lines_ignored(self, pb, tmp_path):
         """Lines starting with '#' must not be parsed."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, '# dns = hostname\n# stats = Max\n')
+        app = make_app(pb, cfg, '# :dns hostname\n# :stats Max\n')
         assert app.dns_mode == 0,    "Comment line changed dns_mode"
         assert app.stats_mode == 0,  "Comment line changed stats_mode"
 
-    def test_unknown_key_silently_ignored(self, pb, tmp_path):
-        """Unknown keys must be silently ignored; defaults remain unchanged."""
+    def test_unknown_command_silently_ignored(self, pb, tmp_path):
+        """Unknown commands must leave all settings at their defaults."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, 'unknownkey = foobar\n')
+        app = make_app(pb, cfg, ':unknownkey foobar\n')
         # Defaults: dns_mode=0, stats_mode=0, sort_by='none', history_mode=0
         assert app.dns_mode    == 0
         assert app.stats_mode  == 0
         assert app.sort_by     == 'none'
         assert app.history_mode == 0
 
-    def test_line_without_equals_ignored(self, pb, tmp_path):
-        """Lines without '=' must be silently skipped."""
+    def test_line_without_colon_ignored(self, pb, tmp_path):
+        """Lines not starting with ':' must be silently skipped."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, 'dns hostname\njust-a-word\n')
-        assert app.dns_mode == 0, "Line without '=' changed dns_mode"
+        assert app.dns_mode == 0, "Line without ':' prefix changed dns_mode"
 
     def test_invalid_dns_value_ignored(self, pb, tmp_path):
-        """An unrecognised value for a known key must not change the setting."""
+        """An unrecognised value for a known command must not change the setting."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, 'dns = invalid_mode\n')
+        app = make_app(pb, cfg, ':dns invalid_mode\n')
         assert app.dns_mode == 0, (
             f"Invalid dns value should be ignored; dns_mode={app.dns_mode}"
         )
 
-    def test_case_insensitive_key(self, pb, tmp_path):
-        """Keys are compared case-insensitively."""
+    def test_case_insensitive_command(self, pb, tmp_path):
+        """Command names are compared case-insensitively."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, 'DNS = hostname\nSTATS = Max\n')
+        app = make_app(pb, cfg, ':DNS hostname\n:STATS Max\n')
         assert app.dns_mode   == pb.DNS_MODES.index('hostname')
         assert app.stats_mode == pb.STATS_MODES.index('Max')
 
@@ -309,7 +309,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert 'dns = ip' in content, f"dns setting not found in saved config:\n{content}"
+        assert ':dns ip' in content, f"dns setting not found in saved config:\n{content}"
 
     def test_stats_persisted(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -319,7 +319,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert 'stats = Avg' in content
+        assert ':stats Avg' in content
 
     def test_sort_persisted(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -329,7 +329,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert 'sort = latency' in content
+        assert ':sort latency' in content
 
     def test_history_persisted(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -339,7 +339,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert 'history = scaled' in content
+        assert ':history scaled' in content
 
     def test_log_file_persisted_when_set(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -350,7 +350,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert f'log = {log_path}' in content
+        assert f':log {log_path}' in content
 
     def test_log_commented_when_none(self, pb, tmp_path):
         """When log_file is None, the saved config must have a commented-out log line."""
@@ -361,13 +361,13 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        # Active 'log = ...' should NOT appear; a commented placeholder should.
-        assert '# log =' in content, (
+        # Active ':log ...' should NOT appear; a commented placeholder should.
+        assert '# :log' in content, (
             "Expected commented-out log line when log_file is None"
         )
         for line in content.splitlines():
-            if '=' in line and line.strip().startswith('log'):
-                pytest.fail(f"Uncommented 'log' setting found when log_file is None: {line!r}")
+            if line.strip().startswith(':log') and not line.strip().startswith('#'):
+                pytest.fail(f"Uncommented ':log' setting found when log_file is None: {line!r}")
 
     def test_roundtrip(self, pb, tmp_path):
         """Settings written by _save_config() are correctly read back by _load_config()."""
@@ -439,7 +439,7 @@ class TestSaveConfigCommand:
             app._dispatch_cmd('saveconfig')
         with open(cfg) as f:
             content = f.read()
-        assert 'dns = ip' in content
+        assert ':dns ip' in content
 
     def test_saveconfig_colon_prefix_accepted(self, pb, tmp_path):
         """':saveconfig' (with leading colon) must also work."""
@@ -461,8 +461,8 @@ class TestLogFileCliOverride:
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         config_log  = str(tmp_path / 'config.log')
         cli_log     = str(tmp_path / 'cli.log')
-        # Write config with log = config_log
-        config_text = f'log = {config_log}\n'
+        # Write config with :log config_log
+        config_text = f':log {config_log}\n'
         app = make_app(pb, cfg, config_text, log_file=cli_log)
         assert app.log_file == cli_log, (
             f"CLI log_file should override config; got {app.log_file!r}"
@@ -472,7 +472,7 @@ class TestLogFileCliOverride:
         """When no CLI log_file is given the value from config is used."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         config_log = str(tmp_path / 'config.log')
-        config_text = f'log = {config_log}\n'
+        config_text = f':log {config_log}\n'
         app = make_app(pb, cfg, config_text, log_file=None)
         assert app.log_file == config_log, (
             f"Config log file should be used when CLI arg is absent; got {app.log_file!r}"
