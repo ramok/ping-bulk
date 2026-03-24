@@ -1758,7 +1758,8 @@ class Application:
         """Process one keypress while command mode is active (readline-style editing).
 
         Supported bindings:
-          Tab            — complete to longest common prefix; list all matches (no cycling)
+          Tab            — complete to LCP; open popup; then cycle forward through candidates
+          Shift+Tab      — cycle backward through completion candidates
           Enter          — dispatch the command (if non-empty) and save to history
           Esc / Ctrl+C   — cancel and close command line
           Backspace/^H   — delete character before cursor
@@ -1832,7 +1833,42 @@ class Application:
                 # LCP gave no extension — popup is already showing; nothing more to do.
                 return  # wildmode=list: no cycling
 
-            # Popup already open — no-op (wildmode=list; Tab does not cycle).
+            # Popup already open — cycle forward through candidates.
+            n = len(c['completions'])
+            c['comp_idx'] = (c['comp_idx'] + 1) % n
+            c['chars'] = list(c['comp_prefix'])
+            c['cursor'] = len(c['comp_prefix'])
+            self._apply_completion(c, c['completions'][c['comp_idx']])
+            return
+
+        # ── Shift+Tab — cycle backward through completion candidates ──────────
+        if key == curses.KEY_BTAB:
+            if not c['completions']:
+                # No popup yet — compute completions from current text.
+                text = ''.join(chars)
+                c['comp_prefix'] = text
+                c['completions'] = self._get_completions(text)
+                c['comp_idx'] = -1
+                if not c['completions']:
+                    return
+                if len(c['completions']) == 1:
+                    # Unique match — apply immediately (same as Tab unique-match).
+                    c['comp_idx'] = 0
+                    c['chars'] = list(c['comp_prefix'])
+                    c['cursor'] = len(c['comp_prefix'])
+                    self._apply_completion(c, c['completions'][0])
+                    if not c['completions'][0].endswith('/'):
+                        c['chars'].append(' ')
+                        c['cursor'] += 1
+                    c['completions'] = []
+                    return
+            # Cycle backward: wrap from 0 (or -1) to the last candidate.
+            n = len(c['completions'])
+            idx = c['comp_idx']
+            c['comp_idx'] = (n - 1) if idx <= 0 else (idx - 1)
+            c['chars'] = list(c['comp_prefix'])
+            c['cursor'] = len(c['comp_prefix'])
+            self._apply_completion(c, c['completions'][c['comp_idx']])
             return
 
         # ── All non-Tab keys clear the completion popup ────────────────────────
@@ -2238,12 +2274,47 @@ class Application:
             except curses.error:
                 pass
 
+    def _register_shift_tab_seqs(self):
+        """Register Shift+Tab escape sequences as KEY_BTAB with ncurses.
+
+        Terminals differ in what they send for Shift+Tab:
+          \\x1b[Z         — standard VT100 / xterm (terminfo: kcbt)
+          \\x1b[27;2;9~   — XTerm modifyOtherKeys / kitty
+
+        curses only translates \\x1b[Z when the active terminfo entry has 'kcbt';
+        many terminals (tmux, screen, SSH clients) lack it.  Python's curses
+        module also does not expose define_key(), so we call the underlying
+        ncurses library directly via ctypes.
+
+        Both paths are best-effort: any failure is silently ignored so a
+        missing curses.define_key or unavailable shared library never prevents
+        startup.
+        """
+        _BTAB_SEQS = (b'\x1b[Z', b'\x1b[27;2;9~')
+        try:
+            for _seq in _BTAB_SEQS:
+                curses.define_key(_seq.decode(), curses.KEY_BTAB)
+        except AttributeError:
+            try:
+                import ctypes
+                import ctypes.util
+                _lib_name = (ctypes.util.find_library('ncursesw')
+                             or ctypes.util.find_library('ncurses'))
+                if _lib_name:
+                    _nclib = ctypes.CDLL(_lib_name)
+                    for _seq in _BTAB_SEQS:
+                        _nclib.define_key(_seq, curses.KEY_BTAB)
+            except Exception:
+                pass  # best-effort; Shift+Tab falls back to no-op on this terminal
+
     def run(self, stdscr):
         """Main application loop"""
         # Initialize curses
         curses.curs_set(0)
         stdscr.nodelay(1)
         stdscr.timeout(100)
+
+        self._register_shift_tab_seqs()
 
         # Initialize colors
         curses.start_color()

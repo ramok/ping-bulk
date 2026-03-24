@@ -12,11 +12,13 @@ Covers three layers of the completion system:
       command-line buffer with the chosen candidate and moves the cursor to
       the end of the substituted text.
 
-  Application._handle_cmd_key(key) — Tab path only
+  Application._handle_cmd_key(key) — Tab / Shift+Tab paths
       The Tab key invokes _get_completions(), applies LCP (longest-common-prefix)
       when multiple candidates share a longer prefix than what is already typed,
-      and opens a popup list (wildmode=list: no cycling).  A second Tab while
-      the popup is open is a no-op.
+      and opens a popup list.  Subsequent Tab presses cycle *forward* through the
+      candidates (like Vim's wildmode=full).  Shift+Tab cycles *backward*.  When
+      only one candidate exists it is applied immediately with a trailing space
+      and no popup is shown.
 
 No ping threads are started; the Application is built from a single
 in-memory host entry with a mocked config path so the real user config is
@@ -33,6 +35,7 @@ app (function-scoped)
     accept keystrokes.
 """
 
+import curses
 import importlib.machinery
 import importlib.util
 import os
@@ -317,7 +320,8 @@ class TestApplyCompletion:
 class TestTabHandling:
     """Tests for the Tab-key completion path inside _handle_cmd_key."""
 
-    TAB = ord('\t')
+    TAB       = ord('\t')
+    SHIFT_TAB = curses.KEY_BTAB
 
     # ── Unique match ─────────────────────────────────────────────────────
 
@@ -451,28 +455,27 @@ class TestTabHandling:
             f"Expected empty completions for no match, got {app.cmd['completions']}"
         )
 
-    # ── Second Tab with popup open (wildmode=list: no cycling) ───────────
+    # ── Tab cycling (forward, wildmode=full) ─────────────────────────────
 
     def test_second_tab_with_popup_open_text_unchanged(self, app):
-        """A second Tab while the popup is already open must not change the text."""
+        """A second Tab while the popup is open cycles forward to the first candidate."""
         _set_text(app, 'h')
-        app._handle_cmd_key(self.TAB)   # opens popup
-        text_after_first_tab = ''.join(app.cmd['chars'])
-        app._handle_cmd_key(self.TAB)   # second Tab — should be no-op
-        text_after_second_tab = ''.join(app.cmd['chars'])
-        assert text_after_second_tab == text_after_first_tab, (
-            f"Second Tab changed text from {text_after_first_tab!r} "
-            f"to {text_after_second_tab!r}"
+        app._handle_cmd_key(self.TAB)   # opens popup, comp_idx=-1, text='h'
+        first_candidate = app.cmd['completions'][0]
+        app._handle_cmd_key(self.TAB)   # second Tab — cycles to first candidate
+        text = ''.join(app.cmd['chars'])
+        assert text == first_candidate, (
+            f"Expected text={first_candidate!r} (first candidate) after second Tab, "
+            f"got {text!r}"
         )
 
     def test_second_tab_with_popup_open_comp_idx_unchanged(self, app):
-        """A second Tab while the popup is open must not change comp_idx."""
+        """A second Tab while the popup is open must advance comp_idx to 0."""
         _set_text(app, 'h')
         app._handle_cmd_key(self.TAB)
-        comp_idx_after_first = app.cmd['comp_idx']
         app._handle_cmd_key(self.TAB)
-        assert app.cmd['comp_idx'] == comp_idx_after_first, (
-            f"comp_idx changed on second Tab: {comp_idx_after_first} → {app.cmd['comp_idx']}"
+        assert app.cmd['comp_idx'] == 0, (
+            f"Expected comp_idx=0 after second Tab, got {app.cmd['comp_idx']}"
         )
 
     def test_second_tab_popup_completions_unchanged(self, app):
@@ -483,6 +486,47 @@ class TestTabHandling:
         app._handle_cmd_key(self.TAB)
         assert app.cmd['completions'] == completions_after_first, (
             "Second Tab changed the completions list"
+        )
+
+    def test_third_tab_cycles_to_second_candidate(self, app):
+        """A third Tab must advance comp_idx to 1 and apply the second candidate.
+
+        Completions for 'h' = ['help', 'hist', 'history'] (sorted).
+        Tab×1: popup opens, comp_idx=-1, text='h' (LCP='h', no extension).
+        Tab×2: comp_idx=0, text='help'.
+        Tab×3: comp_idx=1, text='hist'.
+        """
+        _set_text(app, 'h')
+        app._handle_cmd_key(self.TAB)   # Tab×1 — opens popup, comp_idx=-1
+        app._handle_cmd_key(self.TAB)   # Tab×2 — comp_idx=0, text='help'
+        app._handle_cmd_key(self.TAB)   # Tab×3 — comp_idx=1, text='hist'
+        assert app.cmd['comp_idx'] == 1, (
+            f"Expected comp_idx=1 after third Tab, got {app.cmd['comp_idx']}"
+        )
+        text = ''.join(app.cmd['chars'])
+        assert text == 'hist', (
+            f"Expected text='hist' after third Tab, got {text!r}"
+        )
+
+    def test_tab_wraps_from_last_to_first(self, app):
+        """After cycling through all candidates a further Tab wraps back to first.
+
+        Completions for 'h' = ['help', 'hist', 'history'] (sorted, n=3).
+        Tab×1: popup opens, comp_idx=-1.
+        Tab×2: comp_idx=0 ('help').
+        Tab×3: comp_idx=1 ('hist').
+        Tab×4: comp_idx=2 ('history').
+        Tab×5: wraps → comp_idx=0 ('help').
+        """
+        _set_text(app, 'h')
+        for _ in range(5):
+            app._handle_cmd_key(self.TAB)
+        assert app.cmd['comp_idx'] == 0, (
+            f"Expected comp_idx=0 after wrap-around, got {app.cmd['comp_idx']}"
+        )
+        text = ''.join(app.cmd['chars'])
+        assert text == 'help', (
+            f"Expected text='help' after wrap-around, got {text!r}"
         )
 
     # ── Non-Tab key clears popup ──────────────────────────────────────────
@@ -510,6 +554,119 @@ class TestTabHandling:
         text = ''.join(app.cmd['chars'])
         assert text.endswith('e'), (
             f"Expected text to end with 'e' after key press, got {text!r}"
+        )
+
+    # ── Shift+Tab cycling (backward) ─────────────────────────────────────
+
+    def test_shift_tab_no_popup_opens_popup_and_wraps_to_last(self, app):
+        """Shift+Tab with no open popup must open it and wrap to the last candidate.
+
+        Completions for 'h' = ['help', 'hist', 'history'] (sorted, n=3).
+        Shift+Tab wrap rule: (n-1) if idx <= 0.
+        comp_idx starts at -1 → wraps to 2 → text='history'.
+        """
+        _set_text(app, 'h')
+        app._handle_cmd_key(self.SHIFT_TAB)
+        assert app.cmd['comp_idx'] == 2, (
+            f"Expected comp_idx=2 (last candidate) after cold Shift+Tab, "
+            f"got {app.cmd['comp_idx']}"
+        )
+        text = ''.join(app.cmd['chars'])
+        assert text == 'history', (
+            f"Expected text='history' after cold Shift+Tab, got {text!r}"
+        )
+
+    def test_shift_tab_popup_open_at_minus_one_wraps_to_last(self, app):
+        """Shift+Tab while popup is open with comp_idx=-1 must wrap to last candidate.
+
+        Tab×1: popup opens, comp_idx=-1, text='h' (LCP no extension).
+        Shift+Tab: comp_idx=-1 → wraps to 2 → text='history'.
+        """
+        _set_text(app, 'h')
+        app._handle_cmd_key(self.TAB)           # Tab×1: popup, comp_idx=-1
+        app._handle_cmd_key(self.SHIFT_TAB)     # Shift+Tab: wraps to last
+        assert app.cmd['comp_idx'] == 2, (
+            f"Expected comp_idx=2 after Tab×1 + Shift+Tab, got {app.cmd['comp_idx']}"
+        )
+        text = ''.join(app.cmd['chars'])
+        assert text == 'history', (
+            f"Expected text='history' after Tab×1 + Shift+Tab, got {text!r}"
+        )
+
+    def test_shift_tab_from_comp_idx_zero_wraps_to_last(self, app):
+        """Shift+Tab when comp_idx=0 must wrap backward to the last candidate.
+
+        Tab×2: comp_idx=0, text='help'.
+        Shift+Tab: comp_idx=0 → (n-1) = 2 → text='history'.
+        """
+        _set_text(app, 'h')
+        app._handle_cmd_key(self.TAB)           # Tab×1: popup, comp_idx=-1
+        app._handle_cmd_key(self.TAB)           # Tab×2: comp_idx=0, text='help'
+        app._handle_cmd_key(self.SHIFT_TAB)     # Shift+Tab: 0 → wraps to 2
+        assert app.cmd['comp_idx'] == 2, (
+            f"Expected comp_idx=2 after Tab×2 + Shift+Tab, got {app.cmd['comp_idx']}"
+        )
+        text = ''.join(app.cmd['chars'])
+        assert text == 'history', (
+            f"Expected text='history' after Tab×2 + Shift+Tab, got {text!r}"
+        )
+
+    def test_shift_tab_from_comp_idx_one_goes_to_zero(self, app):
+        """Shift+Tab when comp_idx=1 must step back to 0.
+
+        Tab×3: comp_idx=1, text='hist'.
+        Shift+Tab: comp_idx=1 → 0 → text='help'.
+        """
+        _set_text(app, 'h')
+        app._handle_cmd_key(self.TAB)           # Tab×1: popup, comp_idx=-1
+        app._handle_cmd_key(self.TAB)           # Tab×2: comp_idx=0
+        app._handle_cmd_key(self.TAB)           # Tab×3: comp_idx=1, text='hist'
+        app._handle_cmd_key(self.SHIFT_TAB)     # Shift+Tab: 1 → 0
+        assert app.cmd['comp_idx'] == 0, (
+            f"Expected comp_idx=0 after Tab×3 + Shift+Tab, got {app.cmd['comp_idx']}"
+        )
+        text = ''.join(app.cmd['chars'])
+        assert text == 'help', (
+            f"Expected text='help' after Tab×3 + Shift+Tab, got {text!r}"
+        )
+
+    def test_shift_tab_from_comp_idx_two_goes_to_one(self, app):
+        """Shift+Tab when comp_idx=2 must step back to 1.
+
+        Tab×4: comp_idx=2, text='history'.
+        Shift+Tab: comp_idx=2 → 1 → text='hist'.
+        """
+        _set_text(app, 'h')
+        app._handle_cmd_key(self.TAB)           # Tab×1: popup, comp_idx=-1
+        app._handle_cmd_key(self.TAB)           # Tab×2: comp_idx=0
+        app._handle_cmd_key(self.TAB)           # Tab×3: comp_idx=1
+        app._handle_cmd_key(self.TAB)           # Tab×4: comp_idx=2, text='history'
+        app._handle_cmd_key(self.SHIFT_TAB)     # Shift+Tab: 2 → 1
+        assert app.cmd['comp_idx'] == 1, (
+            f"Expected comp_idx=1 after Tab×4 + Shift+Tab, got {app.cmd['comp_idx']}"
+        )
+        text = ''.join(app.cmd['chars'])
+        assert text == 'hist', (
+            f"Expected text='hist' after Tab×4 + Shift+Tab, got {text!r}"
+        )
+
+    def test_shift_tab_unique_match_applies_with_trailing_space(self, app):
+        """Shift+Tab on a unique match must apply it immediately with a trailing space.
+
+        'lo' has a single completion: 'log'.
+        Shift+Tab must behave identically to Tab for a unique match:
+        apply 'log' + trailing space, clear the popup.
+        """
+        _set_text(app, 'lo')
+        app._handle_cmd_key(self.SHIFT_TAB)
+        text = ''.join(app.cmd['chars'])
+        assert text == 'log ', (
+            f"Expected 'log ' (with trailing space) after Shift+Tab unique match, "
+            f"got {text!r}"
+        )
+        assert app.cmd['completions'] == [], (
+            f"Expected completions cleared after unique Shift+Tab match, "
+            f"got {app.cmd['completions']}"
         )
 
     # ── Argument completions via Tab ──────────────────────────────────────
