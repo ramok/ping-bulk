@@ -295,33 +295,46 @@ def _expand_host_with_captures(pattern):
     return results
 
 
-def _apply_backref(template, captures):
-    r"""Substitute ``\1``…``\9`` in *template* with values from *captures*.
+def _apply_backref(template, captures, full_str=None):
+    r"""Substitute ``\0``…``\9`` / ``$0``…``$9`` in *template* with captured values.
 
-    ``\N`` (1-based) is replaced by ``captures[N-1]``.  References to
-    groups that do not exist (index out of range) are left unchanged so
-    the user can see the un-substituted placeholder rather than silently
-    getting wrong output.
+    ``\0`` / ``$0`` is replaced by *full_str* (the complete expanded string for
+    this iteration).  ``\N`` / ``$N`` (N ≥ 1, 1-based) is replaced by
+    ``captures[N-1]``.  References to groups that do not exist (index out of
+    range, or *full_str* is ``None`` for index 0) are left unchanged so the
+    user can see the un-substituted placeholder rather than silently getting
+    wrong output.
 
     Parameters
     ----------
     template : str
-        String that may contain ``\1`` … ``\9`` placeholders.
+        String that may contain ``\0``…``\9`` or ``$0``…``$9`` placeholders.
     captures : list[str]
         Values produced by :func:`_expand_host_with_captures` for one row.
+    full_str : str or None
+        The fully-expanded host string for this iteration; used for ``\0`` /
+        ``$0``.  Pass ``None`` when no full-string context is available.
 
     Returns
     -------
     str
-        *template* with all in-range ``\N`` sequences replaced.
+        *template* with all in-range back-reference sequences replaced.
     """
     import re
 
     def _sub(m):
         idx = int(m.group(1))
+        if idx == 0:
+            return full_str if full_str is not None else m.group(0)
         return captures[idx - 1] if 1 <= idx <= len(captures) else m.group(0)
 
-    return re.sub(r'\\(\d)', _sub, template)
+    return re.sub(r'(?:\\|\$)(\d)', _sub, template)
+
+
+def _has_backref(s):
+    r"""Return True if *s* contains any ``\0``…``\9`` or ``$0``…``$9`` placeholder."""
+    import re
+    return bool(re.search(r'(?:\\|\$)[0-9]', s))
 
 
 def _config_path():
@@ -636,6 +649,108 @@ class SectionLabel:
         self.title = title
 
 
+def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
+    """Expand a ``:for`` loop and return a list of entry tuples.
+
+    Applies back-references (``\\0``–``\\9`` / ``$0``–``$9``) to each body
+    line for every expansion of *pattern*.  Body lines that contain no
+    back-reference are included only once (on the very first iteration) and a
+    ``('warn', …)`` entry is emitted so the event log surfaces the issue.
+
+    Parameters
+    ----------
+    pattern : str
+        The ``:for`` expansion pattern (e.g. ``sensor-hub-{1-3,5}``).
+    body_lines : list[str]
+        Stripped body lines collected between ``:for`` and ``:done``
+        (comments and blank lines are already excluded).
+    seen_hosts : set
+        Mutable set of already-encountered host/SSH-command strings; updated
+        in place so deduplication spans the whole file.
+    ssh_block_args : str or None
+        When non-``None`` the loop is nested inside an ``:ssh-begin`` block;
+        plain host lines become ``:ssh <ssh_block_args> <host>`` commands.
+
+    Returns
+    -------
+    list of (str, str)
+        Tuples of the same kinds as :func:`parse_hosts_file` returns, plus
+        ``('warn', message)`` for no-backref and duplicate-host situations.
+    """
+    entries = []
+    try:
+        rows = _expand_host_with_captures(pattern)
+    except ValueError as e:
+        return [('error', f":for expansion error: {e}")]
+
+    # Track no-backref body lines already emitted (add-once logic).
+    no_backref_emitted = set()
+
+    for iteration_idx, (full_str, captures) in enumerate(rows):
+        for line in body_lines:
+            if line.startswith('##'):
+                # Section header — apply back-references and emit every iteration.
+                title_tmpl = line[2:].strip()
+                title = _apply_backref(title_tmpl, captures, full_str)
+                entries.append(('section', title))
+
+            elif line.startswith(':'):
+                parts = line.split(None, 1)
+                cmd_word = parts[0][1:].lower()
+                if cmd_word == 'title':
+                    title_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                    title = _apply_backref(title_tmpl, captures, full_str)
+                    entries.append(('section', title))
+                else:
+                    # Generic command — apply back-references and emit every iteration.
+                    expanded_cmd = _apply_backref(line, captures, full_str)
+                    entries.append(('cmd', expanded_cmd))
+
+            else:
+                # Host line.
+                if _has_backref(line):
+                    # Substitute back-references then expand remaining brace groups.
+                    expanded_tmpl = _apply_backref(line, captures, full_str)
+                    try:
+                        expanded_hosts = _expand_host(expanded_tmpl)
+                    except ValueError as e:
+                        entries.append(('error', str(e)))
+                        continue
+                    for host in expanded_hosts:
+                        key = (ssh_block_args, host)
+                        if key in seen_hosts:
+                            entries.append(('warn', f"duplicate host ignored: {host}"))
+                        else:
+                            seen_hosts.add(key)
+                            if ssh_block_args is not None:
+                                entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
+                            else:
+                                entries.append(('host', host))
+                else:
+                    # No back-reference — include only on first encounter, then warn.
+                    if line not in no_backref_emitted:
+                        no_backref_emitted.add(line)
+                        entries.append(('warn',
+                            f"host {line!r} inside :for loop has no back-reference; added once"))
+                        try:
+                            expanded_hosts = _expand_host(line)
+                        except ValueError as e:
+                            entries.append(('error', str(e)))
+                            continue
+                        for host in expanded_hosts:
+                            key = (ssh_block_args, host)
+                            if key in seen_hosts:
+                                entries.append(('warn', f"duplicate host ignored: {host}"))
+                            else:
+                                seen_hosts.add(key)
+                                if ssh_block_args is not None:
+                                    entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
+                                else:
+                                    entries.append(('host', host))
+
+    return entries
+
+
 def parse_hosts_file(filename):
     """Parse a hosts file and return an ordered list of entry tuples.
 
@@ -643,6 +758,8 @@ def parse_hosts_file(filename):
       ('host',    'hostname-or-ip')  — a host to ping
       ('section', 'Title text')      — a section header (display-only row)
       ('cmd',     ':cmd [args]')     — a startup command applied before monitoring begins
+      ('warn',    'message')         — non-fatal warning (duplicate host, no back-ref, …)
+      ('error',   'message')         — non-fatal parse/expansion error
 
     File format rules:
       ## Title        — section header (legacy); 'Title' is everything after '## '
@@ -652,6 +769,10 @@ def parse_hosts_file(filename):
                         expanded into ':ssh [ssh-opts] <dest> <host>' commands.
                         Blocks may not be nested.
       :ssh-end        — close the current SSH block
+      :for pattern    — open a loop; every body line is repeated for each expansion
+                        of *pattern*, with back-references (\\N / $N) substituted.
+                        :for may appear inside an :ssh-begin block.
+      :done           — close the most recent :for loop
       :cmd [args]     — any other ':'-prefixed line is treated as a startup command
                         (same syntax as the interactive ':' command line)
       # ...           — comment line; ignored entirely
@@ -661,6 +782,15 @@ def parse_hosts_file(filename):
     """
     entries = []
     ssh_block_args = None  # None = not inside an :ssh-begin block; str = SSH args
+
+    # Global dedup: (ssh_block_args_or_None, host) → already seen.
+    seen_hosts = set()
+
+    # :for loop state
+    for_loop_pattern = None   # None = not inside a :for loop; str = loop pattern
+    for_loop_body = []        # body lines collected between :for and :done
+    for_loop_ssh_args = None  # ssh_block_args captured when :for was opened
+
     with open(filename) as f:
         # Pre-process: join continuation lines (a line ending with '\' is
         # concatenated with the next line, with the backslash removed).
@@ -685,6 +815,38 @@ def parse_hosts_file(filename):
             line = line.strip()
             if not line:
                 continue
+
+            # ── :for body collection ───────────────────────────────────────
+            if for_loop_pattern is not None:
+                # Skip comments inside the body (but keep ## section headers).
+                if line.startswith('#') and not line.startswith('##'):
+                    continue
+                if line.startswith(':'):
+                    parts = line.split(None, 1)
+                    cmd_word = parts[0][1:].lower()
+                    if cmd_word == 'done':
+                        # End of loop — process the collected body.
+                        entries.extend(_process_for_loop(
+                            for_loop_pattern, for_loop_body,
+                            seen_hosts, for_loop_ssh_args,
+                        ))
+                        for_loop_pattern = None
+                        for_loop_body = []
+                        for_loop_ssh_args = None
+                        continue
+                    elif cmd_word == 'for':
+                        entries.append(('error', "nested :for is not supported"))
+                        continue
+                    elif cmd_word == 'ssh-begin':
+                        entries.append(('error', ":ssh-begin inside :for is not supported"))
+                        continue
+                    elif cmd_word == 'ssh-end':
+                        entries.append(('error', ":ssh-end inside :for is not supported"))
+                        continue
+                for_loop_body.append(line)
+                continue
+
+            # ── Normal line processing (outside a :for loop) ───────────────
             if line.startswith('##'):
                 title = line[2:].strip()
                 entries.append(('section', title))
@@ -701,27 +863,50 @@ def parse_hosts_file(filename):
                     ssh_block_args = parts[1].strip() if len(parts) > 1 else ''
                 elif cmd_word == 'ssh-end':
                     ssh_block_args = None
+                elif cmd_word == 'for':
+                    # Start :for loop — capture pattern and current SSH context.
+                    for_loop_pattern = parts[1].strip() if len(parts) > 1 else ''
+                    for_loop_body = []
+                    for_loop_ssh_args = ssh_block_args
+                elif cmd_word == 'done':
+                    entries.append(('error', ":done without :for"))
                 else:
                     entries.append(('cmd', line))
             else:
                 if ssh_block_args is not None:
-                    # Inside an :ssh-begin block — expand each host and emit an :ssh command
+                    # Inside an :ssh-begin block — expand each host and emit an :ssh command.
                     try:
                         expanded = _expand_host(line)
                     except ValueError as e:
                         entries.append(('error', str(e)))
                     else:
                         for host in expanded:
-                            entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
+                            key = (ssh_block_args, host)
+                            if key in seen_hosts:
+                                entries.append(('warn', f"duplicate host ignored: {host}"))
+                            else:
+                                seen_hosts.add(key)
+                                entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
                 else:
-                    # Plain host line — expand brace notation into individual entries
+                    # Plain host line — expand brace notation into individual entries.
                     try:
                         expanded = _expand_host(line)
                     except ValueError as e:
                         entries.append(('error', str(e)))
                     else:
                         for host in expanded:
-                            entries.append(('host', host))
+                            key = (None, host)
+                            if key in seen_hosts:
+                                entries.append(('warn', f"duplicate host ignored: {host}"))
+                            else:
+                                seen_hosts.add(key)
+                                entries.append(('host', host))
+
+    # Warn if the file ended while still inside a :for loop.
+    if for_loop_pattern is not None:
+        entries.append(('error',
+            f"unclosed :for loop (pattern: {for_loop_pattern!r})"))
+
     return entries
 
 
@@ -874,6 +1059,8 @@ class Application:
                 self.entries.append(SectionLabel(value))
             elif kind == 'cmd':
                 self._dispatch_cmd(value)
+            elif kind == 'warn':
+                self.add_event("hosts", f"warning: {value}")
             elif kind == 'error':
                 self.add_event("hosts", f"expansion error: {value}")
 
