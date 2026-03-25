@@ -1339,6 +1339,17 @@ class Application:
                            else cmd_def.arg_choices)
                 return [c for c in choices if c.startswith(arg_prefix_lower)]
 
+        # Special case: ':set <param> [value]' — complete the value for the given parameter.
+        # This is a 3-token completion that the generic 2-token block above cannot handle.
+        if cmd == 'set' and len(parts) >= 2:
+            subcmd = parts[1].lower()
+            param = _SET_PARAM_MAP.get(subcmd)
+            if param is not None:
+                # Complete the value token (3rd), but not beyond it.
+                if len(parts) <= 3 and not (len(parts) == 3 and text.endswith(' ')):
+                    arg_prefix = parts[2].lower() if len(parts) == 3 else ''
+                    return [v for v in param.get_values() if v.startswith(arg_prefix)]
+
         return []
 
     @staticmethod

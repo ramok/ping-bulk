@@ -699,3 +699,73 @@ class TestTabHandling:
             f"Expected 'dns zzz' unchanged, got {text!r}"
         )
 
+    # ── :set <param> <value> completions ─────────────────────────────────
+
+    def test_set_param_value_all_completions(self, app, pb):
+        """':set stats ' + Tab → popup lists all stats mode values."""
+        _set_text(app, 'set stats ')
+        app._handle_cmd_key(self.TAB)
+        expected = {m.lower() for m in pb.STATS_MODES}
+        assert set(app.cmd['completions']) == expected, (
+            f"Expected all stats modes {expected}, got {app.cmd['completions']}"
+        )
+
+    def test_set_param_value_prefix_filter(self, app):
+        """':set stats lo' + Tab → unique match 'loss%' applied with trailing space."""
+        _set_text(app, 'set stats lo')
+        app._handle_cmd_key(self.TAB)
+        text = ''.join(app.cmd['chars'])
+        assert text == 'set stats loss% ', (
+            f"Expected 'set stats loss% ' after Tab, got {text!r}"
+        )
+
+    def test_set_param_value_prefix_filter_avg(self, app):
+        """':set stats av' + Tab → unique match 'avg' applied with trailing space.
+
+        'a' alone matches both 'avg' and 'all'; 'av' is the shortest unambiguous prefix.
+        """
+        _set_text(app, 'set stats av')
+        app._handle_cmd_key(self.TAB)
+        text = ''.join(app.cmd['chars'])
+        assert text == 'set stats avg ', (
+            f"Expected 'set stats avg ' after Tab, got {text!r}"
+        )
+
+    def test_set_param_value_no_completion_after_complete_value(self, app):
+        """':set stats loss% ' (trailing space = 4th token) + Tab → no completions."""
+        _set_text(app, 'set stats loss% ')
+        app._handle_cmd_key(self.TAB)
+        assert app.cmd['completions'] == [], (
+            f"Expected no completions beyond 3 tokens, got {app.cmd['completions']}"
+        )
+        text = ''.join(app.cmd['chars'])
+        assert text == 'set stats loss% ', (
+            f"Expected text unchanged, got {text!r}"
+        )
+
+    def test_set_param_value_dns_hostname(self, app):
+        """':set dns h' + Tab → unique match 'hostname' applied with trailing space."""
+        _set_text(app, 'set dns h')
+        app._handle_cmd_key(self.TAB)
+        text = ''.join(app.cmd['chars'])
+        assert text == 'set dns hostname ', (
+            f"Expected 'set dns hostname ' after Tab, got {text!r}"
+        )
+
+    def test_set_param_value_unknown_param_no_completions(self, app):
+        """':set zzz v' + Tab → unknown param, no completions."""
+        _set_text(app, 'set zzz v')
+        app._handle_cmd_key(self.TAB)
+        assert app.cmd['completions'] == [], (
+            f"Expected no completions for unknown :set param, got {app.cmd['completions']}"
+        )
+
+    def test_set_param_value_no_match_text_unchanged(self, app):
+        """':set stats zzz' + Tab → no value matches, text unchanged."""
+        _set_text(app, 'set stats zzz')
+        app._handle_cmd_key(self.TAB)
+        text = ''.join(app.cmd['chars'])
+        assert text == 'set stats zzz', (
+            f"Expected 'set stats zzz' unchanged, got {text!r}"
+        )
+
