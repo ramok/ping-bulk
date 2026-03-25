@@ -161,3 +161,61 @@ class TestBackslashContinuation:
             ('cmd',     ':resolv 10.0.0.1 router1'),
         ], f"Normal-line parsing changed unexpectedly; got {entries!r}"
 
+
+# ===========================================================================
+# TestInlineComment
+# ===========================================================================
+
+class TestInlineComment:
+    """'host ## comment' inline annotation: emits :resolv for IPs, ignored for hostnames."""
+
+    def test_ip_with_inline_comment_emits_resolv(self, pb, tmp_path):
+        """An IP followed by '## label' must emit a :resolv command before the host entry."""
+        content = "10.0.0.1 ## router\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd',  ':resolv 10.0.0.1 router'),
+            ('host', '10.0.0.1'),
+        ], f"Expected resolv+host for IP with inline comment; got {entries!r}"
+
+    def test_hostname_with_inline_comment_no_resolv(self, pb, tmp_path):
+        """A hostname followed by '## label' must emit only a host entry (no :resolv)."""
+        content = "web.example.com ## webserver\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('host', 'web.example.com'),
+        ], f"Expected host-only for hostname with inline comment; got {entries!r}"
+
+    def test_ip_without_inline_comment_no_resolv(self, pb, tmp_path):
+        """A plain IP with no inline comment must emit only a host entry."""
+        content = "192.168.1.1\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('host', '192.168.1.1'),
+        ], f"Expected host-only for plain IP; got {entries!r}"
+
+    def test_section_header_not_treated_as_inline_comment(self, pb, tmp_path):
+        """A '## Section' line must produce a section entry, not a resolv command."""
+        content = "## Routers\n10.0.0.1\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('section', 'Routers'),
+            ('host',    '10.0.0.1'),
+        ], f"Section header must not be treated as inline comment; got {entries!r}"
+
+    def test_multiple_ips_with_inline_comments(self, pb, tmp_path):
+        """Each IP with an inline comment gets its own :resolv + host pair."""
+        content = textwrap.dedent("""\
+            10.0.0.1 ## gw1
+            10.0.0.2 ## gw2
+            hostname.local ## ignored
+        """)
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd',  ':resolv 10.0.0.1 gw1'),
+            ('host', '10.0.0.1'),
+            ('cmd',  ':resolv 10.0.0.2 gw2'),
+            ('host', '10.0.0.2'),
+            ('host', 'hostname.local'),
+        ], f"Unexpected entries for multiple annotated lines; got {entries!r}"
+

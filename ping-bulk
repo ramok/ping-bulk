@@ -136,6 +136,26 @@ _FATAL_SSH_ERRORS = (
 )
 
 
+def _strip_inline_comment(line):
+    """Strip an inline ``##`` comment from *line* and return ``(main, comment)``.
+
+    A ``##`` at the very start of the line (a section-header) is **not** treated
+    as an inline comment — the line is returned unchanged with an empty comment.
+
+    Examples::
+
+        '10.0.0.1 ## router'  → ('10.0.0.1', 'router')
+        '## Section'          → ('## Section', '')
+        '10.0.0.1'            → ('10.0.0.1', '')
+    """
+    if line.startswith('##'):
+        return line, ''
+    idx = line.find(' ## ')
+    if idx == -1:
+        return line, ''
+    return line[:idx].rstrip(), line[idx + 4:].strip()
+
+
 def _is_ip(s):
     """Return True if *s* looks like an IPv4 or IPv6 address (not a hostname).
 
@@ -927,6 +947,12 @@ def parse_hosts_file(filename):
             if not line:
                 continue
 
+            # Strip inline ## comment (e.g. '10.0.0.1 ## router').
+            # Section-header lines (starting with '##') are left untouched.
+            line, inline_comment = _strip_inline_comment(line)
+            if not line:
+                continue
+
             # ── :for body collection ───────────────────────────────────────
             if for_loop_pattern is not None:
                 # Skip comments inside the body (but keep ## section headers).
@@ -1011,6 +1037,8 @@ def parse_hosts_file(filename):
                                 entries.append(('warn', f"duplicate host ignored: {host}"))
                             else:
                                 seen_hosts.add(key)
+                                if inline_comment and _is_ip(host):
+                                    entries.append(('cmd', f':resolv {host} {inline_comment}'))
                                 entries.append(('host', host))
 
     # Warn if the file ended while still inside a :for loop.
