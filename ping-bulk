@@ -23,6 +23,43 @@ HISTORY_MODES = ['success', 'rtt', 'scaled']
 # ip       — resolve every entry to its IP address
 DNS_MODES = ['off', 'hostname', 'ip']
 
+class SetParam:
+    """Descriptor for a single ':set' sub-command parameter.
+
+    name   — sub-command name used after ':set' (e.g. 'dns', 'ping-view')
+    action — name of the Application method to delegate to (e.g. '_cmd_dns')
+    values — list[str] or zero-argument callable returning list[str]
+    help   — short description shown in the help overlay
+    """
+    __slots__ = ('name', 'action', 'values', 'help')
+
+    def __init__(self, name, action, values, help=''):
+        self.name   = name
+        self.action = action
+        self.values = values
+        self.help   = help
+
+    def get_values(self):
+        """Return the list of valid values, evaluating a callable if necessary."""
+        return self.values() if callable(self.values) else self.values
+
+
+# Single source of truth for all parameters accepted by the ':set' command.
+SET_PARAMS = [
+    SetParam('dns',       '_cmd_dns',     lambda: [m.lower() for m in DNS_MODES],
+             'DNS display mode'),
+    SetParam('stats',     '_cmd_stats',   lambda: [m.lower() for m in STATS_MODES],
+             'stats column mode'),
+    SetParam('sort',      '_cmd_sort',    ['none', 'name', 'status', 'latency'],
+             'sort order'),
+    SetParam('ping-view', '_cmd_history', lambda: [m.lower() for m in HISTORY_MODES],
+             'ping history display mode'),
+]
+
+# Flat name → SetParam lookup used by _cmd_set and _get_completions.
+_SET_PARAM_MAP: dict = {p.name: p for p in SET_PARAMS}
+
+
 # Help overlay content — displayed in a popup window, never written to the event log.
 # Each string is padded/truncated to _HELP_INNER_W characters when rendered.
 _HELP_INNER_W = 70
@@ -51,13 +88,16 @@ _HELP_LINES = [
     f"                           modes: {' | '.join(STATS_MODES)}",
     "  :sort [mode]             cycle or set sort order",
     "                           modes: none | name | status | latency",
-    "  :history [mode]          cycle or set history display mode",
+    "  :ping-view [mode]         cycle or set history display mode",
     f"                           modes: {' | '.join(HISTORY_MODES)}",
+    f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
+    "                           set any display mode by name (delegates to the",
+    "                           individual commands above; omit value to cycle)",
     "  :pause                   toggle pause on/off",
     "  :seen                    insert 'seen' marker in event log",
     "  :clear                   clear event log",
-      "  :log [file|off]          show active log file, set/save log to file, or disable logging",
-        "  :saveconfig              save current settings to config file",
+    "  :log [file|off]          show active log file, set/save log to file, or disable logging",
+    "  :saveconfig              save current settings to config file",
     "  :resolv <ip-pat> <host>  static name→IP mapping (overrides DNS for ping and SSH)",
     "                           ip-pat may use brace expansion; \\N in host = brace group N",
     "  :ssh [opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
@@ -968,8 +1008,11 @@ CMD_REGISTRY = [
            '[mode]',              'cycle or set stats column'),
     CmdDef(['sort'],             '_cmd_sort',       ['none', 'name', 'status', 'latency'],
            '[mode]',              'cycle or set sort order'),
-    CmdDef(['history', 'hist'],  '_cmd_history',    lambda: [m.lower() for m in HISTORY_MODES],
+    CmdDef(['ping-view', 'history', 'hist'], '_cmd_history', lambda: [m.lower() for m in HISTORY_MODES],
            '[mode]',              'cycle or set history display mode'),
+    CmdDef(['set'],              '_cmd_set',        [p.name for p in SET_PARAMS],
+           '|'.join(p.name for p in SET_PARAMS) + ' [value]',
+           'set a display mode (delegates to the individual commands)'),
     CmdDef(['pause'],            '_cmd_pause',      None,
            '',                    'toggle pause on/off'),
     CmdDef(['seen'],             '_cmd_seen',       None,
@@ -1092,7 +1135,7 @@ class Application:
           :dns [off|hostname|ip]   — set DNS display mode
           :stats [mode]            — set stats column mode
           :sort [mode]             — set sort order
-          :history [mode]          — set history display mode
+          :ping-view [mode]        — set history display mode
           :log [path|off]          — set or disable the streaming log file
 
         All commands are dispatched through _dispatch_cmd().  Because
@@ -1128,7 +1171,7 @@ class Application:
                 f.write(f":dns {DNS_MODES[self.dns_mode]}\n")
                 f.write(f":stats {STATS_MODES[self.stats_mode]}\n")
                 f.write(f":sort {self.sort_by}\n")
-                f.write(f":history {HISTORY_MODES[self.history_mode]}\n")
+                f.write(f":ping-view {HISTORY_MODES[self.history_mode]}\n")
                 if self.log_file:
                     f.write(f":log {self.log_file}\n")
                 else:
@@ -1154,7 +1197,7 @@ class Application:
                 f.write(f"# :dns off          # choices: {' | '.join(DNS_MODES)}\n")
                 f.write(f"# :stats off        # choices: {' | '.join(STATS_MODES)}\n")
                 f.write( "# :sort none        # choices: none | name | status | latency\n")
-                f.write(f"# :history success  # choices: {' | '.join(HISTORY_MODES)}\n")
+                f.write(f"# :ping-view success  # choices: {' | '.join(HISTORY_MODES)}\n")
                 f.write( "# :log              # path to stream event log; leave blank to disable\n")
         except OSError:
             pass  # silently ignore — e.g. read-only filesystem or missing home directory
@@ -2275,6 +2318,32 @@ class Application:
         else:
             self.cycle_history_mode(1)
 
+    def _cmd_set(self, args=''):
+        """Set a display mode by name: :set <setting> [value].
+
+        Delegates to the corresponding individual command handler, so every
+        value accepted by the individual commands is also accepted here.
+        With no value the targeted setting is cycled forward (same behaviour
+        as calling the individual command with no argument).
+
+        Supported settings are defined in SET_PARAMS (dns, stats, sort,
+        ping-view).  Each entry maps to the corresponding _cmd_* method.
+        """
+        parts = args.split(None, 1)
+        if not parts:
+            choices = '|'.join(p.name for p in SET_PARAMS)
+            self.add_event("cmd", f"set: usage: :set {choices} [value]")
+            return
+        subcmd = parts[0].lower()
+        subargs = parts[1].strip() if len(parts) > 1 else ''
+        param = _SET_PARAM_MAP.get(subcmd)
+        if param is None:
+            choices = '  '.join(p.name for p in SET_PARAMS)
+            self.add_event("cmd",
+                f"set: unknown setting '{subcmd}' — choices: {choices}")
+        else:
+            getattr(self, param.action)(subargs)
+
     def _cmd_pause(self, args=''):
         """Toggle pause on/off."""
         self.paused = not self.paused
@@ -2692,6 +2761,30 @@ press '?' inside the app for the full keyboard reference.\
         help='append event log entries to this file in real time',
     )
     parser.add_argument(
+        '--dns',
+        metavar='MODE',
+        choices=[m.lower() for m in DNS_MODES],
+        help=f"DNS display mode at startup: {' | '.join(m.lower() for m in DNS_MODES)}",
+    )
+    parser.add_argument(
+        '--stats',
+        metavar='MODE',
+        choices=[m.lower() for m in STATS_MODES],
+        help=f"stats column at startup: {' | '.join(m.lower() for m in STATS_MODES)}".replace('%', '%%'),
+    )
+    parser.add_argument(
+        '--sort',
+        metavar='MODE',
+        choices=['none', 'name', 'status', 'latency'],
+        help='sort order at startup: none | name | status | latency',
+    )
+    parser.add_argument(
+        '--ping-view',
+        metavar='MODE',
+        choices=[m.lower() for m in HISTORY_MODES],
+        help=f"ping history display mode at startup: {' | '.join(m.lower() for m in HISTORY_MODES)}",
+    )
+    parser.add_argument(
         'hosts',
         nargs='*',
         metavar='HOST',
@@ -2726,6 +2819,20 @@ def main(stdscr, args):
         return
 
     app = Application(entries, log_file=args.log_file)
+
+    # Apply any display-mode flags supplied on the command line.
+    # These run after _load_config() so they always take precedence over the
+    # config file.  Delegate through _dispatch_cmd so validation and cycling
+    # logic is identical to the interactive ':cmd value' path.
+    if args.dns:
+        app._dispatch_cmd(f':dns {args.dns}')
+    if args.stats:
+        app._dispatch_cmd(f':stats {args.stats}')
+    if args.sort:
+        app._dispatch_cmd(f':sort {args.sort}')
+    if args.ping_view:
+        app._dispatch_cmd(f':ping-view {args.ping_view}')
+
     app.run(stdscr)
 
 if __name__ == "__main__":

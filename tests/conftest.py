@@ -10,7 +10,12 @@ tmux_app_40
 
 tmux_app_50
     A running ping-bulk session in a 120×50 tmux window.
-    At this height the help overlay fits without a scroll indicator.
+    At this height the overlay still needs a small scroll range (max_scroll=2).
+
+tmux_app_52
+    A running ping-bulk session in a 120×52 tmux window.
+    At this height all 50 help lines fit (visible_count=50, max_scroll=0)
+    so the scroll indicator is absent.
 
 tmux_app_15
     A running ping-bulk session in a 120×15 tmux window.
@@ -111,8 +116,16 @@ def tmux_app_40(app_path: str, check_integration_deps):
 
 @pytest.fixture
 def tmux_app_50(app_path: str, check_integration_deps):
-    """ping-bulk in a 120×50 window.  Help overlay fits without scrolling."""
+    """ping-bulk in a 120×50 window.  Help overlay still needs scroll (max_scroll=2)."""
     sess = _make_app_session('ping-bulk-test-50', app_path, width=120, height=50)
+    yield sess
+    sess.kill()
+
+
+@pytest.fixture
+def tmux_app_52(app_path: str, check_integration_deps):
+    """ping-bulk in a 120×52 window.  All 50 help lines fit; no scroll indicator."""
+    sess = _make_app_session('ping-bulk-test-52', app_path, width=120, height=52)
     yield sess
     sess.kill()
 

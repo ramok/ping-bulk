@@ -143,7 +143,7 @@ class TestLoadConfig:
 
     def test_history_mode_loaded(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, ':history rtt\n')
+        app = make_app(pb, cfg, ':ping-view rtt\n')
         idx = pb.HISTORY_MODES.index('rtt')
         assert app.history_mode == idx, (
             f"Expected history_mode={idx} for 'rtt', got {app.history_mode}"
@@ -171,7 +171,7 @@ class TestLoadConfig:
             ':dns ip\n'
             ':stats Avg\n'
             ':sort latency\n'
-            ':history scaled\n'
+            ':ping-view scaled\n'
         )
         app = make_app(pb, cfg, config_text)
         assert app.dns_mode  == pb.DNS_MODES.index('ip')
@@ -339,7 +339,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert ':history scaled' in content
+        assert ':ping-view scaled' in content
 
     def test_log_file_persisted_when_set(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
