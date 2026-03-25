@@ -12,7 +12,7 @@ from collections import deque
 from datetime import datetime
 
 # Stats column modes cycled with [s]; 'off' means hidden
-STATS_MODES = ['off', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', 'All']
+STATS_MODES = ['off', 'Down', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', 'All']
 
 # Ping history character modes cycled with [h]
 HISTORY_MODES = ['success', 'rtt', 'scaled']
@@ -399,6 +399,33 @@ def _history_path():
     return os.path.join(base, 'ping-bulk', 'history')
 
 
+def _format_updown_time(seconds):
+    """Format a duration in seconds into a compact human-readable string.
+
+    Output examples and maximum widths:
+      < 60 s       → "59s"        (3 chars)
+      < 1 h        → "59m 59s"    (7 chars)
+      < 24 h       → "23h 59m"    (7 chars)
+      ≥ 24 h       → "365d 23h"   (8 chars)
+
+    The returned string is at most 8 characters wide.
+    """
+    secs = int(seconds)
+    if secs < 60:
+        return f"{secs}s"
+    mins = secs // 60
+    secs_rem = secs % 60
+    if mins < 60:
+        return f"{mins}m {secs_rem}s"
+    hours = mins // 60
+    mins_rem = mins % 60
+    if hours < 24:
+        return f"{hours}h {mins_rem}m"
+    days = hours // 24
+    hours_rem = hours % 24
+    return f"{days}d {hours_rem}h"
+
+
 def _history_char(val, mode):
     """Convert a raw history value (float ms, None, or 'ERR') to a single display character.
 
@@ -431,6 +458,7 @@ class PingMonitor:
         self.xx_count = 0      # total failed pings (XX)
         self.last_state = None
         self.down_since = None  # monotonic timestamp of when the host went down
+        self.up_since = None    # monotonic timestamp of when the host came up
         self.ping_count = 0    # total pings ever sent (never capped, unlike history deque)
         self.running = True
         self.lock = threading.Lock()
@@ -648,12 +676,14 @@ class SshPingMonitor(PingMonitor):
     password prompts) and executes 'ping -O -D <ping_host>' on the remote side.
 
     Constructor arguments:
-      ssh_args   — list of SSH argument tokens (everything after 'ssh'),
-                   e.g. ['-J', 'bastion', 'user@remote'] or ['user@remote'].
-                   The SSH destination (last non-flag token) is extracted
-                   automatically.
-      ping_host  — the host that the remote ping will target.
-      label      — display name shown in the UI (e.g. 'user@remote').
+      ssh_args        — list of SSH argument tokens (everything after 'ssh'),
+                        e.g. ['-J', 'bastion', 'user@remote'] or ['user@remote'].
+                        The SSH destination (last token) is extracted for display.
+      ping_host       — the host that the remote ping will target (may already be
+                        an IP when a :resolv mapping was applied before :ssh).
+      ping_host_label — original (pre-resolv) name of the ping target, used as the
+                        display label in dns_mode='off' and 'hostname'.  Defaults
+                        to ping_host when not supplied.
 
     The remote ping command is:
       ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>
@@ -663,12 +693,53 @@ class SshPingMonitor(PingMonitor):
     route, timeout) are transient and trigger the normal retry/backoff loop.
     """
 
-    def __init__(self, ssh_args, ping_host='localhost', label=None):
-        # Use label (the SSH destination) as the display name; fall back to ping_host.
-        display = label or ping_host
+    def __init__(self, ssh_args, ping_host='localhost', ping_host_label=None):
+        self._ssh_dest = ssh_args[-1] if ssh_args else ''
+        self._ping_host_label = ping_host_label or ping_host
+        display = f"{self._ssh_dest}→{self._ping_host_label}"
         super().__init__(display)
         self._ssh_args = ssh_args      # e.g. ['-J', 'bastion', 'user@remote']
         self._ping_host = ping_host    # host that the remote ping targets
+        # Pre-populate resolved_ip when ping_host is already an IP address.
+        # This covers the :resolv case where actual_ping_host is already an IP
+        # so dns_mode='ip' works immediately without an extra resolution thread.
+        if _is_ip(ping_host):
+            self.resolved_ip = ping_host
+
+    def resolve_dns(self):
+        """Resolve the *ping host* (not the SSH destination) to its IP and hostname.
+
+        Overrides PingMonitor.resolve_dns() to target self._ping_host instead
+        of self.host (the composite label), so dns_mode='ip' and 'hostname'
+        show the address of the host being pinged, not the SSH destination.
+        """
+        try:
+            ip = socket.gethostbyname(self._ping_host)
+            self.resolved_ip = ip
+        except Exception:
+            self.resolved_ip = None
+
+        lookup_addr = self.resolved_ip if self.resolved_ip else self._ping_host
+        try:
+            self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
+        except Exception:
+            self.resolved_hostname = None
+
+    def get_display_name(self, dns_mode='off'):
+        """Return the display label as ``<ssh-dest>→<ping-host>``.
+
+        The ping-host part is adjusted according to dns_mode:
+          off      — self._ping_host_label (original name as typed on command line)
+          ip       — self.resolved_ip, falling back to self._ping_host
+          hostname — self.resolved_hostname, falling back to self._ping_host_label
+        """
+        if dns_mode == 'ip':
+            ping_part = self.resolved_ip or self._ping_host
+        elif dns_mode == 'hostname':
+            ping_part = self.resolved_hostname or self._ping_host_label
+        else:
+            ping_part = self._ping_host_label
+        return f"{self._ssh_dest}→{ping_part}"
 
     def _build_ping_cmd(self):
         """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
@@ -1322,6 +1393,7 @@ class Application:
                 if monitor.last_state is None:
                     monitor.last_state = current_state
                     if current_state:
+                        monitor.up_since = time.monotonic()
                         self.add_event(monitor.host, "host starts up")
                     elif current_state is False:
                         monitor.down_since = time.monotonic()
@@ -1335,9 +1407,11 @@ class Application:
                             msg = f"host recover. Down time: {self._format_downtime(downtime)}"
                         else:
                             msg = "host recover"
+                        monitor.up_since = time.monotonic()
                         self.add_event(monitor.host, msg)
                     else:
                         monitor.down_since = time.monotonic()
+                        monitor.up_since = None
                         self.add_event(monitor.host, "host down")
                     monitor.last_state = current_state
             time.sleep(0.5)
@@ -1512,9 +1586,13 @@ class Application:
 
         # In 'All' mode the stats block sits flush-left immediately after the hostname;
         # the ping history bar then fills the remaining screen width to the right.
-        # 9 × 6-char fields + 8 × 2-char separators = 70 characters total.
-        ALL_STATS_WIDTH = 70
-        all_stats_col = stat_col  # stats start right after the hostname column
+        # Layout: ms(6) + 2 + Up/Down(var) + 2 + tail(8×6 + 7×2 = 62) = dynamic width.
+        updown_col_w = self._updown_col_width()
+        ALL_STATS_WIDTH = 8 + updown_col_w + 2 + 62
+        all_stats_col = stat_col
+        ms_col = all_stats_col
+        updown_col = ms_col + 8
+        tail_col = updown_col + updown_col_w + 2
         hist_col_effective = (all_stats_col + ALL_STATS_WIDTH + 1) if show_all else hist_col
 
         if show_header:
@@ -1535,7 +1613,8 @@ class Application:
             stdscr.addstr(start_row, hist_col_effective, history_header, curses.A_BOLD)
 
             if show_all and all_stats_col < width:
-                all_header = (f"{'ms':>6}  {'Avg':>6}  {'Min':>6}  {'Max':>6}  "
+                all_header = (f"{'ms':>6}  {'Up/Down':>{updown_col_w}}  "
+                              f"{'Avg':>6}  {'Min':>6}  {'Max':>6}  "
                               f"{'Loss%':>6}  {'StDev':>6}  {'RX':>6}  {'TX':>6}  {'XX':>6}")
                 stdscr.addstr(start_row, all_stats_col, all_header, curses.A_BOLD)
 
@@ -1580,7 +1659,11 @@ class Application:
                 if show_single:
                     stat_str = self._compute_stat(monitor, mode_name)
                     # _compute_stat() returns '    ??' when monitor.error is set
-                    stat_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
+                    if mode_name == 'Down':
+                        _, is_down = Application._compute_updown(monitor)
+                        stat_color = curses.color_pair(2) if is_down else 0
+                    else:
+                        stat_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
                     stdscr.addstr(row, stat_col, stat_str, stat_color)
                 else:
                     # off mode — show Last latency with color; '    ??' in bright red on error
@@ -1671,9 +1754,22 @@ class Application:
 
             # All-stats block flush-left after hostname
             if show_all and all_stats_col < width:
+                # ms (Last latency)
+                if monitor.error is not None:
+                    stdscr.addstr(row, ms_col, "    ??", curses.color_pair(2) | curses.A_BOLD)
+                elif monitor.latency is not None:
+                    ms_color = curses.color_pair(1) if monitor.latency < 50 else curses.color_pair(3)
+                    stdscr.addstr(row, ms_col, f"{monitor.latency:6.1f}", ms_color)
+                else:
+                    stdscr.addstr(row, ms_col, "     -", curses.color_pair(2))
+                # Up/Down
+                updown_str, is_down = Application._compute_updown(monitor)
+                updown_color = curses.color_pair(2) if is_down else 0
+                stdscr.addstr(row, updown_col, f"{updown_str:>{updown_col_w}}", updown_color)
+                # Avg Min Max Loss% StDev RX TX XX
                 all_str = self._compute_all_stats(monitor)
                 all_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
-                stdscr.addstr(row, all_stats_col, all_str, all_color)
+                stdscr.addstr(row, tail_col, all_str, all_color)
 
             row += 1
 
@@ -1725,30 +1821,61 @@ class Application:
             return f"{tx:6d}"
         elif mode == 'XX':
             return f"{xx:6d}"
+        elif mode == 'Down':
+            s, _ = Application._compute_updown(monitor)
+            compact = s.replace(' ', '')
+            return f"{compact:>6}"[:6]
         return "     -"
+
+    @staticmethod
+    def _compute_updown(monitor):
+        """Return (display_str, is_down) for the Up/Down time column.
+
+        display_str — compact human-readable duration (via _format_updown_time)
+                      or '??' on process error, or '-' when timing is unknown.
+        is_down     — True when the host is currently down (used to colour the cell).
+        """
+        if monitor.error is not None:
+            return ('??', False)
+        if monitor.alive is True and monitor.up_since is not None:
+            elapsed = time.monotonic() - monitor.up_since
+            return (_format_updown_time(elapsed), False)
+        if monitor.alive is False and monitor.down_since is not None:
+            elapsed = time.monotonic() - monitor.down_since
+            return (_format_updown_time(elapsed), True)
+        return ('-', False)
+
+    def _updown_col_width(self):
+        """Return the column width needed for the Up/Down cell across all monitors.
+
+        At least len('Up/Down') (7) so the header always fits.
+        Scans all monitors and widens the column if any current value is longer.
+        """
+        max_w = len('Up/Down')
+        for monitor in self.monitors:
+            s, _ = Application._compute_updown(monitor)
+            if len(s) > max_w:
+                max_w = len(s)
+        return max_w
 
     @staticmethod
     def _compute_all_stats(monitor):
         """Compute a compact all-stats string for 'All' mode.
 
-        Returns a row of '    ??' placeholders (9 fields, 70 chars total) when
+        Returns a row of '    ??' placeholders (8 fields, 62 chars total) when
         monitor.error is set.
-        Format (aligned to match the header in draw_hosts):
-          ms     Avg    Min    Max    Loss%  StDev  RX     TX     XX
+        Format (aligned to match the tail header in draw_hosts):
+          Avg    Min    Max    Loss%  StDev  RX     TX     XX
         """
         if monitor.error is not None:
             placeholder = "    ??"
             sep = "  "
-            return (sep.join([placeholder] * 9))
+            return sep.join([placeholder] * 8)
         with monitor.lock:
             lats = list(monitor.latencies)
             rx = monitor.rx_count
             xx = monitor.xx_count
             tx = monitor.ping_count
-            last = monitor.latency
-
-        # Last (ms)
-        ms_s = f"{last:6.1f}" if last is not None else "     -"
 
         # Avg
         if lats:
@@ -1777,7 +1904,7 @@ class Application:
         else:
             stdev_s = "     -"
 
-        return (f"{ms_s}  {avg_s}  {min_s}  {max_s}  {loss_s}  "
+        return (f"{avg_s}  {min_s}  {max_s}  {loss_s}  "
                 f"{stdev_s}  {rx:6d}  {tx:6d}  {xx:6d}")
 
     def draw_events(self, stdscr, start_row, height, width):
@@ -2430,8 +2557,8 @@ class Application:
                             actual_ping_host = (self.hosts_map[ping_host][0]
                                                 if ping_host in self.hosts_map
                                                 else ping_host)
-                            label = f"{ssh_dest}→{ping_host}"
-                            monitor = SshPingMonitor(ssh_args, actual_ping_host, label=label)
+                            monitor = SshPingMonitor(ssh_args, actual_ping_host,
+                                                     ping_host_label=ping_host)
                             self.monitors.append(monitor)
                             self.entries.append(monitor)
                             if self._monitoring_started:
