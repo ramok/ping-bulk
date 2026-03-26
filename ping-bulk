@@ -94,7 +94,7 @@ _HELP_LINES = [
     f"                           modes: {' | '.join(HISTORY_MODES)}",
     f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
     "                           set any display mode by name (delegates to the",
-    "                           individual commands above; omit value to cycle)",
+    "                           individual commands above; omit value to cycle/show)",
     "  :log-size <n>            set event log max lines (default 10000)",
     "  :pause                   toggle pause on/off",
     "  :seen                    insert 'seen' marker in event log",
@@ -359,19 +359,27 @@ def _expand_host_with_captures(pattern):
 
 
 def _apply_backref(template, captures, full_str=None):
-    r"""Substitute ``\0``…``\9`` / ``$0``…``$9`` in *template* with captured values.
+    r"""Substitute back-reference placeholders in *template* with captured values.
 
-    ``\0`` / ``$0`` is replaced by *full_str* (the complete expanded string for
-    this iteration).  ``\N`` / ``$N`` (N ≥ 1, 1-based) is replaced by
-    ``captures[N-1]``.  References to groups that do not exist (index out of
-    range, or *full_str* is ``None`` for index 0) are left unchanged so the
-    user can see the un-substituted placeholder rather than silently getting
-    wrong output.
+    Recognised forms (bare and brace-quoted are equivalent):
+      ``\N``   ``\{N}``   ``$N``   ``${N}``   (N is a single digit 0–9)
+
+    ``\0`` / ``$0`` (bare or braced) is replaced by *full_str* (the complete
+    expanded string for this iteration).  ``\N`` / ``$N`` (N ≥ 1, 1-based) is
+    replaced by ``captures[N-1]``.  References to groups that do not exist
+    (index out of range, or *full_str* is ``None`` for index 0) are left
+    unchanged so the user can see the un-substituted placeholder rather than
+    silently getting wrong output.
+
+    The braced forms (``${N}`` / ``\{N}``) allow the placeholder to be used
+    adjacent to literal digits without ambiguity, e.g. ``host${1}9`` expands
+    to ``hostX9`` rather than trying to resolve group 19.
 
     Parameters
     ----------
     template : str
-        String that may contain ``\0``…``\9`` or ``$0``…``$9`` placeholders.
+        String that may contain ``\0``…``\9``, ``\{0}``…``\{9}``,
+        ``$0``…``$9``, or ``${0}``…``${9}`` placeholders.
     captures : list[str]
         Values produced by :func:`_expand_host_with_captures` for one row.
     full_str : str or None
@@ -386,18 +394,22 @@ def _apply_backref(template, captures, full_str=None):
     import re
 
     def _sub(m):
-        idx = int(m.group(1))
+        # Group 1: braced digit (e.g. ${1} or \{1}); Group 2: bare digit (e.g. $1 or \1)
+        idx = int(m.group(1) if m.group(1) is not None else m.group(2))
         if idx == 0:
             return full_str if full_str is not None else m.group(0)
         return captures[idx - 1] if 1 <= idx <= len(captures) else m.group(0)
 
-    return re.sub(r'(?:\\|\$)(\d)', _sub, template)
+    return re.sub(r'(?:\\|\$)(?:\{(\d)\}|(\d))', _sub, template)
 
 
 def _has_backref(s):
-    r"""Return True if *s* contains any ``\0``…``\9`` or ``$0``…``$9`` placeholder."""
+    r"""Return True if *s* contains any back-reference placeholder.
+
+    Recognised forms: ``\N``, ``\{N}``, ``$N``, ``${N}``  (N = 0–9).
+    """
     import re
-    return bool(re.search(r'(?:\\|\$)[0-9]', s))
+    return bool(re.search(r'(?:\\|\$)(?:\{\d\}|\d)', s))
 
 
 def _config_path():
