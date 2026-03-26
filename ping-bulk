@@ -46,14 +46,16 @@ class SetParam:
 
 # Single source of truth for all parameters accepted by the ':set' command.
 SET_PARAMS = [
-    SetParam('dns',       '_cmd_dns',     lambda: [m.lower() for m in DNS_MODES],
+    SetParam('dns',       '_cmd_dns',      lambda: [m.lower() for m in DNS_MODES],
              'DNS display mode'),
-    SetParam('stats',     '_cmd_stats',   lambda: [m.lower() for m in STATS_MODES],
+    SetParam('stats',     '_cmd_stats',    lambda: [m.lower() for m in STATS_MODES],
              'stats column mode'),
-    SetParam('sort',      '_cmd_sort',    ['none', 'name', 'status', 'latency'],
+    SetParam('sort',      '_cmd_sort',     ['none', 'name', 'status', 'latency'],
              'sort order'),
-    SetParam('ping-view', '_cmd_history', lambda: [m.lower() for m in HISTORY_MODES],
+    SetParam('ping-view', '_cmd_history',  lambda: [m.lower() for m in HISTORY_MODES],
              'ping history display mode'),
+    SetParam('log-size',  '_cmd_log_size', ['1000', '5000', '10000', '50000', '100000'],
+             'event log max lines (default 10000)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -93,6 +95,7 @@ _HELP_LINES = [
     f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
     "                           set any display mode by name (delegates to the",
     "                           individual commands above; omit value to cycle)",
+    "  :log-size <n>            set event log max lines (default 10000)",
     "  :pause                   toggle pause on/off",
     "  :seen                    insert 'seen' marker in event log",
     "  :clear                   clear event log",
@@ -1121,6 +1124,8 @@ CMD_REGISTRY = [
     CmdDef(['log'],              '_cmd_log',        None,
            '[file|off]',          'show/set/disable the streaming log file',
            arg_completer=_complete_log_arg),
+    CmdDef(['log-size'],         '_cmd_log_size',   ['1000', '5000', '10000', '50000', '100000'],
+           '<n>',                 'set event log max lines (default 10000)'),
     CmdDef(['saveconfig'],       '_cmd_saveconfig', None,
            '',                    'save current settings to config file'),
     CmdDef(['resolv'],           '_cmd_resolv',     None,
@@ -1161,7 +1166,8 @@ class Application:
         self.entries = []   # ordered display list: PingMonitor | SectionLabel
         self.monitors = []  # pure PingMonitor list for stats, threading, DNS
         self.hosts_map = {}  # static DNS overrides: ip→(ip, hostname) and hostname→(ip, hostname)
-        self.events = deque(maxlen=50)
+        self.log_size = 10000
+        self.events = deque(maxlen=self.log_size)
         self.paused = False
         self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
         self.stats_mode = 0    # index into STATS_MODES; 0 = off
@@ -1271,6 +1277,7 @@ class Application:
                 f.write(f":stats {STATS_MODES[self.stats_mode]}\n")
                 f.write(f":sort {self.sort_by}\n")
                 f.write(f":ping-view {HISTORY_MODES[self.history_mode]}\n")
+                f.write(f":log-size {self.log_size}\n")
                 if self.log_file:
                     f.write(f":log {self.log_file}\n")
                 else:
@@ -1297,6 +1304,7 @@ class Application:
                 f.write(f"# :stats off        # choices: {' | '.join(STATS_MODES)}\n")
                 f.write( "# :sort none        # choices: none | name | status | latency\n")
                 f.write(f"# :ping-view success  # choices: {' | '.join(HISTORY_MODES)}\n")
+                f.write( "# :log-size 10000   # event log max lines\n")
                 f.write( "# :log              # path to stream event log; leave blank to disable\n")
         except OSError:
             pass  # silently ignore — e.g. read-only filesystem or missing home directory
@@ -2543,6 +2551,23 @@ class Application:
                 self.add_event("log", f"active log file: {self.log_file}")
             else:
                 self.add_event("log", "no log file active")
+
+    def _cmd_log_size(self, args=''):
+        """Set the event log maximum line count: :log-size <n>."""
+        if not args:
+            self.add_event("log-size", f"current log size: {self.log_size}")
+            return
+        try:
+            n = int(args)
+            if n < 1:
+                raise ValueError
+        except ValueError:
+            self.add_event("cmd", f"log-size: invalid value '{args}' — must be a positive integer")
+            return
+        self.log_size = n
+        self.events = deque(self.events, maxlen=n)
+        if self._monitoring_started:
+            self.add_event("log-size", f"event log size set to {n}")
 
     def _cmd_saveconfig(self, args=''):
         """Save current settings to config file."""

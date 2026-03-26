@@ -131,9 +131,9 @@ class TestGetCompletions:
         )
 
     def test_exact_command_returns_itself(self, app):
-        """Typing the full command name 'log' must match only 'log'."""
+        """Typing the full command name 'log' must match 'log' and 'log-size'."""
         result = app._get_completions('log')
-        assert result == ['log'], f"Expected ['log'], got {result}"
+        assert result == ['log', 'log-size'], f"Expected ['log', 'log-size'], got {result}"
 
     def test_colon_prefix_stripped_before_matching(self, app):
         """A leading ':' must be stripped; ':lo' must resolve the same as 'lo'."""

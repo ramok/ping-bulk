@@ -454,6 +454,122 @@ class TestSaveConfigCommand:
 # TestLogFileCliOverride
 # ===========================================================================
 
+# ===========================================================================
+# TestLogSize
+# ===========================================================================
+
+class TestLogSize:
+    """Tests for the :log-size command and its config persistence."""
+
+    def test_default_log_size(self, pb, tmp_path):
+        """log_size defaults to 10000."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        assert app.log_size == 10000
+
+    def test_valid_value_sets_log_size(self, pb, tmp_path):
+        """A valid positive integer changes log_size."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':log-size 5000')
+        assert app.log_size == 5000
+
+    def test_valid_value_resizes_deque(self, pb, tmp_path):
+        """Changing log-size resizes the events deque."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':log-size 500')
+        assert app.events.maxlen == 500
+
+    def test_resize_preserves_existing_events(self, pb, tmp_path):
+        """Existing events are preserved when the deque is resized (up to new maxlen)."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        # Add a few events directly
+        for i in range(5):
+            app.events.append(f'event {i}')
+        app._dispatch_cmd(':log-size 50')
+        event_list = list(app.events)
+        assert len(event_list) == 5
+        assert 'event 0' in event_list
+
+    def test_no_args_shows_current_size(self, pb, tmp_path):
+        """Calling :log-size with no argument reports the current size in the event log."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':log-size')
+        events = list(app.events)
+        assert any('10000' in e for e in events), (
+            f"Current log size not reported in events: {events}"
+        )
+
+    def test_invalid_non_integer_rejected(self, pb, tmp_path):
+        """A non-integer value must be rejected and log_size must stay unchanged."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':log-size abc')
+        assert app.log_size == 10000
+        events = list(app.events)
+        assert any('invalid' in e.lower() or 'error' in e.lower() for e in events)
+
+    def test_invalid_zero_rejected(self, pb, tmp_path):
+        """Zero is not a valid log size."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':log-size 0')
+        assert app.log_size == 10000
+
+    def test_invalid_negative_rejected(self, pb, tmp_path):
+        """Negative integers are not valid log sizes."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':log-size -100')
+        assert app.log_size == 10000
+
+    def test_log_size_persisted_by_save_config(self, pb, tmp_path):
+        """:log-size is written to the config file by _save_config()."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app.log_size = 2000
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app._save_config()
+        with open(cfg) as f:
+            content = f.read()
+        assert ':log-size 2000' in content
+
+    def test_log_size_loaded_from_config(self, pb, tmp_path):
+        """:log-size in the config file is applied on startup."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, ':log-size 3000\n')
+        assert app.log_size == 3000
+        assert app.events.maxlen == 3000
+
+    def test_log_size_roundtrip(self, pb, tmp_path):
+        """log-size survives a save+load cycle."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app1 = make_app(pb, cfg, '')
+        app1.log_size = 7500
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app1._save_config()
+
+        app2 = make_app(pb, cfg, config_text=None)
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app2._load_config()
+        assert app2.log_size == 7500
+
+    def test_set_log_size_via_set_command(self, pb, tmp_path):
+        """:set log-size <n> delegates to _cmd_log_size."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set log-size 4000')
+        assert app.log_size == 4000
+
+    def test_log_size_in_set_params(self, pb):
+        """log-size must be listed in SET_PARAMS."""
+        names = [p.name for p in pb.SET_PARAMS]
+        assert 'log-size' in names, f"log-size not found in SET_PARAMS: {names}"
+
+
 class TestLogFileCliOverride:
     """The CLI --log-file argument must override the 'log' value from the config file."""
 
