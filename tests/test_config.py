@@ -366,7 +366,7 @@ class TestSaveConfig:
             "Expected commented-out log line when log_file is None"
         )
         for line in content.splitlines():
-            if line.strip().startswith(':log') and not line.strip().startswith('#'):
+            if line.strip().startswith(':log ') and not line.strip().startswith('#'):
                 pytest.fail(f"Uncommented ':log' setting found when log_file is None: {line!r}")
 
     def test_roundtrip(self, pb, tmp_path):
@@ -568,6 +568,66 @@ class TestLogSize:
         """log-size must be listed in SET_PARAMS."""
         names = [p.name for p in pb.SET_PARAMS]
         assert 'log-size' in names, f"log-size not found in SET_PARAMS: {names}"
+
+
+class TestSetCommand:
+    """Tests for the :set <param> [value] command dispatcher."""
+
+    def test_set_dns_hostname(self, pb, tmp_path):
+        """:set dns hostname sets dns_mode to the 'hostname' index."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set dns hostname')
+        assert app.dns_mode == pb.DNS_MODES.index('hostname')
+
+    def test_set_stats_avg(self, pb, tmp_path):
+        """:set stats avg sets stats_mode to the 'Avg' index."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set stats avg')
+        assert app.stats_mode == pb.STATS_MODES.index('Avg')
+
+    def test_set_sort_latency(self, pb, tmp_path):
+        """:set sort latency sets sort_by to 'latency'."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set sort latency')
+        assert app.sort_by == 'latency'
+
+    def test_set_ping_view_rtt(self, pb, tmp_path):
+        """:set ping-view rtt sets history_mode to the 'rtt' index."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set ping-view rtt')
+        assert app.history_mode == pb.HISTORY_MODES.index('rtt')
+
+    def test_set_no_args_emits_usage(self, pb, tmp_path):
+        """:set with no arguments emits a usage error to the event log."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set')
+        events = list(app.events)
+        assert any('set:' in e and 'usage' in e for e in events), (
+            f"Expected usage error in events; got: {events}"
+        )
+
+    def test_set_unknown_param_emits_error(self, pb, tmp_path):
+        """:set unknownparam emits an 'unknown setting' error to the event log."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set unknownparam')
+        events = list(app.events)
+        assert any("unknown setting 'unknownparam'" in e for e in events), (
+            f"Expected unknown-setting error in events; got: {events}"
+        )
+
+    def test_set_dns_no_value_cycles_forward(self, pb, tmp_path):
+        """:set dns with no value cycles dns_mode forward by one step."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        initial = app.dns_mode
+        app._dispatch_cmd(':set dns')
+        assert app.dns_mode == (initial + 1) % len(pb.DNS_MODES)
 
 
 class TestLogFileCliOverride:

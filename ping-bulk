@@ -1041,19 +1041,25 @@ def parse_hosts_file(filename):
                                 entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
                 else:
                     # Plain host line — expand brace notation into individual entries.
+                    # Use _expand_host_with_captures so that back-references in the
+                    # inline ## comment (e.g. '10.0.0.{1..4} ## host$1') are resolved
+                    # to the value each brace group contributed for that row.
                     try:
-                        expanded = _expand_host(line)
+                        expanded = _expand_host_with_captures(line)
                     except ValueError as e:
                         entries.append(('error', str(e)))
                     else:
-                        for host in expanded:
+                        for host, captures in expanded:
                             key = (None, host)
                             if key in seen_hosts:
                                 entries.append(('warn', f"duplicate host ignored: {host}"))
                             else:
                                 seen_hosts.add(key)
                                 if inline_comment and _is_ip(host):
-                                    entries.append(('cmd', f':resolv {host} {inline_comment}'))
+                                    resolved_comment = _apply_backref(
+                                        inline_comment, captures, host
+                                    )
+                                    entries.append(('cmd', f':resolv {host} {resolved_comment}'))
                                 entries.append(('host', host))
 
     # Warn if the file ended while still inside a :for loop.

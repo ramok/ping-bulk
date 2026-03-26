@@ -219,3 +219,89 @@ class TestInlineComment:
             ('host', 'hostname.local'),
         ], f"Unexpected entries for multiple annotated lines; got {entries!r}"
 
+
+# ===========================================================================
+# TestInlineCommentBackref
+# ===========================================================================
+
+class TestInlineCommentBackref:
+    """Inline '## comment' may contain $N / \\N back-references that are
+    resolved against the brace-group captures for each expanded IP row.
+
+    Example:  192.168.1.{2..5} ## workstation$1
+      →  :resolv 192.168.1.2 workstation2
+         :resolv 192.168.1.3 workstation3  …etc.
+    """
+
+    def test_single_group_dollar_backref(self, pb, tmp_path):
+        """$1 in the inline comment is replaced by the value of the first brace group."""
+        content = "192.168.1.{2..5} ## workstation$1\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd',  ':resolv 192.168.1.2 workstation2'),
+            ('host', '192.168.1.2'),
+            ('cmd',  ':resolv 192.168.1.3 workstation3'),
+            ('host', '192.168.1.3'),
+            ('cmd',  ':resolv 192.168.1.4 workstation4'),
+            ('host', '192.168.1.4'),
+            ('cmd',  ':resolv 192.168.1.5 workstation5'),
+            ('host', '192.168.1.5'),
+        ], f"$1 back-reference in inline comment not expanded; got {entries!r}"
+
+    def test_dollar0_full_host_backref(self, pb, tmp_path):
+        """$0 in the inline comment is replaced by the full expanded IP string."""
+        content = "10.0.0.{1,2} ## ip-$0\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd',  ':resolv 10.0.0.1 ip-10.0.0.1'),
+            ('host', '10.0.0.1'),
+            ('cmd',  ':resolv 10.0.0.2 ip-10.0.0.2'),
+            ('host', '10.0.0.2'),
+        ], f"$0 back-reference in inline comment not expanded; got {entries!r}"
+
+    def test_backslash_backref_form(self, pb, tmp_path):
+        r"""\\1 (backslash form) in the inline comment is equivalent to $1."""
+        content = r"10.1.0.{3,4} ## node\1" + "\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd',  ':resolv 10.1.0.3 node3'),
+            ('host', '10.1.0.3'),
+            ('cmd',  ':resolv 10.1.0.4 node4'),
+            ('host', '10.1.0.4'),
+        ], r"\\1 back-reference in inline comment not expanded; got {entries!r}"
+
+    def test_no_backref_comment_used_verbatim(self, pb, tmp_path):
+        """An inline comment without any back-reference is used as-is for every row."""
+        content = "10.2.0.{1,2} ## gateway\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd',  ':resolv 10.2.0.1 gateway'),
+            ('host', '10.2.0.1'),
+            ('cmd',  ':resolv 10.2.0.2 gateway'),
+            ('host', '10.2.0.2'),
+        ], f"Comment without back-reference should be used verbatim; got {entries!r}"
+
+    def test_two_brace_groups_two_backrefs(self, pb, tmp_path):
+        """Two brace groups produce $1 and $2 back-references independently."""
+        content = "10.{1,2}.0.{3,4} ## rack$1-port$2\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd',  ':resolv 10.1.0.3 rack1-port3'),
+            ('host', '10.1.0.3'),
+            ('cmd',  ':resolv 10.1.0.4 rack1-port4'),
+            ('host', '10.1.0.4'),
+            ('cmd',  ':resolv 10.2.0.3 rack2-port3'),
+            ('host', '10.2.0.3'),
+            ('cmd',  ':resolv 10.2.0.4 rack2-port4'),
+            ('host', '10.2.0.4'),
+        ], f"Two-group back-reference in inline comment failed; got {entries!r}"
+
+    def test_plain_ip_no_brace_no_backref(self, pb, tmp_path):
+        """A plain IP with a literal inline comment (no braces) still works correctly."""
+        content = "172.16.0.1 ## firewall\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd',  ':resolv 172.16.0.1 firewall'),
+            ('host', '172.16.0.1'),
+        ], f"Plain IP with literal comment failed; got {entries!r}"
+

@@ -336,14 +336,14 @@ class TestTabHandling:
 
     def test_unique_match_appends_trailing_space(self, app):
         """Single candidate: Tab must append a trailing space after the command."""
-        _set_text(app, 'lo')
+        _set_text(app, 'pau')
         app._handle_cmd_key(self.TAB)
         text = ''.join(app.cmd['chars'])
-        assert text == 'log ', f"Expected 'log ' (with trailing space), got {text!r}"
+        assert text == 'pause ', f"Expected 'pause ' (with trailing space), got {text!r}"
 
     def test_unique_match_no_popup(self, app):
         """Single candidate: the completion popup must be cleared (no list needed)."""
-        _set_text(app, 'lo')
+        _set_text(app, 'pau')
         app._handle_cmd_key(self.TAB)
         assert app.cmd['completions'] == [], (
             f"Expected empty completions after unique match, got {app.cmd['completions']}"
@@ -653,15 +653,15 @@ class TestTabHandling:
     def test_shift_tab_unique_match_applies_with_trailing_space(self, app):
         """Shift+Tab on a unique match must apply it immediately with a trailing space.
 
-        'lo' has a single completion: 'log'.
+        'pau' has a single completion: 'pause'.
         Shift+Tab must behave identically to Tab for a unique match:
-        apply 'log' + trailing space, clear the popup.
+        apply 'pause' + trailing space, clear the popup.
         """
-        _set_text(app, 'lo')
+        _set_text(app, 'pau')
         app._handle_cmd_key(self.SHIFT_TAB)
         text = ''.join(app.cmd['chars'])
-        assert text == 'log ', (
-            f"Expected 'log ' (with trailing space) after Shift+Tab unique match, "
+        assert text == 'pause ', (
+            f"Expected 'pause ' (with trailing space) after Shift+Tab unique match, "
             f"got {text!r}"
         )
         assert app.cmd['completions'] == [], (
