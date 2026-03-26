@@ -12,5 +12,6 @@
 
 ## Local network
 192.168.1.1   ## gateway
-192.168.1.{2..5}
+# $1 expands to the value of the first brace group (the last octet here)
+192.168.1.{2..5} ## workstation$1
 

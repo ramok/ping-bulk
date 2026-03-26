@@ -1,0 +1,587 @@
+.\" Man page generated from reStructuredText.
+.
+.
+.nr rst2man-indent-level 0
+.
+.de1 rstReportMargin
+\\$1 \\n[an-margin]
+level \\n[rst2man-indent-level]
+level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
+-
+\\n[rst2man-indent0]
+\\n[rst2man-indent1]
+\\n[rst2man-indent2]
+..
+.de1 INDENT
+.\" .rstReportMargin pre:
+. RS \\$1
+. nr rst2man-indent\\n[rst2man-indent-level] \\n[an-margin]
+. nr rst2man-indent-level +1
+.\" .rstReportMargin post:
+..
+.de UNINDENT
+. RE
+.\" indent \\n[an-margin]
+.\" old: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.nr rst2man-indent-level -1
+.\" new: \\n[rst2man-indent\\n[rst2man-indent-level]]
+.in \\n[rst2man-indent\\n[rst2man-indent-level]]u
+..
+.TH "PING-BULK" "1" "" "" "User Commands"
+.SH NAME
+ping-bulk \- monitor multiple hosts with continuous ping
+.SH SYNOPSIS
+.nf
+\fBping\-bulk\fP [\fB\-f\fP \fIFILE\fP] [\fB\-l\fP \fILOGFILE\fP] [\fIHOST\fP ...]
+\fBping\-bulk\fP \fB\-f\fP \fIFILE\fP
+.fi
+.sp
+.SH DESCRIPTION
+.sp
+\fBping\-bulk\fP monitors one or more hosts simultaneously using a
+persistent \fBping\fP subprocess per host.  Results are shown in a
+continuously updated terminal interface with a rolling ping\-history
+strip, colour\-coded status, optional statistics columns, a scrollable
+event log, and SSH\-based remote monitoring.
+.sp
+The program requires no third\-party Python packages.  Only the Python
+3 standard library and the system \fBping\fP binary (iputils\-ping, which
+supports \fB\-O\fP and \fB\-D\fP) are needed.
+.SH OPTIONS
+.INDENT 0.0
+.TP
+.B \fB\-f FILE\fP, \fB\-\-file FILE\fP
+Read hosts from \fIFILE\fP instead of (or in addition to) positional
+arguments.  See \fBHOSTS FILE\fP below for the file format.
+.TP
+.B \fB\-l LOGFILE\fP, \fB\-\-log\-file LOGFILE\fP
+Append every event\-log entry to \fILOGFILE\fP in real time.
+Overrides any \fBlog =\fP setting in the config file.
+.TP
+.B \fBHOST ...\fP
+One or more host names or IP addresses to ping.  Brace expansion
+is supported (see \fBBRACE EXPANSION\fP below).
+Tokens beginning with \fB:\fP are treated as startup commands
+(same syntax as the interactive \fB:\fP command line).
+.UNINDENT
+.SH KEYBOARD REFERENCE
+.SS Navigation
+.INDENT 0.0
+.TP
+.B \fBq\fP / \fBQ\fP
+Quit.
+.TP
+.B \fB?\fP
+Open the built\-in help overlay.  Close with \fBq\fP, \fBQ\fP, or \fBEsc\fP\&.
+.TP
+.B \fB:\fP
+Open the command line (see \fBCOMMANDS\fP below).
+.TP
+.B \fB←\fP / \fB→\fP
+Scroll the ping\-history strip backwards / forwards in time.
+.TP
+.B \fB↑\fP / \fB↓\fP
+Scroll the event log up / down one line.
+.TP
+.B \fBPgUp\fP / \fBPgDn\fP
+Scroll the event log up / down one page.
+.TP
+.B \fBSpace\fP
+Insert a timestamped \fIseen\fP separator into the event log.
+.UNINDENT
+.SS Display
+.INDENT 0.0
+.TP
+.B \fBd\fP / \fBD\fP
+Cycle the DNS display mode forward / backward.
+Modes: \fBoff\fP → \fBhostname\fP → \fBip\fP\&.
+.TP
+.B \fBs\fP / \fBS\fP
+Cycle the stats column forward / backward.
+Modes: \fBoff\fP → \fBLoss%\fP → \fBAvg\fP → \fBMin\fP → \fBMax\fP →
+\fBStDev\fP → \fBRX\fP → \fBTX\fP → \fBXX\fP → \fBAll\fP\&.
+.TP
+.B \fBo\fP / \fBO\fP
+Cycle the sort order forward / backward.
+Orders: \fBnone\fP → \fBname\fP → \fBstatus\fP → \fBlatency\fP\&.
+.TP
+.B \fBh\fP / \fBH\fP
+Cycle the ping\-history display mode forward / backward.
+Modes: \fBsuccess\fP → \fBrtt\fP → \fBscaled\fP\&.
+.TP
+.B \fBp\fP / \fBP\fP
+Toggle pause (freeze the display without stopping pings).
+.TP
+.B \fBC\fP
+Open the \fIclear event log\fP confirmation prompt.
+.UNINDENT
+.SH COMMANDS
+.sp
+Commands are entered at the \fB:\fP prompt.  The leading \fB:\fP is
+optional when the command is used inside a hosts file.
+.SS Quitting
+.INDENT 0.0
+.TP
+.B \fB:q\fP, \fB:quit\fP
+Quit the application.
+.UNINDENT
+.SS Display
+.INDENT 0.0
+.TP
+.B \fB:dns [off|hostname|ip]\fP
+With no argument, cycle the DNS display mode forward.
+With an argument, set the mode directly.
+.TP
+.B \fB:stats [mode]\fP
+With no argument, cycle the stats column forward.
+With an argument, set the column directly.
+Valid modes: \fBoff\fP, \fBLoss%\fP, \fBAvg\fP, \fBMin\fP, \fBMax\fP,
+\fBStDev\fP, \fBRX\fP, \fBTX\fP, \fBXX\fP, \fBAll\fP\&.
+.TP
+.B \fB:sort [mode]\fP
+With no argument, cycle the sort order forward.
+With an argument, set the order directly.
+Valid modes: \fBnone\fP, \fBname\fP, \fBstatus\fP, \fBlatency\fP\&.
+.TP
+.B \fB:history [mode]\fP
+With no argument, cycle the history mode forward.
+With an argument, set the mode directly.
+Valid modes: \fBsuccess\fP, \fBrtt\fP, \fBscaled\fP\&.
+.TP
+.B \fB:pause\fP
+Toggle pause on/off.
+.UNINDENT
+.SS Event log
+.INDENT 0.0
+.TP
+.B \fB:seen\fP
+Insert a timestamped \fIseen\fP separator into the event log.
+.TP
+.B \fB:clear\fP
+Clear the event log (with confirmation prompt).
+.TP
+.B \fB:log [file|off]\fP
+With no argument, print the active log file path (or report that
+logging is off).  With a file path, save the current log to that
+file and begin streaming future events there.  With \fBoff\fP,
+disable streaming.
+.UNINDENT
+.SS Configuration
+.INDENT 0.0
+.TP
+.B \fB:saveconfig\fP
+Save current display settings (dns, stats, sort, history, log) to
+the XDG config file (\fB~/.config/ping\-bulk/config\fP).
+.UNINDENT
+.SS Hosts and DNS
+.INDENT 0.0
+.TP
+.B \fB:resolv <ip\-pattern> <hostname\-template>\fP
+Register a static name↔IP mapping.  \fIip\-pattern\fP may use brace
+expansion; \fB\eN\fP in \fIhostname\-template\fP is replaced by the value
+produced by brace group \fIN\fP (1\-based) for each expanded IP.
+.sp
+Example:
+.INDENT 7.0
+.INDENT 3.5
+.sp
+.EX
+:resolv 10.0.1.{1..4} leaf\-sw\e1
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+This registers \fB10.0.1.1\(ga\(ga→\(ga\(galeaf\-sw1\fP, \fB10.0.1.2\(ga\(ga→\(ga\(galeaf\-sw2\fP,
+etc., so those IPs display with meaningful names and the \fBping\fP
+subprocess is also given the IP directly.
+.UNINDENT
+.SS SSH monitoring
+.INDENT 0.0
+.TP
+.B \fB:ssh [opts] <dest> <ping\-host>\fP
+Add a monitor that runs \fBping \-O \-D <ping\-host>\fP on the remote
+machine \fIdest\fP via \fBssh \-o BatchMode=yes\fP\&.  \fIopts\fP may include any
+SSH flags (e.g. \fB\-J bastion\fP).  The last token is always the
+ping target; everything else is the SSH command line.
+.sp
+Examples:
+.INDENT 7.0
+.INDENT 3.5
+.sp
+.EX
+:ssh user@remote 8.8.8.8
+:ssh \-J bastion ops@remote\-a 10.10.0.1
+.EE
+.UNINDENT
+.UNINDENT
+.TP
+.B \fB:ssh\-begin [opts] <dest>\fP
+Open an SSH block.  Every plain host line that follows (until
+\fB:ssh\-end\fP) is automatically wrapped as
+\fB:ssh [opts] <dest> <host>\fP\&.  Only valid inside a hosts file.
+.TP
+.B \fB:ssh\-end\fP
+Close the current \fB:ssh\-begin\fP block.  Only valid inside a
+hosts file.
+.UNINDENT
+.SS Help
+.INDENT 0.0
+.TP
+.B \fB:help\fP
+Open the built\-in help overlay (same as \fB?\fP).
+.UNINDENT
+.SH HOSTS FILE
+.sp
+A hosts file lists one entry per line.  Lines are processed in order.
+.SS Format
+.INDENT 0.0
+.TP
+.B \fB# comment\fP
+Comment line — ignored entirely.
+.TP
+.B (empty line)
+Ignored.
+.TP
+.B \fB## Title\fP or \fB:title Title\fP
+Insert a section\-header row in the display (display only; not
+pinged).
+.TP
+.B \fBhostname\-or\-ip\fP
+A host or IP address to monitor.  Brace expansion is applied.
+.TP
+.B \fB:cmd [args]\fP
+Any command listed under \fBCOMMANDS\fP above; applied immediately
+when the file is loaded.
+.UNINDENT
+.SS Shebang support
+.sp
+A hosts file may include a shebang on its first line so that it can be
+run directly like a script:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+#!/usr/bin/env \-S ping\-bulk \-f
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+Make the file executable and invoke it directly:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+chmod +x myhosts
+\&./myhosts
+.EE
+.UNINDENT
+.UNINDENT
+.INDENT 0.0
+.TP
+.B \fBWhy\fP \fBenv \-S\fP \fB?\fP
+The Linux kernel only passes a \fIsingle\fP argument string to the
+interpreter named in a \fB#!\fP line.  Without \fB\-S\fP, \fBenv\fP would
+try to find a binary literally named \fBping\-bulk \-f\fP, which does
+not exist.  The \fB\-S\fP flag (\fB\-\-split\-string\fP) tells \fBenv\fP to
+split that single argument on whitespace before executing, so
+\fBping\-bulk\fP and \fB\-f\fP are passed as two separate tokens.
+.TP
+.B \fBPortability\fP
+\fBenv \-S\fP requires \fBGNU coreutils ≥ 8.30\fP (Linux, available in
+Debian 10+, Ubuntu 20.04+, Fedora 29+) or \fBmacOS 12 Monterey or
+later\fP (which ships a compatible \fB/usr/bin/env\fP).
+.sp
+On older systems that lack \fBenv \-S\fP you can use a small wrapper
+script instead:
+.INDENT 7.0
+.INDENT 3.5
+.sp
+.EX
+#!/bin/sh
+exec ping\-bulk \-f \(dq$0\(dq \(dq$@\(dq
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+Place that block as the first two lines of the hosts file and
+\fBchmod +x\fP it as usual.  The \fB$0\fP passes the file\(aqs own path to
+\fB\-f\fP, and \fB$@\fP forwards any additional arguments.
+.TP
+.B \fBPassing extra flags via the shebang\fP
+Additional flags supported by \fBping\-bulk\fP (such as \fB\-l\fP) can be
+appended to the shebang line:
+.INDENT 7.0
+.INDENT 3.5
+.sp
+.EX
+#!/usr/bin/env \-S ping\-bulk \-f \-l /var/log/myhosts.log
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+Because \fB\-S\fP splits on whitespace, all tokens after \fBenv \-S\fP
+are passed verbatim to \fBping\-bulk\fP\&.
+.UNINDENT
+.SH BRACE EXPANSION
+.sp
+Brace expansion applies to host/IP arguments and to the IP side of
+\fB:resolv\fP commands.
+.sp
+Supported forms:
+.INDENT 0.0
+.TP
+.B \fB{a,b,c}\fP
+Comma\-separated list — expands to each item in turn.
+.TP
+.B \fB{n..m}\fP
+Inclusive integer range — expands to every integer from \fIn\fP to \fIm\fP\&.
+A descending range (\fB{4..1}\fP) is supported.
+.TP
+.B \fB{n\-m}\fP
+Same as \fB{n..m}\fP (zsh\-style dash separator).
+.UNINDENT
+.sp
+Mixed items (\fB{10,11..13,15}\fP) are allowed within a single group.
+Multiple brace groups in a single string produce the \fBcartesian
+product\fP of all groups.  Nested braces are expanded inside\-out.
+.sp
+Examples:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+10.0.0.{1,2,5}          → 10.0.0.1  10.0.0.2  10.0.0.5
+10.0.0.{1..4}           → 10.0.0.1 … 10.0.0.4
+10.0.0.{1\-4}            → same (zsh\-style)
+10.{1..2}.0.{1,5}       → 4 addresses (cartesian product)
+web{1..3}.example.com   → web1.example.com … web3.example.com
+10.0.0.{10,11..12,14}   → .10 .11 .12 .14
+10.0.{1..2}.{10,2{1,2}} → 8 addresses (nested braces)
+.EE
+.UNINDENT
+.UNINDENT
+.SH HISTORY MODES
+.INDENT 0.0
+.TP
+.B \fBsuccess\fP
+One character per ping: \fB\&.\fP success, \fBX\fP timeout, \fB?\fP
+process error.
+.TP
+.B \fBrtt\fP
+Numeric RTT (ms) right\-justified in a fixed\-width cell.  Cell
+width adapts to the largest RTT seen.
+.TP
+.B \fBscaled\fP
+Digit 0–9 mapping 10 ms buckets: 0 = <10 ms, 1 = 10–19 ms, …,
+9 = 90–99 ms, \fB>\fP = ≥ 100 ms.
+.UNINDENT
+.SH STATS COLUMNS
+.INDENT 0.0
+.TP
+.B \fBoff\fP
+Show the last RTT only (colour\-coded green/yellow).
+.TP
+.B \fBLoss%\fP
+Packet\-loss percentage since startup.
+.TP
+.B \fBAvg\fP
+Average RTT (ms) of all successful pings since startup.
+.TP
+.B \fBMin\fP / \fBMax\fP
+Minimum / maximum RTT since startup.
+.TP
+.B \fBStDev\fP
+Population standard deviation of all RTT samples.
+.TP
+.B \fBRX\fP
+Total successful pings received.
+.TP
+.B \fBTX\fP
+Total pings sent (RX + XX).
+.TP
+.B \fBXX\fP
+Total lost pings (timeouts).
+.TP
+.B \fBAll\fP
+All of the above in a single wide row.
+.UNINDENT
+.SH DNS MODES
+.INDENT 0.0
+.TP
+.B \fBoff\fP
+Display the name exactly as given on the command line.
+.TP
+.B \fBhostname\fP
+Reverse\-DNS lookup: IP → hostname.  Forward lookup for hostnames.
+Falls back to the original value on failure.
+.TP
+.B \fBip\fP
+Forward\-DNS lookup: hostname → IP.  Pass\-through for IPs.
+Falls back to the original value on failure.
+.UNINDENT
+.sp
+Resolution runs in a background thread and does not block the UI.
+Static \fB:resolv\fP mappings take priority over DNS and are applied
+immediately.
+.SH CONFIGURATION FILE
+.sp
+Settings are stored in \fB$XDG_CONFIG_HOME/ping\-bulk/config\fP
+(defaults to \fB~/.config/ping\-bulk/config\fP).
+.sp
+A skeleton file with commented defaults is created on first run.
+Use \fB:saveconfig\fP to write the current settings, or edit the file
+directly.
+.SS Recognised keys
+.INDENT 0.0
+.TP
+.B \fBdns = off|hostname|ip\fP
+DNS display mode.
+.TP
+.B \fBstats = off|Loss%|Avg|Min|Max|StDev|RX|TX|XX|All\fP
+Stats column.
+.TP
+.B \fBsort = none|name|status|latency\fP
+Sort order.
+.TP
+.B \fBhistory = success|rtt|scaled\fP
+History display mode.
+.TP
+.B \fBlog = /path/to/file\fP
+Path to stream the event log; leave blank to disable.
+.UNINDENT
+.sp
+Example:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+# ping\-bulk configuration
+dns     = hostname
+stats   = Loss%
+sort    = status
+history = scaled
+log     = /var/log/ping\-bulk.log
+.EE
+.UNINDENT
+.UNINDENT
+.SH EVENT LOG
+.sp
+\fBping\-bulk\fP records the following events:
+.INDENT 0.0
+.IP \(bu 2
+Host starts up (first successful ping after launch).
+.IP \(bu 2
+Host goes down (first timeout after being up).
+.IP \(bu 2
+Host recovers (first successful ping after being down), including
+total downtime.
+.IP \(bu 2
+Fatal process errors (DNS resolution failure, permission denied, …).
+.UNINDENT
+.sp
+Each line is prefixed with an ISO 8601 timestamp including timezone
+offset:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+2026\-03\-20T14:05:32+0200   192.168.1.1   host down
+2026\-03\-20T14:06:10+0200   192.168.1.1   host recover. Down time: 38 sec
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+The log is scrollable in the UI (\fB↑\fP/\fB↓\fP/\fBPgUp\fP/\fBPgDn\fP) and
+can be streamed to a file with \fB\-l\fP/\fB\-\-log\-file\fP or \fB:log\fP\&.
+.SH SSH MONITORING
+.sp
+Remote monitoring requires passwordless SSH access (key\-based
+authentication or an active ssh\-agent).  The connection uses
+\fBBatchMode=yes\fP so no password prompt ever appears.
+.sp
+Fatal errors (permission denied, host\-key verification failure, too
+many authentication failures) stop the monitor permanently.  Transient
+errors (connection refused, no route to host, timeout) trigger an
+automatic retry with exponential backoff (1 s → 2 s → 4 s … capped at
+30 s).
+.sp
+The display label for an SSH monitor is \fBdest→ping\-host\fP, e.g.
+\fBops@remote\-a→10.10.0.1\fP\&.
+.SH EXAMPLES
+.sp
+Ping a few public resolvers:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+ping\-bulk 8.8.8.8 1.1.1.1 9.9.9.9
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+Load hosts from a file and stream events to a log:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+ping\-bulk \-f /etc/ping\-bulk/hosts.txt \-l /var/log/ping\-bulk.log
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+Use brace expansion to monitor a whole subnet:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+ping\-bulk 10.0.0.{1..254}
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+Combine a hosts file with extra command\-line hosts:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+ping\-bulk \-f office.hosts 8.8.8.8 1.1.1.1
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+Run an executable hosts file directly:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+chmod +x office.hosts
+\&./office.hosts
+.EE
+.UNINDENT
+.UNINDENT
+.sp
+Monitor remote hosts via an SSH jump host:
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+:ssh \-J bastion.example.com ops@remote 10.10.0.{1..8}
+.EE
+.UNINDENT
+.UNINDENT
+.SH FILES
+.INDENT 0.0
+.TP
+.B \fB~/.config/ping\-bulk/config\fP
+User configuration file (XDG: \fB$XDG_CONFIG_HOME/ping\-bulk/config\fP).
+.UNINDENT
+.SH SEE ALSO
+.sp
+\fBping\fP(8), \fBssh\fP(1)
+.SH CREDITS
+.sp
+\fBping\-bulk\fP was inspired by
+ <ping\-multi>  by
+Ivan Zahariev (famzah).
+.\" Generated by docutils manpage writer.
+.
