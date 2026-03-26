@@ -10,11 +10,11 @@ tmux_app_40
 
 tmux_app_50
     A running ping-bulk session in a 120×50 tmux window.
-    At this height the overlay still needs a small scroll range (max_scroll=2).
+    At this height the overlay still needs a small scroll range (max_scroll=3).
 
-tmux_app_52
-    A running ping-bulk session in a 120×52 tmux window.
-    At this height all 50 help lines fit (visible_count=50, max_scroll=0)
+tmux_app_53
+    A running ping-bulk session in a 120×NO_SCROLL_HEIGHT tmux window.
+    At this height all help lines fit (max_scroll=0)
     so the scroll indicator is absent.
 
 tmux_app_15
@@ -26,6 +26,8 @@ pre-warmed until the ping-bulk UI is visible (waits for ``'ping-bulk:'``
 in the menu bar).  The session is killed automatically after the test.
 """
 
+import importlib.machinery
+import importlib.util
 import os
 import shutil
 import sys
@@ -33,6 +35,19 @@ import pytest
 
 # Make the tests/ directory importable without installing anything.
 sys.path.insert(0, os.path.dirname(__file__))
+
+# Load _HELP_LINES from the ping-bulk script (no .py extension) so fixtures
+# can compute NO_SCROLL_HEIGHT dynamically instead of hardcoding the line count.
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_loader = importlib.machinery.SourceFileLoader(
+    'ping_bulk', os.path.join(_repo_root, 'ping-bulk')
+)
+_spec = importlib.util.spec_from_loader('ping_bulk', _loader)
+_mod = importlib.util.module_from_spec(_spec)
+_loader.exec_module(_mod)
+
+# Smallest terminal height at which all help lines fit without scrolling.
+NO_SCROLL_HEIGHT = len(_mod._HELP_LINES) + 2
 
 from tmux_helper import TmuxSession  # noqa: E402
 
@@ -123,9 +138,9 @@ def tmux_app_50(app_path: str, check_integration_deps):
 
 
 @pytest.fixture
-def tmux_app_52(app_path: str, check_integration_deps):
-    """ping-bulk in a 120×52 window.  All 50 help lines fit; no scroll indicator."""
-    sess = _make_app_session('ping-bulk-test-52', app_path, width=120, height=52)
+def tmux_app_53(app_path: str, check_integration_deps):
+    """ping-bulk in a 120×NO_SCROLL_HEIGHT window.  All help lines fit; no scroll indicator."""
+    sess = _make_app_session('ping-bulk-test-53', app_path, width=120, height=NO_SCROLL_HEIGHT)
     yield sess
     sess.kill()
 
