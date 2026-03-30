@@ -56,6 +56,8 @@ SET_PARAMS = [
              'ping history display mode'),
     SetParam('log-size',  '_cmd_log_size', ['1000', '5000', '10000', '50000', '100000'],
              'event log max lines (default 10000)'),
+    SetParam('history-size', '_cmd_history_size', ['1000', '10000', '86400', '604800'],
+             'per-host ping history depth (default 86400)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -79,23 +81,16 @@ _HELP_LINES = [
     "  C              clear event log",
     "  :              open command line",
     "  ?              show this help",
-    "  ← / →          scroll history back / forward",
+    "  ← / →          scroll history ← older (step) / → live (step)",
+  "  Ctrl+← / Ctrl+→  scroll history ← older (page) / → live (page)",
     "  ↑ / ↓          scroll event log up / down",
     "  PgUp / PgDn    scroll event log by page",
     "─" * _HELP_INNER_W,
     "  Commands",
     "  :q  :quit                quit",
-    "  :dns [off|hostname|ip]   cycle or set DNS display mode",
-    "  :stats [mode]            cycle or set stats column",
-    f"                           modes: {' | '.join(STATS_MODES)}",
-    "  :sort [mode]             cycle or set sort order",
-    "                           modes: none | name | status | latency",
-    "  :ping-view [mode]         cycle or set history display mode",
-    f"                           modes: {' | '.join(HISTORY_MODES)}",
     f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
-    "                           set any display mode by name (delegates to the",
-    "                           individual commands above; omit value to cycle/show)",
-    "  :log-size <n>            set event log max lines (default 10000)",
+    "                           set display modes; omit value to cycle/show",
+    "                           log-size / history-size: numeric value only",
     "  :pause                   toggle pause on/off",
     "  :seen                    insert 'seen' marker in event log",
     "  :clear                   clear event log",
@@ -1132,7 +1127,7 @@ CMD_REGISTRY = [
            '[mode]',              'cycle or set history display mode'),
     CmdDef(['set'],              '_cmd_set',        [p.name for p in SET_PARAMS],
            '|'.join(p.name for p in SET_PARAMS) + ' [value]',
-           'set a display mode (delegates to the individual commands)'),
+           'set any mode or parameter by name; omit value to cycle/show'),
     CmdDef(['pause'],            '_cmd_pause',      None,
            '',                    'toggle pause on/off'),
     CmdDef(['seen'],             '_cmd_seen',       None,
@@ -1142,8 +1137,6 @@ CMD_REGISTRY = [
     CmdDef(['log'],              '_cmd_log',        None,
            '[file|off]',          'show/set/disable the streaming log file',
            arg_completer=_complete_log_arg),
-    CmdDef(['log-size'],         '_cmd_log_size',   ['1000', '5000', '10000', '50000', '100000'],
-           '<n>',                 'set event log max lines (default 10000)'),
     CmdDef(['saveconfig'],       '_cmd_saveconfig', None,
            '',                    'save current settings to config file'),
     CmdDef(['resolv'],           '_cmd_resolv',     None,
@@ -1184,6 +1177,7 @@ class Application:
         self.entries = []   # ordered display list: PingMonitor | SectionLabel
         self.monitors = []  # pure PingMonitor list for stats, threading, DNS
         self.hosts_map = {}  # static DNS overrides: ip→(ip, hostname) and hostname→(ip, hostname)
+        self.history_size = 86400  # per-host ping history deque size (default 24 h at 1 ping/s)
         self.log_size = 10000
         self.events = deque(maxlen=self.log_size)
         self.paused = False
@@ -1192,6 +1186,7 @@ class Application:
         self.sort_by = 'none'  # none, name, status, latency
         self.history_mode = 0  # index into HISTORY_MODES
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
+        self._visible_ping_length = 50  # updated by draw_hosts(); used for scroll step
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
         self.log_file = None        # path to append event log, or None
         self._monitoring_started = False  # set True once start_monitoring() is called
@@ -1255,10 +1250,10 @@ class Application:
         do not start with ':' are silently skipped.
 
         Supported commands:
-          :dns [off|hostname|ip]   — set DNS display mode
-          :stats [mode]            — set stats column mode
-          :sort [mode]             — set sort order
-          :ping-view [mode]        — set history display mode
+          :set dns [off|hostname|ip]   — set DNS display mode
+          :set stats [mode]            — set stats column mode
+          :set sort [mode]             — set sort order
+          :set ping-view [mode]        — set history display mode
           :log [path|off]          — set or disable the streaming log file
 
         All commands are dispatched through _dispatch_cmd().  Because
@@ -1291,11 +1286,12 @@ class Application:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w') as f:
                 f.write("# ping-bulk configuration\n")
-                f.write(f":dns {DNS_MODES[self.dns_mode]}\n")
-                f.write(f":stats {STATS_MODES[self.stats_mode]}\n")
-                f.write(f":sort {self.sort_by}\n")
-                f.write(f":ping-view {HISTORY_MODES[self.history_mode]}\n")
-                f.write(f":log-size {self.log_size}\n")
+                f.write(f":set dns {DNS_MODES[self.dns_mode]}\n")
+                f.write(f":set stats {STATS_MODES[self.stats_mode]}\n")
+                f.write(f":set sort {self.sort_by}\n")
+                f.write(f":set ping-view {HISTORY_MODES[self.history_mode]}\n")
+                f.write(f":set log-size {self.log_size}\n")
+                f.write(f":set history-size {self.history_size}\n")
                 if self.log_file:
                     f.write(f":log {self.log_file}\n")
                 else:
@@ -1318,12 +1314,13 @@ class Application:
                 f.write("# ping-bulk configuration\n")
                 f.write("# Generated on first run — edit as needed.\n")
                 f.write("#\n")
-                f.write(f"# :dns off          # choices: {' | '.join(DNS_MODES)}\n")
-                f.write(f"# :stats off        # choices: {' | '.join(STATS_MODES)}\n")
-                f.write( "# :sort none        # choices: none | name | status | latency\n")
-                f.write(f"# :ping-view success  # choices: {' | '.join(HISTORY_MODES)}\n")
-                f.write( "# :log-size 10000   # event log max lines\n")
-                f.write( "# :log              # path to stream event log; leave blank to disable\n")
+                f.write(f"# :set dns off            # choices: {' | '.join(DNS_MODES)}\n")
+                f.write(f"# :set stats off          # choices: {' | '.join(STATS_MODES)}\n")
+                f.write( "# :set sort none          # choices: none | name | status | latency\n")
+                f.write(f"# :set ping-view success  # choices: {' | '.join(HISTORY_MODES)}\n")
+                f.write( "# :set log-size 10000     # event log max lines\n")
+                f.write( "# :set history-size 86400 # per-host ping history depth (default 24 h at 1 ping/s)\n")
+                f.write( "# :log                    # path to stream event log; leave blank to disable\n")
         except OSError:
             pass  # silently ignore — e.g. read-only filesystem or missing home directory
 
@@ -1505,8 +1502,18 @@ class Application:
         self.history_mode = (self.history_mode + direction) % len(HISTORY_MODES)
 
     def scroll_history(self, delta):
-        """Scroll history view by delta steps (positive = back in time)"""
-        max_offset = self.monitors[0].history.maxlen if self.monitors else 100
+        """Scroll history view by delta steps (positive = back in time).
+
+        No-op when every ping fits in the visible window (nothing off-screen to
+        scroll to).  The maximum offset is capped at the number of pings that
+        have actually been stored in the history deque (len(m.history)) minus
+        the current visible window width, so the user can never scroll past the
+        oldest available sample.
+        """
+        max_history_len = max((len(m.history) for m in self.monitors), default=0)
+        max_offset = max(0, max_history_len - self._visible_ping_length)
+        if max_offset == 0:
+            return  # all pings fit on screen — nothing to scroll
         self.history_offset = max(0, min(max_offset, self.history_offset + delta))
 
     def scroll_log(self, delta):
@@ -1674,7 +1681,8 @@ class Application:
             display_label = 'scaled/100ms' if mode_label == 'scaled' else mode_label
             history_header = f"Ping history [{display_label}]"
             if self.history_offset > 0:
-                history_header = f"Ping history [{display_label}] [<{self.history_offset}s]"
+                history_header = (f"Ping history [{display_label}]"
+                                  f" [←{self.history_offset}  →live]")
             stdscr.addstr(start_row, hist_col_effective, history_header, curses.A_BOLD)
 
             if show_all and all_stats_col < width:
@@ -1697,11 +1705,30 @@ class Application:
         # Resize every monitor's history deque to match the current terminal width
         # so that recorded history always fills the full available column.
         # Always size by screen columns (not ping count) so switching modes keeps data.
-        normal_history_length = max(1, width - hist_col - 1)
+        normal_history_length = self.history_size
         for m in self.monitors:
             with m.lock:
                 if m.history.maxlen != normal_history_length:
                     m.history = deque(m.history, maxlen=normal_history_length)
+
+        # Compute layout constants once — they are the same for every monitor row.
+        col_length = max(0, width - hist_col_effective)
+        ping_length = max(1, col_length // cell_width)
+        self._visible_ping_length = ping_length
+        half = max(1, ping_length // 2)
+
+        max_ping_count = max((m.ping_count for m in self.monitors), default=0)
+
+        if self.history_offset > 0:
+            # Scrolled view: always show the full available width
+            display_count = ping_length
+        else:
+            if max_ping_count < ping_length:
+                # Initial fill phase: grow from 0 to ping_length
+                display_count = max_ping_count
+            else:
+                # Sweep phase: snap to half, grow back to ping_length-1, repeat
+                display_count = half + ((max_ping_count - ping_length) % half)
 
         for item in sorted_monitors:
             if row >= data_start + max_rows:
@@ -1740,30 +1767,6 @@ class Application:
                     else:
                         stdscr.addstr(row, stat_col, "     -", curses.color_pair(2))
 
-            # Ping history — full screen width in all modes; extends to right edge.
-            # get_history_string() pads with spaces for columns beyond actual deque content.
-            col_length = max(0, width - hist_col_effective - 1)
-
-            # Number of ping samples that fit in the available columns.
-            # In rtt mode each sample occupies cell_width columns; other modes use 1.
-            ping_length = max(1, col_length // cell_width)
-
-            # Sweep mode: fill 0→ping_length once, then snap to half and grow again.
-            # ping_count is never capped (unlike the history deque).
-            half = max(1, ping_length // 2)
-
-            if self.history_offset > 0:
-                # Scrolled view: always show the full available width
-                display_count = ping_length
-            else:
-                max_pings = max((m.ping_count for m in self.monitors), default=0)
-                if max_pings < ping_length:
-                    # Initial fill phase: grow from 0 to ping_length
-                    display_count = max_pings
-                else:
-                    # Sweep phase: snap to half, grow back to ping_length-1, repeat
-                    display_count = half + ((max_pings - ping_length) % half)
-
             history = monitor.get_history_string(
                 display_count, self.history_offset, hist_mode, cell_width
             )
@@ -1774,7 +1777,7 @@ class Application:
                 # rtt mode: iterate cell_width characters at a time.
                 # Each cell is (cell_width-1) digit chars + 1 trailing space.
                 for i in range(0, len(history), cell_width):
-                    if col >= width - 1:
+                    if col >= width:
                         break
                     cell = history[i:i + cell_width]
                     content = cell[:cell_width - 1].lstrip()
@@ -1799,7 +1802,7 @@ class Application:
             else:
                 # success / scaled mode: one character per ping.
                 for char in history:
-                    if col >= width - 1:
+                    if col >= width:
                         break
                     if char == 'X':
                         stdscr.addstr(row, col, char, curses.color_pair(2))  # red
@@ -1814,8 +1817,19 @@ class Application:
                     elif char == '>':
                         stdscr.addstr(row, col, char, curses.color_pair(5))  # magenta — >100 ms
                     else:
-                        stdscr.addstr(row, col, char)
+                        stdscr.addstr(row, col, char)  # blank padding
                     col += 1
+
+            # Right-edge scroll indicator: overwrite the last rendered history column
+            # with '→' when older pings exist beyond the visible window.  This covers
+            # two cases:
+            #   history_offset > 0        — user has scrolled back; newer pings are off
+            #                               to the right of the drawn bar.
+            #   max_ping_count > display_count — sweep phase (offset == 0): the bar is
+            #                               not yet full-width, so older samples recorded
+            #                               before the current sweep window are off-screen.
+            if (self.history_offset > 0 or max_ping_count > display_count) and col > hist_col_effective:
+                stdscr.addstr(row, width - 1, '→', curses.A_BOLD)
 
             # All-stats block flush-left after hostname
             if show_all and all_stats_col < width:
@@ -2571,7 +2585,7 @@ class Application:
                 self.add_event("log", "no log file active")
 
     def _cmd_log_size(self, args=''):
-        """Set the event log maximum line count: :log-size <n>."""
+        """Set the event log maximum line count: :set log-size <n>."""
         if not args:
             self.add_event("log-size", f"current log size: {self.log_size}")
             return
@@ -2586,6 +2600,30 @@ class Application:
         self.events = deque(self.events, maxlen=n)
         if self._monitoring_started:
             self.add_event("log-size", f"event log size set to {n}")
+
+    def _cmd_history_size(self, args=''):
+        """Set the per-host ping history depth: :history-size <n>.
+
+        Resizes the history deque on every monitor in place, preserving as
+        many existing samples as the new size permits.
+        """
+        if not args:
+            self.add_event("history-size", f"current history size: {self.history_size}")
+            return
+        try:
+            n = int(args)
+            if n < 1:
+                raise ValueError
+        except ValueError:
+            self.add_event("cmd",
+                f"history-size: invalid value '{args}' — must be a positive integer")
+            return
+        self.history_size = n
+        for monitor in self.monitors:
+            with monitor.lock:
+                monitor.history = deque(monitor.history, maxlen=n)
+        if self._monitoring_started:
+            self.add_event("history-size", f"per-host ping history size set to {n}")
 
     def _cmd_saveconfig(self, args=''):
         """Save current settings to config file."""
@@ -2772,6 +2810,41 @@ class Application:
             except Exception:
                 pass  # best-effort; Shift+Tab falls back to no-op on this terminal
 
+    def _register_ctrl_arrow_seqs(self):
+        """Register Ctrl+Arrow escape sequences as KEY_SLEFT / KEY_SRIGHT with ncurses.
+
+        Terminals send various escape sequences for Ctrl+Left / Ctrl+Right:
+          \\x1b[1;5D  \\x1b[5D  \\x1bOd   — Ctrl+Left (xterm / VTE / tmux variants)
+          \\x1b[1;5C  \\x1b[5C  \\x1bOc   — Ctrl+Right
+
+        We reuse KEY_SLEFT / KEY_SRIGHT (Shift+Left/Right) as the ncurses key
+        codes because no standard code exists for Ctrl+Arrow, and those slots
+        are otherwise unused in this application.
+
+        Best-effort: any failure is silently ignored.
+        """
+        _CTRL_LEFT_SEQS  = (b'\x1b[1;5D', b'\x1b[5D', b'\x1bOd')
+        _CTRL_RIGHT_SEQS = (b'\x1b[1;5C', b'\x1b[5C', b'\x1bOc')
+        try:
+            for _seq in _CTRL_LEFT_SEQS:
+                curses.define_key(_seq.decode(), curses.KEY_SLEFT)
+            for _seq in _CTRL_RIGHT_SEQS:
+                curses.define_key(_seq.decode(), curses.KEY_SRIGHT)
+        except AttributeError:
+            try:
+                import ctypes
+                import ctypes.util
+                _lib_name = (ctypes.util.find_library('ncursesw')
+                             or ctypes.util.find_library('ncurses'))
+                if _lib_name:
+                    _nclib = ctypes.CDLL(_lib_name)
+                    for _seq in _CTRL_LEFT_SEQS:
+                        _nclib.define_key(_seq, curses.KEY_SLEFT)
+                    for _seq in _CTRL_RIGHT_SEQS:
+                        _nclib.define_key(_seq, curses.KEY_SRIGHT)
+            except Exception:
+                pass  # best-effort; Ctrl+Arrow falls back to no-op on this terminal
+
     def run(self, stdscr):
         """Main application loop"""
         # Initialize curses
@@ -2780,6 +2853,7 @@ class Application:
         stdscr.timeout(100)
 
         self._register_shift_tab_seqs()
+        self._register_ctrl_arrow_seqs()
 
         # Initialize colors
         curses.start_color()
@@ -2900,11 +2974,21 @@ class Application:
                     }
                 elif key == ord('?'):
                     self._cmd_help()
-                # History scrolling (left/right arrows)
+                # History scrolling
+                # The history bar shows newest pings on the RIGHT and oldest on the LEFT.
+                # Arrow keys move through time naturally:
+                #   ← / Ctrl+←  scroll back in time (show older pings, increase offset)
+                #   → / Ctrl+→  scroll forward in time (return toward live, decrease offset)
+                # Left/Right      — half visible width (step)
+                # Ctrl+Left/Right — full visible width (page)
                 elif key == curses.KEY_LEFT:
-                    self.scroll_history(1)
+                    self.scroll_history(max(1, self._visible_ping_length // 2))
                 elif key == curses.KEY_RIGHT:
-                    self.scroll_history(-1)
+                    self.scroll_history(-max(1, self._visible_ping_length // 2))
+                elif key == curses.KEY_SLEFT:   # Ctrl+Left (see _register_ctrl_arrow_seqs)
+                    self.scroll_history(self._visible_ping_length)
+                elif key == curses.KEY_SRIGHT:  # Ctrl+Right
+                    self.scroll_history(-self._visible_ping_length)
                 # Event log scrolling (up/down arrows and PgUp/PgDn)
                 # Only active when the log overflows the visible area.
                 elif key == curses.KEY_UP:
@@ -3034,13 +3118,13 @@ def main(stdscr, args):
     # config file.  Delegate through _dispatch_cmd so validation and cycling
     # logic is identical to the interactive ':cmd value' path.
     if args.dns:
-        app._dispatch_cmd(f':dns {args.dns}')
+        app._dispatch_cmd(f':set dns {args.dns}')
     if args.stats:
-        app._dispatch_cmd(f':stats {args.stats}')
+        app._dispatch_cmd(f':set stats {args.stats}')
     if args.sort:
-        app._dispatch_cmd(f':sort {args.sort}')
+        app._dispatch_cmd(f':set sort {args.sort}')
     if args.ping_view:
-        app._dispatch_cmd(f':ping-view {args.ping_view}')
+        app._dispatch_cmd(f':set ping-view {args.ping_view}')
 
     app.run(stdscr)
 

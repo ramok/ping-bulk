@@ -309,7 +309,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert ':dns ip' in content, f"dns setting not found in saved config:\n{content}"
+        assert ':set dns ip' in content, f"dns setting not found in saved config:\n{content}"
 
     def test_stats_persisted(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -319,7 +319,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert ':stats Avg' in content
+        assert ':set stats Avg' in content
 
     def test_sort_persisted(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -329,7 +329,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert ':sort latency' in content
+        assert ':set sort latency' in content
 
     def test_history_persisted(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -339,7 +339,7 @@ class TestSaveConfig:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert ':ping-view scaled' in content
+        assert ':set ping-view scaled' in content
 
     def test_log_file_persisted_when_set(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -439,7 +439,7 @@ class TestSaveConfigCommand:
             app._dispatch_cmd('saveconfig')
         with open(cfg) as f:
             content = f.read()
-        assert ':dns ip' in content
+        assert ':set dns ip' in content
 
     def test_saveconfig_colon_prefix_accepted(self, pb, tmp_path):
         """':saveconfig' (with leading colon) must also work."""
@@ -459,7 +459,7 @@ class TestSaveConfigCommand:
 # ===========================================================================
 
 class TestLogSize:
-    """Tests for the :log-size command and its config persistence."""
+    """Tests for the :set log-size command and its config persistence."""
 
     def test_default_log_size(self, pb, tmp_path):
         """log_size defaults to 10000."""
@@ -471,14 +471,14 @@ class TestLogSize:
         """A valid positive integer changes log_size."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        app._dispatch_cmd(':log-size 5000')
+        app._dispatch_cmd(':set log-size 5000')
         assert app.log_size == 5000
 
     def test_valid_value_resizes_deque(self, pb, tmp_path):
         """Changing log-size resizes the events deque."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        app._dispatch_cmd(':log-size 500')
+        app._dispatch_cmd(':set log-size 500')
         assert app.events.maxlen == 500
 
     def test_resize_preserves_existing_events(self, pb, tmp_path):
@@ -488,16 +488,16 @@ class TestLogSize:
         # Add a few events directly
         for i in range(5):
             app.events.append(f'event {i}')
-        app._dispatch_cmd(':log-size 50')
+        app._dispatch_cmd(':set log-size 50')
         event_list = list(app.events)
         assert len(event_list) == 5
         assert 'event 0' in event_list
 
     def test_no_args_shows_current_size(self, pb, tmp_path):
-        """Calling :log-size with no argument reports the current size in the event log."""
+        """Calling :set log-size with no argument reports the current size in the event log."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        app._dispatch_cmd(':log-size')
+        app._dispatch_cmd(':set log-size')
         events = list(app.events)
         assert any('10000' in e for e in events), (
             f"Current log size not reported in events: {events}"
@@ -507,7 +507,7 @@ class TestLogSize:
         """A non-integer value must be rejected and log_size must stay unchanged."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        app._dispatch_cmd(':log-size abc')
+        app._dispatch_cmd(':set log-size abc')
         assert app.log_size == 10000
         events = list(app.events)
         assert any('invalid' in e.lower() or 'error' in e.lower() for e in events)
@@ -516,18 +516,18 @@ class TestLogSize:
         """Zero is not a valid log size."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        app._dispatch_cmd(':log-size 0')
+        app._dispatch_cmd(':set log-size 0')
         assert app.log_size == 10000
 
     def test_invalid_negative_rejected(self, pb, tmp_path):
         """Negative integers are not valid log sizes."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        app._dispatch_cmd(':log-size -100')
+        app._dispatch_cmd(':set log-size -100')
         assert app.log_size == 10000
 
     def test_log_size_persisted_by_save_config(self, pb, tmp_path):
-        """:log-size is written to the config file by _save_config()."""
+        """:set log-size is written to the config file by _save_config()."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         app.log_size = 2000
@@ -535,12 +535,12 @@ class TestLogSize:
             app._save_config()
         with open(cfg) as f:
             content = f.read()
-        assert ':log-size 2000' in content
+        assert ':set log-size 2000' in content
 
     def test_log_size_loaded_from_config(self, pb, tmp_path):
-        """:log-size in the config file is applied on startup."""
+        """:set log-size in the config file is applied on startup."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, ':log-size 3000\n')
+        app = make_app(pb, cfg, ':set log-size 3000\n')
         assert app.log_size == 3000
         assert app.events.maxlen == 3000
 
@@ -653,4 +653,114 @@ class TestLogFileCliOverride:
         assert app.log_file == config_log, (
             f"Config log file should be used when CLI arg is absent; got {app.log_file!r}"
         )
+
+
+class TestHistorySize:
+    """Tests for the :set history-size command and its config persistence."""
+
+    def test_default_history_size(self, pb, tmp_path):
+        """history_size defaults to 86400."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        assert app.history_size == 86400
+
+    def test_valid_value_sets_history_size(self, pb, tmp_path):
+        """A valid positive integer changes history_size."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set history-size 1000')
+        assert app.history_size == 1000
+
+    def test_valid_value_resizes_monitor_deques(self, pb, tmp_path):
+        """Changing history-size resizes the history deque on all monitors."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '', entries=[('host', '10.0.0.1'), ('host', '10.0.0.2')])
+        app._dispatch_cmd(':set history-size 500')
+        for m in app.monitors:
+            assert m.history.maxlen == 500
+
+    def test_resize_preserves_existing_history(self, pb, tmp_path):
+        """Existing history entries are preserved when the deque is resized (up to new maxlen)."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '', entries=[('host', '10.0.0.1')])
+        m = app.monitors[0]
+        for v in [1.0, 2.0, 3.0]:
+            m.history.append(v)
+        app._dispatch_cmd(':set history-size 10000')
+        assert list(m.history) == [1.0, 2.0, 3.0]
+
+    def test_no_args_shows_current_size(self, pb, tmp_path):
+        """Calling :set history-size with no argument reports the current size in the event log."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set history-size')
+        events = list(app.events)
+        assert any('86400' in e for e in events), (
+            f"Current history size not reported in events: {events}"
+        )
+
+    def test_invalid_non_integer_rejected(self, pb, tmp_path):
+        """A non-integer value must be rejected and history_size must stay unchanged."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set history-size abc')
+        assert app.history_size == 86400
+        events = list(app.events)
+        assert any('invalid' in e.lower() or 'error' in e.lower() for e in events)
+
+    def test_invalid_zero_rejected(self, pb, tmp_path):
+        """Zero is not a valid history size."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set history-size 0')
+        assert app.history_size == 86400
+
+    def test_invalid_negative_rejected(self, pb, tmp_path):
+        """Negative integers are not valid history sizes."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set history-size -100')
+        assert app.history_size == 86400
+
+    def test_history_size_persisted_by_save_config(self, pb, tmp_path):
+        """:set history-size is written to the config file by _save_config()."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app.history_size = 2000
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app._save_config()
+        with open(cfg) as f:
+            content = f.read()
+        assert ':set history-size 2000' in content
+
+    def test_history_size_loaded_from_config(self, pb, tmp_path):
+        """:set history-size in the config file is applied on startup."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, ':set history-size 3000\n')
+        assert app.history_size == 3000
+
+    def test_history_size_roundtrip(self, pb, tmp_path):
+        """history-size survives a save+load cycle."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app1 = make_app(pb, cfg, '')
+        app1.history_size = 7500
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app1._save_config()
+
+        app2 = make_app(pb, cfg, config_text=None)
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app2._load_config()
+        assert app2.history_size == 7500
+
+    def test_set_history_size_via_set_command(self, pb, tmp_path):
+        """:set history-size <n> delegates to _cmd_history_size."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set history-size 4000')
+        assert app.history_size == 4000
+
+    def test_history_size_in_set_params(self, pb):
+        """history-size must be listed in SET_PARAMS."""
+        names = [p.name for p in pb.SET_PARAMS]
+        assert 'history-size' in names, f"history-size not found in SET_PARAMS: {names}"
 

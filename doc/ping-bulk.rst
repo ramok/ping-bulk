@@ -135,38 +135,39 @@ Quitting
 Display
 -------
 
-``:dns [off|hostname|ip]``
+``:set dns [off|hostname|ip]``
     With no argument, cycle the DNS display mode forward.
     With an argument, set the mode directly.
 
-``:stats [mode]``
+``:set stats [mode]``
     With no argument, cycle the stats column forward.
     With an argument, set the column directly.
     Valid modes: ``off``, ``Down``, ``Loss%``, ``Avg``, ``Min``, ``Max``,
     ``StDev``, ``RX``, ``TX``, ``XX``, ``All``.
 
-``:sort [mode]``
+``:set sort [mode]``
     With no argument, cycle the sort order forward.
     With an argument, set the order directly.
     Valid modes: ``none``, ``name``, ``status``, ``latency``.
 
-``:ping-view [mode]``
+``:set ping-view [mode]``
     With no argument, cycle the ping-history display mode forward.
     With an argument, set the mode directly.
     Valid modes: ``success``, ``rtt``, ``scaled``.
-    Aliases: ``:history``, ``:hist``.
 
 ``:set <setting> [value]``
-    Set any display mode by name, delegating to the corresponding individual
-    command.  With no *value*, the setting is cycled forward (same as calling
-    the individual command with no argument).
+    Generic form that accepts any display mode or parameter name.
+    With no *value*, numeric settings show their current value and
+    other settings are cycled forward.
 
-    Valid settings: ``dns``, ``stats``, ``sort``, ``ping-view``, ``log-size``.
+    Valid settings: ``dns``, ``stats``, ``sort``, ``ping-view``,
+    ``log-size``, ``history-size``.
 
     Examples::
 
         :set stats Loss%
-        :set dns
+        :set dns hostname
+        :set log-size 50000
 
 ``:pause``
     Toggle pause on/off.
@@ -186,10 +187,10 @@ Event log
     file and begin streaming future events there.  With ``off``,
     disable streaming.
 
-``:log-size <n>``
+``:set log-size <n>``
     Set the maximum number of lines kept in the in-memory event log.
     When the limit is reached the oldest lines are discarded.
-    Default: ``10000``.  Example: ``:log-size 50000``.
+    Default: ``10000``.  Example: ``:set log-size 50000``.
 
 Configuration
 -------------
@@ -459,19 +460,19 @@ directly.
 Recognised settings
 -------------------
 
-``:dns off|hostname|ip``
+``:set dns off|hostname|ip``
     DNS display mode.
 
-``:stats off|Down|Loss%|Avg|Min|Max|StDev|RX|TX|XX|All``
+``:set stats off|Down|Loss%|Avg|Min|Max|StDev|RX|TX|XX|All``
     Stats column.
 
-``:sort none|name|status|latency``
+``:set sort none|name|status|latency``
     Sort order.
 
-``:ping-view success|rtt|scaled``
+``:set ping-view success|rtt|scaled``
     History display mode.
 
-``:log-size <n>``
+``:set log-size <n>``
     Event log maximum line count.  Default: ``10000``.
 
 ``:log /path/to/file``
@@ -480,10 +481,10 @@ Recognised settings
 Example::
 
     # ping-bulk configuration
-    :dns hostname
-    :stats Loss%
-    :sort status
-    :ping-view scaled
+    :set dns hostname
+    :set stats Loss%
+    :set sort status
+    :set ping-view scaled
     :log /var/log/ping-bulk.log
 
 
