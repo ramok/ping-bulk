@@ -773,7 +773,8 @@ class SshPingMonitor(PingMonitor):
 
     def _build_ping_cmd(self):
         """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
-        return ['ssh', '-o', 'BatchMode=yes'] + self._ssh_args + [
+        return ['ssh', '-o', 'ControlMaster=no', '-o', 'BatchMode=yes'] + self._ssh_args + [
+        #return ['ssh', '-o', 'BatchMode=yes'] + self._ssh_args + [
             'ping', '-O', '-D', self._ping_host
         ]
 
@@ -1829,7 +1830,10 @@ class Application:
             #                               not yet full-width, so older samples recorded
             #                               before the current sweep window are off-screen.
             if (self.history_offset > 0 or max_ping_count > display_count) and col > hist_col_effective:
-                stdscr.addstr(row, width - 1, '→', curses.A_BOLD)
+                try:
+                    stdscr.addstr(row, width - 1, '→', curses.A_BOLD)
+                except curses.error:
+                    pass  # writing to bottom-right corner may fail; ignore
 
             # All-stats block flush-left after hostname
             if show_all and all_stats_col < width:
