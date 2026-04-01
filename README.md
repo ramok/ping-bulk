@@ -22,6 +22,11 @@ Events
   with a persistent `ping` subprocess.
 - **Rolling history strip** — one character (or numeric cell) per ping,
   color-coded green/yellow/red.
+- **Interactive host navigation** — arrow keys (↑/↓) to highlight hosts,
+  Enter to view detailed stats.
+- **Section folding** — collapsible section headers (Space key toggles fold state).
+- **Host details window** — comprehensive stats overlay for selected host
+  (latency, uptime, packet loss).
 - **Multiple stats columns** — Last RTT, Down/Up time, Average, Min, Max,
   Loss%, StDev, RX/TX/XX counts, or all at once.
 - **DNS display modes** — show hostnames, IPs, or original names.
@@ -74,6 +79,30 @@ ping-bulk 10.0.0.{1..20}
 ```
 
 Press **`?`** inside the running app for the full keyboard reference.
+
+## CLI Options
+
+```
+usage: ping-bulk [-h] [-f FILE] [-l LOGFILE] [--dns MODE] [--stats MODE]
+                 [--sort MODE] [--ping-view MODE] [HOST ...]
+
+positional arguments:
+  HOST                  hosts/IPs to ping
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -f FILE, --file FILE  hosts file (# comment, ## section header, one host per line)
+  -l LOGFILE, --log-file LOGFILE
+                        append event log entries to this file in real time
+  --dns MODE            DNS display mode at startup: off | hostname | ip
+  --stats MODE          stats column at startup: off | Down | Loss% | Avg | Min | Max |
+                        StDev | RX | TX | XX | All
+  --sort MODE           sort order at startup: none | name | status | latency
+  --ping-view MODE      ping history display mode at startup: success | rtt | scaled
+```
+
+Command-line options override settings from the config file
+(`~/.config/ping-bulk/config`).
 
 ## Hosts file
 
@@ -148,19 +177,22 @@ reference.
 
  | Key             | Action                   | 
  | -----           | --------                 | 
- | `q` / `Q`       | Quit                     | 
- | `?`             | Help overlay             | 
- | `:`             | Open command line        | 
- | `d` / `D`       | Cycle DNS mode           | 
- | `s` / `S`       | Cycle stats column       | 
- | `o` / `O`       | Cycle sort order         | 
- | `h` / `H`       | Cycle history mode       | 
- | `p` / `P`       | Toggle pause             | 
- | `Space`         | Insert *seen* marker     | 
- | `C`             | Clear event log          | 
- | `←` / `→`       | Scroll history           | 
- | `↑` / `↓`       | Scroll event log         | 
- | `PgUp` / `PgDn` | Scroll event log by page | 
+ | `q` / `Q`       | Quit                            |
+ | `?`             | Help overlay                    |
+ | `:`             | Open command line               |
+ | `d` / `D`       | Cycle DNS mode                  |
+ | `s` / `S`       | Cycle stats column              |
+ | `o` / `O`       | Cycle sort order                |
+ | `h` / `H`       | Cycle history mode              |
+ | `p` / `P`       | Toggle pause                    |
+ | `↑` / `↓`       | Navigate host list              |
+ | `Enter`         | Show detailed stats             |
+ | `Space`         | Insert marker / Toggle fold     |
+ | `Esc`           | Clear host selection            |
+ | `C`             | Clear event log                 |
+ | `←` / `→`           | Scroll history (step)           |
+ | `Ctrl+←` / `Ctrl+→` | Scroll history (page)           |
+ | `PgUp` / `PgDn` | Scroll event log                |
 
 ## Documentation
 

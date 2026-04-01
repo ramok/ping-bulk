@@ -77,8 +77,11 @@ _HELP_LINES = [
     "  o / O         cycle sort order forward / backward",
     "  h / H         cycle history mode forward / backward",
     "  p / P         toggle pause",
-    "  Space          insert 'seen' marker in event log",
+    "  ↑ / ↓          navigate host list",
+    "  Enter          show detailed stats for highlighted host",
+    "  Space          insert 'seen' marker (or toggle section fold)",
     "  C              clear event log",
+    "  Esc            clear host selection",
     "  :              open command line",
     "  ?              show this help",
     "  ← / →          scroll history ← older (step) / → live (step)",
@@ -790,6 +793,7 @@ class SectionLabel:
     """A non-pingable display row for ## section headers from a hosts file."""
     def __init__(self, title):
         self.title = title
+        self.folded = False  # True when section is collapsed
 
 
 def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
@@ -1190,6 +1194,7 @@ class Application:
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
         self._visible_ping_length = 50  # updated by draw_hosts(); used for scroll step
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
+        self.highlighted_index = None  # None = no selection; int = index in self.entries
         self.log_file = None        # path to append event log, or None
         self._monitoring_started = False  # set True once start_monitoring() is called
         self._load_config()         # apply config-file settings (before hosts-file commands)
@@ -1203,6 +1208,8 @@ class Application:
         self._load_cmd_history()
         self.help_open = False    # True while the help overlay is visible
         self.help_scroll = 0      # first visible line index in the help overlay
+        self.details_open = False # True while the host details overlay is visible
+        self.details_monitor = None  # PingMonitor instance whose details are shown
         self.running = True
         self.threads = []
 
@@ -1540,6 +1547,34 @@ class Application:
             except OSError:
                 pass
 
+    def _get_visible_entry_indices(self):
+        """Return a list of self.entries indices that are currently visible.
+
+        An entry is visible if:
+        - It's a section label AND sort_by == 'none'
+        - It's a monitor AND (sort_by != 'none' OR it doesn't belong to a folded section)
+
+        Returns indices in display order (sorted when sort_by != 'none').
+        """
+        if self.sort_by == 'none':
+            # No sorting: walk self.entries in order, tracking current section
+            visible = []
+            current_section = None
+            for idx, entry in enumerate(self.entries):
+                if isinstance(entry, SectionLabel):
+                    current_section = entry
+                    visible.append(idx)  # section labels are always visible
+                else:
+                    # Monitor: visible only if not in a folded section
+                    if current_section is None or not current_section.folded:
+                        visible.append(idx)
+            return visible
+        else:
+            # Sorting active: only monitors are shown, no section labels
+            # Return indices of all monitors in self.entries, in sorted display order
+            sorted_monitors = self.get_sorted_monitors()
+            return [self.entries.index(m) for m in sorted_monitors if m in self.entries]
+
     def get_sorted_monitors(self):
         """Get display entries sorted by current sort option.
 
@@ -1732,21 +1767,55 @@ class Application:
                 # Sweep phase: snap to half, grow back to ping_length-1, repeat
                 display_count = half + ((max_ping_count - ping_length) % half)
 
+        # Track current section for folding logic
+        current_section = None
+        entry_index = 0  # index in self.entries (not sorted_monitors)
+
         for item in sorted_monitors:
             if row >= data_start + max_rows:
                 break
 
+            # Find the actual index of this item in self.entries for highlighting
+            # (sorted_monitors may be in different order than self.entries)
+            if self.sort_by == 'none':
+                # No sorting: entry_index matches position in sorted_monitors
+                actual_entry_index = entry_index
+            else:
+                # Sorted: find the item's position in original self.entries
+                try:
+                    actual_entry_index = self.entries.index(item)
+                except ValueError:
+                    actual_entry_index = -1  # not found (shouldn't happen)
+
+            # Check if this entry is highlighted
+            is_highlighted = (self.highlighted_index is not None and
+                             actual_entry_index == self.highlighted_index)
+
+            # Base attribute for the entire row (highlight if selected)
+            row_attr = curses.A_REVERSE if is_highlighted else 0
+
             # Section label — render as a bold divider row and skip to the next entry
             if isinstance(item, SectionLabel):
-                stdscr.addstr(row, 0, f"── {item.title}"[:width - 1], curses.A_BOLD)
+                current_section = item
+                # Show fold indicator: [+] if folded, [-] if expanded
+                fold_indicator = "[+]" if item.folded else "[-]"
+                section_text = f"── {fold_indicator} {item.title}"[:width - 1]
+                section_attr = curses.A_BOLD | row_attr
+                stdscr.addstr(row, 0, section_text, section_attr)
                 row += 1
+                entry_index += 1
+                continue
+
+            # Skip this monitor if it belongs to a folded section
+            if current_section is not None and current_section.folded:
+                entry_index += 1
                 continue
 
             monitor = item
 
             # Hostname
             display_name = monitor.get_display_name(DNS_MODES[self.dns_mode])
-            stdscr.addstr(row, 0, display_name[:name_col_width].ljust(name_col_width))
+            stdscr.addstr(row, 0, display_name[:name_col_width].ljust(name_col_width), row_attr)
 
             # Stat col: Last latency (off) or single stat value; hidden in All mode
             if not show_all:
@@ -1758,16 +1827,16 @@ class Application:
                         stat_color = curses.color_pair(2) if is_down else 0
                     else:
                         stat_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
-                    stdscr.addstr(row, stat_col, stat_str, stat_color)
+                    stdscr.addstr(row, stat_col, stat_str, stat_color | row_attr)
                 else:
                     # off mode — show Last latency with color; '    ??' in bright red on error
                     if monitor.error is not None:
-                        stdscr.addstr(row, stat_col, "    ??", curses.color_pair(2) | curses.A_BOLD)
+                        stdscr.addstr(row, stat_col, "    ??", curses.color_pair(2) | curses.A_BOLD | row_attr)
                     elif monitor.latency is not None:
                         color = curses.color_pair(1) if monitor.latency < 50 else curses.color_pair(3)
-                        stdscr.addstr(row, stat_col, f"{monitor.latency:6.1f}", color)
+                        stdscr.addstr(row, stat_col, f"{monitor.latency:6.1f}", color | row_attr)
                     else:
-                        stdscr.addstr(row, stat_col, "     -", curses.color_pair(2))
+                        stdscr.addstr(row, stat_col, "     -", curses.color_pair(2) | row_attr)
 
             history = monitor.get_history_string(
                 display_count, self.history_offset, hist_mode, cell_width
@@ -1785,13 +1854,13 @@ class Application:
                     content = cell[:cell_width - 1].lstrip()
                     if not content:
                         # blank padding cell
-                        stdscr.addstr(row, col, cell)
+                        stdscr.addstr(row, col, cell, row_attr)
                     elif content[0] == 'X':
-                        stdscr.addstr(row, col, cell, curses.color_pair(2))  # red
+                        stdscr.addstr(row, col, cell, curses.color_pair(2) | row_attr)  # red
                     elif content[0] == '?':
-                        stdscr.addstr(row, col, cell, curses.color_pair(2) | curses.A_BOLD)  # bright red — process error
+                        stdscr.addstr(row, col, cell, curses.color_pair(2) | curses.A_BOLD | row_attr)  # bright red — process error
                     elif content[0] == '>':
-                        stdscr.addstr(row, col, cell, curses.color_pair(3))  # yellow — >100 ms
+                        stdscr.addstr(row, col, cell, curses.color_pair(3) | row_attr)  # yellow — >100 ms
                     else:
                         val = int(content)
                         if hist_mode == 'scaled':
@@ -1799,7 +1868,7 @@ class Application:
                             color = curses.color_pair(1) if val < 5 else curses.color_pair(3)
                         else:
                             color = curses.color_pair(1) if val < 50 else curses.color_pair(3)
-                        stdscr.addstr(row, col, cell, color)
+                        stdscr.addstr(row, col, cell, color | row_attr)
                     col += cell_width
             else:
                 # success / scaled mode: one character per ping.
@@ -1807,19 +1876,19 @@ class Application:
                     if col >= width:
                         break
                     if char == 'X':
-                        stdscr.addstr(row, col, char, curses.color_pair(2))  # red
+                        stdscr.addstr(row, col, char, curses.color_pair(2) | row_attr)  # red
                     elif char == '?':
-                        stdscr.addstr(row, col, char, curses.color_pair(2) | curses.A_BOLD)  # bright red — process error
+                        stdscr.addstr(row, col, char, curses.color_pair(2) | curses.A_BOLD | row_attr)  # bright red — process error
                     elif char == '.':
-                        stdscr.addstr(row, col, char, curses.color_pair(1))  # green
+                        stdscr.addstr(row, col, char, curses.color_pair(1) | row_attr)  # green
                     elif char in '01234':
-                        stdscr.addstr(row, col, char, curses.color_pair(1))  # green
+                        stdscr.addstr(row, col, char, curses.color_pair(1) | row_attr)  # green
                     elif char in '56789':
-                        stdscr.addstr(row, col, char, curses.color_pair(3))  # yellow
+                        stdscr.addstr(row, col, char, curses.color_pair(3) | row_attr)  # yellow
                     elif char == '>':
-                        stdscr.addstr(row, col, char, curses.color_pair(5))  # magenta — >100 ms
+                        stdscr.addstr(row, col, char, curses.color_pair(5) | row_attr)  # magenta — >100 ms
                     else:
-                        stdscr.addstr(row, col, char)  # blank padding
+                        stdscr.addstr(row, col, char, row_attr)  # blank padding
                     col += 1
 
             # Right-edge scroll indicator: overwrite the last rendered history column
@@ -1832,7 +1901,7 @@ class Application:
             #                               before the current sweep window are off-screen.
             if (self.history_offset > 0 or max_ping_count > display_count) and col > hist_col_effective:
                 try:
-                    stdscr.addstr(row, width - 1, '→', curses.A_BOLD)
+                    stdscr.addstr(row, width - 1, '→', curses.A_BOLD | row_attr)
                 except curses.error:
                     pass  # writing to bottom-right corner may fail; ignore
 
@@ -1840,21 +1909,22 @@ class Application:
             if show_all and all_stats_col < width:
                 # ms (Last latency)
                 if monitor.error is not None:
-                    stdscr.addstr(row, ms_col, "    ??", curses.color_pair(2) | curses.A_BOLD)
+                    stdscr.addstr(row, ms_col, "    ??", curses.color_pair(2) | curses.A_BOLD | row_attr)
                 elif monitor.latency is not None:
                     ms_color = curses.color_pair(1) if monitor.latency < 50 else curses.color_pair(3)
-                    stdscr.addstr(row, ms_col, f"{monitor.latency:6.1f}", ms_color)
+                    stdscr.addstr(row, ms_col, f"{monitor.latency:6.1f}", ms_color | row_attr)
                 else:
-                    stdscr.addstr(row, ms_col, "     -", curses.color_pair(2))
+                    stdscr.addstr(row, ms_col, "     -", curses.color_pair(2) | row_attr)
                 # Up/Down
                 updown_str, is_down = Application._compute_updown(monitor)
                 updown_color = curses.color_pair(2) if is_down else 0
-                stdscr.addstr(row, updown_col, f"{updown_str:>{updown_col_w}}", updown_color)
+                stdscr.addstr(row, updown_col, f"{updown_str:>{updown_col_w}}", updown_color | row_attr)
                 # Avg Min Max Loss% StDev RX TX XX
                 all_str = self._compute_all_stats(monitor)
                 all_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
-                stdscr.addstr(row, tail_col, all_str, all_color)
+                stdscr.addstr(row, tail_col, all_str, all_color | row_attr)
 
+            entry_index += 1
             row += 1
 
         return row
@@ -2877,6 +2947,143 @@ class Application:
             except curses.error:
                 pass
 
+    def _draw_details_overlay(self, stdscr, height, width):
+        """Draw the host details overlay as a centered bordered popup.
+
+        Displays comprehensive statistics for self.details_monitor:
+          - Host name / IP address
+          - Current status (up/down) and last latency
+          - Uptime / downtime duration
+          - Packet statistics (RX, TX, XX, Loss%)
+          - Latency statistics (Min, Max, Avg, StDev)
+          - Total pings sent
+
+        The overlay is closed by pressing Enter, q, Q, or Esc (handled in run()).
+        """
+        if self.details_monitor is None:
+            return
+
+        monitor = self.details_monitor
+
+        # Collect stats once at the start to ensure consistency
+        with monitor.lock:
+            lats = list(monitor.latencies)
+            rx = monitor.rx_count
+            xx = monitor.xx_count
+            tx = monitor.ping_count
+            last = monitor.latency
+            alive = monitor.alive
+            error = monitor.error
+
+        # Build content lines
+        lines = []
+        dns_mode = DNS_MODES[self.dns_mode]
+        display_name = monitor.get_display_name(dns_mode)
+
+        lines.append(f"  Host: {display_name}")
+        lines.append("─" * 60)
+
+        # Status
+        if error is not None:
+            lines.append(f"  Status: ERROR")
+            lines.append(f"  Error:  {error[:50]}")  # truncate long error messages
+        elif alive is True:
+            lines.append(f"  Status: UP")
+            if monitor.up_since is not None:
+                uptime = time.monotonic() - monitor.up_since
+                lines.append(f"  Uptime: {_format_updown_time(uptime)}")
+        elif alive is False:
+            lines.append(f"  Status: DOWN")
+            if monitor.down_since is not None:
+                downtime = time.monotonic() - monitor.down_since
+                lines.append(f"  Downtime: {_format_updown_time(downtime)}")
+        else:
+            lines.append(f"  Status: UNKNOWN")
+
+        lines.append("")
+
+        # Current latency
+        if last is not None:
+            lines.append(f"  Last RTT: {last:.2f} ms")
+        else:
+            lines.append(f"  Last RTT: -")
+
+        lines.append("")
+
+        # Packet statistics
+        lines.append("  Packet Statistics:")
+        lines.append(f"    Total sent (TX): {tx}")
+        lines.append(f"    Received (RX):   {rx}")
+        lines.append(f"    Lost (XX):       {xx}")
+
+        total = rx + xx
+        if total > 0:
+            loss_pct = (xx / total) * 100
+            lines.append(f"    Loss rate:       {loss_pct:.2f}%")
+        else:
+            lines.append(f"    Loss rate:       -")
+
+        lines.append("")
+
+        # Latency statistics
+        lines.append("  Latency Statistics:")
+        if lats:
+            lines.append(f"    Min:     {min(lats):.2f} ms")
+            lines.append(f"    Max:     {max(lats):.2f} ms")
+            avg = sum(lats) / len(lats)
+            lines.append(f"    Average: {avg:.2f} ms")
+
+            if len(lats) >= 2:
+                stdev = math.sqrt(sum((x - avg) ** 2 for x in lats) / len(lats))
+                lines.append(f"    StdDev:  {stdev:.2f} ms")
+            else:
+                lines.append(f"    StdDev:  -")
+        else:
+            lines.append(f"    Min:     -")
+            lines.append(f"    Max:     -")
+            lines.append(f"    Average: -")
+            lines.append(f"    StdDev:  -")
+
+        lines.append("")
+        lines.append("  [Enter / q / Esc] Close")
+
+        # Calculate box dimensions
+        inner_w = 60
+        box_w = inner_w + 2
+        box_h = len(lines) + 2
+
+        # Center the box
+        col0 = max(0, (width - box_w) // 2)
+        row0 = max(0, (height - box_h) // 2)
+
+        attr = curses.A_REVERSE
+
+        # Top border
+        if row0 < height:
+            try:
+                stdscr.addstr(row0, col0, ('┌' + '─' * inner_w + '┐')[:width - col0], attr)
+            except curses.error:
+                pass
+
+        # Content rows
+        for i, line in enumerate(lines):
+            r = row0 + 1 + i
+            if r >= height:
+                break
+            padded = line.ljust(inner_w)[:inner_w]
+            try:
+                stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
+            except curses.error:
+                pass
+
+        # Bottom border
+        r = row0 + 1 + len(lines)
+        if r < height:
+            try:
+                stdscr.addstr(r, col0, ('└' + '─' * inner_w + '┘')[:width - col0], attr)
+            except curses.error:
+                pass
+
     def _register_shift_tab_seqs(self):
         """Register Shift+Tab escape sequences as KEY_BTAB with ncurses.
 
@@ -3011,6 +3218,11 @@ class Application:
                     self._draw_help_overlay(stdscr, height, width)
                     curses.curs_set(0)
 
+                # Details overlay drawn on top of everything, including help
+                if self.details_open:
+                    self._draw_details_overlay(stdscr, height, width)
+                    curses.curs_set(0)
+
                 stdscr.refresh()
 
                 # Handle input — map Ctrl+C (KeyboardInterrupt) to key code 3
@@ -3031,6 +3243,12 @@ class Application:
                     elif key == curses.KEY_NPAGE:
                         self.help_scroll += 10  # upper bound clamped in _draw_help_overlay
                     continue
+                if self.details_open:
+                    if key in (curses.KEY_ENTER, ord('\n'), ord('\r'),
+                               ord('q'), ord('Q'), 27, 3):
+                        self.details_open = False
+                        self.details_monitor = None
+                    continue
                 if self.cmd is not None:
                     if key != -1:
                         self._handle_cmd_key(key)
@@ -3044,6 +3262,8 @@ class Application:
                     break
                 elif key == 3:  # Ctrl+C — ask for confirmation before quitting
                     self.prompt = {'type': 'quit_confirm', 'chars': []}
+                elif key == 27:  # Escape — clear host selection
+                    self.highlighted_index = None
                 elif key == ord('d'):
                     self.cycle_dns(1)
                 elif key == ord('D'):
@@ -3063,7 +3283,24 @@ class Application:
                 elif key == ord('H'):
                     self.cycle_history_mode(-1)
                 elif key == ord(' '):
-                    self.mark_seen()
+                    # If a section header is highlighted, toggle its folded state.
+                    # If a PingMonitor is highlighted, Space does nothing.
+                    # If nothing is highlighted, insert a 'seen' marker.
+                    if (self.highlighted_index is not None and
+                        0 <= self.highlighted_index < len(self.entries)):
+                        entry = self.entries[self.highlighted_index]
+                        if isinstance(entry, SectionLabel):
+                            entry.folded = not entry.folded
+                        # PingMonitor highlighted — no action for Space
+                    else:
+                        self.mark_seen()
+                elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+                    if (self.highlighted_index is not None and
+                            0 <= self.highlighted_index < len(self.entries)):
+                        entry = self.entries[self.highlighted_index]
+                        if isinstance(entry, PingMonitor):
+                            self.details_open = True
+                            self.details_monitor = entry
                 elif key == ord('C'):
                     self._open_prompt_clear()
                 elif key == ord(':'):
@@ -3074,6 +3311,8 @@ class Application:
                     }
                 elif key == ord('?'):
                     self._cmd_help()
+                elif key == 27:  # ESC — clear host selection
+                    self.highlighted_index = None
                 # History scrolling
                 # The history bar shows newest pings on the RIGHT and oldest on the LEFT.
                 # Arrow keys move through time naturally:
@@ -3089,14 +3328,49 @@ class Application:
                     self.scroll_history(self._visible_ping_length)
                 elif key == curses.KEY_SRIGHT:  # Ctrl+Right
                     self.scroll_history(-self._visible_ping_length)
-                # Event log scrolling (up/down arrows and PgUp/PgDn)
-                # Only active when the log overflows the visible area.
+                # UP/DOWN arrow keys: navigate through visible entries only
+                # Auto-initialize selection to first visible entry on first press
                 elif key == curses.KEY_UP:
-                    if len(self.events) > max(1, height - events_start - 2):
-                        self.scroll_log(1)
+                    if not self.entries:
+                        pass  # no entries to navigate
+                    else:
+                        # Build list of visible entry indices
+                        visible_indices = self._get_visible_entry_indices()
+                        if not visible_indices:
+                            pass  # no visible entries
+                        elif self.highlighted_index is None:
+                            # First navigation: start at the last visible entry
+                            self.highlighted_index = visible_indices[-1]
+                        else:
+                            # Find current position in visible list and move up
+                            try:
+                                current_pos = visible_indices.index(self.highlighted_index)
+                                if current_pos > 0:
+                                    self.highlighted_index = visible_indices[current_pos - 1]
+                            except ValueError:
+                                # Current highlight is not visible; snap to last visible
+                                self.highlighted_index = visible_indices[-1]
                 elif key == curses.KEY_DOWN:
-                    if len(self.events) > max(1, height - events_start - 2):
-                        self.scroll_log(-1)
+                    if not self.entries:
+                        pass  # no entries to navigate
+                    else:
+                        # Build list of visible entry indices
+                        visible_indices = self._get_visible_entry_indices()
+                        if not visible_indices:
+                            pass  # no visible entries
+                        elif self.highlighted_index is None:
+                            # First navigation: start at the first visible entry
+                            self.highlighted_index = visible_indices[0]
+                        else:
+                            # Find current position in visible list and move down
+                            try:
+                                current_pos = visible_indices.index(self.highlighted_index)
+                                if current_pos < len(visible_indices) - 1:
+                                    self.highlighted_index = visible_indices[current_pos + 1]
+                            except ValueError:
+                                # Current highlight is not visible; snap to first visible
+                                self.highlighted_index = visible_indices[0]
+                # PgUp/PgDn: scroll event log only
                 elif key == curses.KEY_PPAGE:   # Page Up — scroll log back
                     log_page_size = max(1, height - events_start - 2)
                     if len(self.events) > log_page_size:
