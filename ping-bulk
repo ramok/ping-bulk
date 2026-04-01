@@ -2410,6 +2410,27 @@ class Application:
             c['cursor'] += 1
             c['hist_idx'] = -1
 
+    def _resolve_ssh_host(self, host):
+        """Apply :resolv mapping to an SSH host, preserving user@ prefix if present.
+
+        Examples:
+          'ps-supervisor'      → '10.10.6.117' (if mapped)
+          'user@ps-supervisor' → 'user@10.10.6.117' (if mapped)
+          'unmapped-host'      → 'unmapped-host' (unchanged)
+
+        Returns the resolved host string.
+        """
+        if '@' in host:
+            user, hostname = host.rsplit('@', 1)
+            if hostname in self.hosts_map:
+                resolved_ip = self.hosts_map[hostname][0]
+                return f"{user}@{resolved_ip}"
+            return host
+        else:
+            if host in self.hosts_map:
+                return self.hosts_map[host][0]
+            return host
+
     def _apply_hosts_entry(self, ip, hostname):
         """Apply a static DNS override pair to any matching monitors.
 
@@ -2673,16 +2694,80 @@ class Application:
                     ping_host_pattern = tokens[-1]
                     ssh_args = tokens[:-1]
                     ssh_dest = ssh_args[-1]
-                    # Apply :resolv mapping to SSH destination if available
-                    # Handle user@host format by splitting and resolving hostname only
-                    if '@' in ssh_dest:
-                        user, hostname = ssh_dest.rsplit('@', 1)
-                        if hostname in self.hosts_map:
-                            resolved_ip = self.hosts_map[hostname][0]
-                            ssh_args[-1] = f"{user}@{resolved_ip}"
-                    elif ssh_dest in self.hosts_map:
-                        resolved_ssh_dest = self.hosts_map[ssh_dest][0]
-                        ssh_args[-1] = resolved_ssh_dest
+
+                    # Apply :resolv mapping to SSH destination
+                    ssh_args[-1] = self._resolve_ssh_host(ssh_dest)
+
+                    # Apply :resolv mapping to ProxyJump/jump hosts (-J and -o ProxyJump=)
+                    i = 0
+                    while i < len(ssh_args):
+                        arg = ssh_args[i]
+
+                        # Handle -J option (ProxyJump shorthand)
+                        if arg == '-J' and i + 1 < len(ssh_args):
+                            # Collect all tokens that belong to this -J argument.
+                            # When user types "-J bastion1, bastion2", shlex.split() produces
+                            # ['-J', 'bastion1,', 'bastion2'], so we need to collect tokens
+                            # while the previous token ends with a comma.
+                            jump_tokens = []
+                            j = i + 1
+                            while j < len(ssh_args):
+                                jump_tokens.append(ssh_args[j])
+                                # Stop if this token doesn't end with comma (it's the last one)
+                                if not ssh_args[j].endswith(','):
+                                    break
+                                j += 1
+
+                            # Join collected tokens with space, then split on comma
+                            jump_hosts_str = ' '.join(jump_tokens)
+
+                            # Handle comma-separated multi-hop: host1,host2,host3
+                            if ',' in jump_hosts_str:
+                                resolved_hops = []
+                                for hop in jump_hosts_str.split(','):
+                                    hop = hop.strip()  # Strip whitespace
+                                    if hop:  # Skip empty strings from trailing commas
+                                        resolved_hops.append(self._resolve_ssh_host(hop))
+                                resolved_str = ','.join(resolved_hops)
+                            else:
+                                resolved_str = self._resolve_ssh_host(jump_hosts_str)
+
+                            # Replace the collected tokens with the single resolved string
+                            ssh_args[i + 1] = resolved_str
+                            # Remove any extra tokens that were part of the jump host list
+                            for _ in range(len(jump_tokens) - 1):
+                                ssh_args.pop(i + 2)
+
+                            i += 2
+                            continue
+
+                        # Handle -o ProxyJump=host (with or without space after -o)
+                        if arg.startswith('-oProxyJump='):
+                            # Format: -oProxyJump=host (no space)
+                            jump_hosts = arg.split('=', 1)[1]
+                            if ',' in jump_hosts:
+                                resolved_hops = []
+                                for hop in jump_hosts.split(','):
+                                    resolved_hops.append(self._resolve_ssh_host(hop.strip()))
+                                ssh_args[i] = '-oProxyJump=' + ','.join(resolved_hops)
+                            else:
+                                ssh_args[i] = '-oProxyJump=' + self._resolve_ssh_host(jump_hosts)
+                        elif arg == '-o' and i + 1 < len(ssh_args):
+                            # Format: -o ProxyJump=host (with space)
+                            next_arg = ssh_args[i + 1]
+                            if next_arg.startswith('ProxyJump='):
+                                jump_hosts = next_arg.split('=', 1)[1]
+                                if ',' in jump_hosts:
+                                    resolved_hops = []
+                                    for hop in jump_hosts.split(','):
+                                        resolved_hops.append(self._resolve_ssh_host(hop.strip()))
+                                    ssh_args[i + 1] = 'ProxyJump=' + ','.join(resolved_hops)
+                                else:
+                                    ssh_args[i + 1] = 'ProxyJump=' + self._resolve_ssh_host(jump_hosts)
+                                i += 2
+                                continue
+
+                        i += 1
                     try:
                         expanded_hosts = _expand_host(ping_host_pattern)
                     except ValueError as e:

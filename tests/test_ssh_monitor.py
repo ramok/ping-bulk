@@ -300,3 +300,170 @@ class TestSshPingMonitorViaCmd:
         app._cmd_ssh('user@remote target.host')
         assert app.monitors[0] in app.entries
 
+
+# ── TestSshProxyJumpResolution ────────────────────────────────────────────────
+
+class TestSshProxyJumpResolution:
+    """Test automatic :resolv mapping resolution for ProxyJump/jump hosts."""
+
+    def test_cmd_ssh_resolv_J_option_simple(self, pb, tmp_path):
+        """Jump host specified with -J should be resolved via :resolv mapping."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion')
+        app._cmd_ssh('-J bastion user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', '10.10.1.100', 'user@remote']
+
+    def test_cmd_ssh_resolv_J_option_with_username(self, pb, tmp_path):
+        """Jump host with user@host format should preserve username."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion')
+        app._cmd_ssh('-J admin@bastion user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', 'admin@10.10.1.100', 'user@remote']
+
+    def test_cmd_ssh_resolv_J_option_multihop(self, pb, tmp_path):
+        """Comma-separated multi-hop jump hosts should all be resolved."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion1')
+        app._cmd_resolv('10.10.1.101 bastion2')
+        app._cmd_ssh('-J bastion1,bastion2 user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', '10.10.1.100,10.10.1.101', 'user@remote']
+
+    def test_cmd_ssh_resolv_J_option_multihop_mixed(self, pb, tmp_path):
+        """Multi-hop with mixed user@host and bare hostname."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion1')
+        app._cmd_resolv('10.10.1.101 bastion2')
+        app._cmd_ssh('-J user@bastion1,bastion2 user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', 'user@10.10.1.100,10.10.1.101', 'user@remote']
+
+    def test_cmd_ssh_resolv_J_option_unmapped_passthrough(self, pb, tmp_path):
+        """Unmapped jump host should pass through unchanged."""
+        app = make_app(pb, tmp_path)
+        app._cmd_ssh('-J unmapped-bastion user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', 'unmapped-bastion', 'user@remote']
+
+    def test_cmd_ssh_resolv_o_ProxyJump_no_space(self, pb, tmp_path):
+        """-oProxyJump=host (no space) should be resolved."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion')
+        app._cmd_ssh('-oProxyJump=bastion user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-oProxyJump=10.10.1.100', 'user@remote']
+
+    def test_cmd_ssh_resolv_o_ProxyJump_with_space(self, pb, tmp_path):
+        """-o ProxyJump=host (with space) should be resolved."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion')
+        app._cmd_ssh('-o ProxyJump=bastion user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-o', 'ProxyJump=10.10.1.100', 'user@remote']
+
+    def test_cmd_ssh_resolv_o_ProxyJump_multihop(self, pb, tmp_path):
+        """-o ProxyJump=host1,host2 multi-hop should be resolved."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion1')
+        app._cmd_resolv('10.10.1.101 bastion2')
+        app._cmd_ssh('-o ProxyJump=bastion1,bastion2 user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-o', 'ProxyJump=10.10.1.100,10.10.1.101', 'user@remote']
+
+    def test_cmd_ssh_resolv_o_ProxyJump_with_username(self, pb, tmp_path):
+        """-o ProxyJump=user@host should preserve username."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion')
+        app._cmd_ssh('-o ProxyJump=admin@bastion user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-o', 'ProxyJump=admin@10.10.1.100', 'user@remote']
+
+    def test_cmd_ssh_resolv_combined_J_and_dest(self, pb, tmp_path):
+        """Both -J jump host AND SSH destination should be resolved."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion')
+        app._cmd_resolv('192.168.1.10 ps-supervisor')
+        app._cmd_ssh('-J bastion ps-supervisor localhost')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', '10.10.1.100', '192.168.1.10']
+        assert m._ping_host == 'localhost'
+
+    def test_cmd_ssh_resolv_J_and_dest_with_usernames(self, pb, tmp_path):
+        """Both -J user@jump and user@dest should preserve usernames."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion')
+        app._cmd_resolv('192.168.1.10 ps-supervisor')
+        app._cmd_ssh('-J admin@bastion komar@ps-supervisor localhost')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', 'admin@10.10.1.100', 'komar@192.168.1.10']
+
+    def test_cmd_ssh_resolv_whitespace_in_multihop(self, pb, tmp_path):
+        """Whitespace around commas in multi-hop should be stripped."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion1')
+        app._cmd_resolv('10.10.1.101 bastion2')
+        app._cmd_ssh('-J bastion1, bastion2 user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', '10.10.1.100,10.10.1.101', 'user@remote']
+
+    def test_cmd_ssh_resolv_multiple_J_options(self, pb, tmp_path):
+        """Multiple -J options should each be resolved independently."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion1')
+        app._cmd_resolv('10.10.1.101 bastion2')
+        # Note: SSH doesn't actually support multiple -J but we handle it anyway
+        app._cmd_ssh('-J bastion1 -J bastion2 user@remote target.host')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-J', '10.10.1.100', '-J', '10.10.1.101', 'user@remote']
+
+    def test_cmd_ssh_resolv_J_at_end_of_args_ignored(self, pb, tmp_path):
+        """-J at end of args (no value) should be handled safely without crash."""
+        app = make_app(pb, tmp_path)
+        # This is malformed but shouldn't crash
+        app._cmd_ssh('user@remote target.host -J')
+        # The parsing treats last token '-J' as ping_host_pattern, 'target.host' as ssh_dest
+        # This creates a monitor that will ping '-J' (weird but safe - no crash)
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ping_host == '-J'  # Confirms it's treated as ping target
+        assert m._ssh_args == ['user@remote', 'target.host']
+
+    def test_cmd_ssh_resolv_o_without_ProxyJump_unchanged(self, pb, tmp_path):
+        """-o with non-ProxyJump option should pass through unchanged."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('192.168.1.10 ps-supervisor')
+        app._cmd_ssh('-o StrictHostKeyChecking=no ps-supervisor localhost')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == ['-o', 'StrictHostKeyChecking=no', '192.168.1.10']
+
+    def test_cmd_ssh_resolv_mixed_options(self, pb, tmp_path):
+        """Mix of -J, -o ProxyJump=, and other SSH options."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('10.10.1.100 bastion')
+        app._cmd_resolv('192.168.1.10 ps-supervisor')
+        app._cmd_ssh('-o ConnectTimeout=10 -J bastion -p 2222 ps-supervisor localhost')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        assert m._ssh_args == [
+            '-o', 'ConnectTimeout=10',
+            '-J', '10.10.1.100',
+            '-p', '2222',
+            '192.168.1.10'
+        ]
+
