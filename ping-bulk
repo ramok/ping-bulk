@@ -98,6 +98,7 @@ _HELP_LINES = [
     "  :saveconfig              save current settings to config file",
     "  :resolv <ip-pat> <host>  static name→IP mapping (overrides DNS for ping and SSH)",
     "                           ip-pat may use brace expansion; \\N in host = brace group N",
+    "                           :ssh user@hostname resolves hostname, preserves username",
     "  :ssh [opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
     "  :ssh-begin [opts] <dest> host lines → :ssh [opts] <dest> <host>",
     "  :ssh-end                 close :ssh-begin block (hosts file only)",
@@ -2673,7 +2674,13 @@ class Application:
                     ssh_args = tokens[:-1]
                     ssh_dest = ssh_args[-1]
                     # Apply :resolv mapping to SSH destination if available
-                    if ssh_dest in self.hosts_map:
+                    # Handle user@host format by splitting and resolving hostname only
+                    if '@' in ssh_dest:
+                        user, hostname = ssh_dest.rsplit('@', 1)
+                        if hostname in self.hosts_map:
+                            resolved_ip = self.hosts_map[hostname][0]
+                            ssh_args[-1] = f"{user}@{resolved_ip}"
+                    elif ssh_dest in self.hosts_map:
                         resolved_ssh_dest = self.hosts_map[ssh_dest][0]
                         ssh_args[-1] = resolved_ssh_dest
                     try:

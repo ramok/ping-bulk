@@ -211,6 +211,10 @@ Hosts and DNS
       group *N* (1-based).
     * ``\0`` / ``$0`` — the full expanded IP address for this iteration.
 
+    Mappings work for both local ping targets and SSH destinations.
+    When using ``user@hostname`` format with ``:ssh``, the hostname
+    portion is resolved while the username is preserved.
+
     Examples::
 
         :resolv 10.0.1.{1..4} leaf-sw\1
@@ -222,7 +226,13 @@ Hosts and DNS
         :resolv 10.{1..4}.{1..2} dc\1-rack\2
 
     Two brace groups: ``10.1.1.0``→``dc1-rack1``, ``10.1.2.0``→``dc1-rack2``,
-    ``10.2.1.0``→``dc2-rack1``, etc.  (8 mappings total from a single line.)
+    ``10.2.1.0``→``dc2-rack1``, etc.  (8 mappings total from a single line.) ::
+
+        :resolv 192.168.1.10 remote-server
+        :ssh user@remote-server localhost
+
+    The SSH destination becomes ``user@192.168.1.10`` while preserving
+    the username.
 
 SSH monitoring
 --------------

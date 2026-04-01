@@ -272,6 +272,29 @@ class TestSshPingMonitorViaCmd:
         assert m._ping_host == '10.0.0.5'
         assert m._ping_host_label == 'web01'
 
+    def test_cmd_ssh_resolv_mapping_with_username(self, pb, tmp_path):
+        """When :resolv mapping exists, :ssh user@hostname resolves hostname to IP."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('192.168.1.10 ps-supervisor')
+        app._cmd_ssh('komar@ps-supervisor localhost')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        # SSH destination should be resolved to user@IP
+        assert m._ssh_args == ['komar@192.168.1.10']
+        # Ping host remains as given
+        assert m._ping_host == 'localhost'
+
+    def test_cmd_ssh_resolv_mapping_preserves_bare_hostname(self, pb, tmp_path):
+        """When :resolv mapping exists for bare hostname (no @), it should be resolved."""
+        app = make_app(pb, tmp_path)
+        app._cmd_resolv('192.168.1.10 ps-supervisor')
+        app._cmd_ssh('ps-supervisor localhost')
+        assert len(app.monitors) == 1
+        m = app.monitors[0]
+        # SSH destination should be resolved to IP (bare hostname)
+        assert m._ssh_args == ['192.168.1.10']
+        assert m._ping_host == 'localhost'
+
     def test_cmd_ssh_monitor_added_to_entries(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
         app._cmd_ssh('user@remote target.host')

@@ -95,6 +95,7 @@ comments, and command directives:
 10.1.0.{1..4}
 
 ## Remote site — single host via SSH
+:resolv 10.99.0.100  remote-server
 :ssh user@remote-server 10.20.0.1
 
 ## Remote site — many hosts via SSH (one SSH connection per host)
