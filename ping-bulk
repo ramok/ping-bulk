@@ -773,8 +773,8 @@ class SshPingMonitor(PingMonitor):
 
     def _build_ping_cmd(self):
         """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
-        return ['ssh', '-o', 'ControlMaster=no', '-o', 'BatchMode=yes'] + self._ssh_args + [
-        #return ['ssh', '-o', 'BatchMode=yes'] + self._ssh_args + [
+        #return ['ssh', '-o', 'ControlMaster=no', '-o', 'BatchMode=yes'] + self._ssh_args + [
+        return ['ssh', '-o', 'BatchMode=yes'] + self._ssh_args + [
             'ping', '-O', '-D', self._ping_host
         ]
 
@@ -2672,6 +2672,10 @@ class Application:
                     ping_host_pattern = tokens[-1]
                     ssh_args = tokens[:-1]
                     ssh_dest = ssh_args[-1]
+                    # Apply :resolv mapping to SSH destination if available
+                    if ssh_dest in self.hosts_map:
+                        resolved_ssh_dest = self.hosts_map[ssh_dest][0]
+                        ssh_args[-1] = resolved_ssh_dest
                     try:
                         expanded_hosts = _expand_host(ping_host_pattern)
                     except ValueError as e:
