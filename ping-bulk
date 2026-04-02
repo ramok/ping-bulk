@@ -746,6 +746,26 @@ class SshPingMonitor(PingMonitor):
         if _is_ip(ping_host):
             self.resolved_ip = ping_host
 
+    @staticmethod
+    def _strip_username(host_string):
+        """Strip username@ prefix from hostname for display.
+
+        Args:
+            host_string: Host specification, optionally prefixed with 'user@'
+
+        Returns:
+            Hostname without username prefix
+
+        Examples:
+            'host' → 'host'
+            'user@host' → 'host'
+            '10.0.0.1' → '10.0.0.1'
+            'user@10.0.0.1' → '10.0.0.1'
+        """
+        if '@' in host_string:
+            return host_string.split('@', 1)[1]
+        return host_string
+
     def _extract_jump_hosts(self, ssh_args):
         """Extract jump hosts from -J and -o ProxyJump flags in SSH arguments.
 
@@ -812,15 +832,26 @@ class SshPingMonitor(PingMonitor):
         and returns the corresponding alias. Falls back to host_or_ip if no
         mapping is found or _hosts_map is unavailable.
 
+        User@host format is returned unchanged - no reverse lookup is performed
+        when a username is present, as these are explicit SSH connection strings
+        that should be preserved as-is.
+
         Args:
-            host_or_ip: Resolved host or IP address to look up
+            host_or_ip: Resolved host or IP address to look up, optionally
+                       prefixed with 'user@'
 
         Returns:
-            Original alias if found in hosts_map, otherwise host_or_ip unchanged
+            Original alias if found in hosts_map (plain host/IP only),
+            otherwise host_or_ip unchanged
         """
         if not hasattr(self, '_hosts_map') or not self._hosts_map:
             return host_or_ip
 
+        # User@host format: return unchanged (no lookup)
+        if '@' in host_or_ip:
+            return host_or_ip
+
+        # Plain host/IP: lookup directly
         for alias, (resolved_ip, _) in self._hosts_map.items():
             if resolved_ip == host_or_ip:
                 return alias
@@ -842,20 +873,17 @@ class SshPingMonitor(PingMonitor):
         """
         display_parts = []
 
-        # Add jump host chain with alias lookup and username stripping
+        # Add jump host chain with alias lookup (preserving username)
         jump_hosts = self._extract_jump_hosts(self._original_ssh_args)
         for jump_host in jump_hosts:
-            alias = self._reverse_lookup_alias(jump_host)
-            # Strip user@ prefix if present
-            if '@' in alias:
-                alias = alias.split('@', 1)[1]
-            display_parts.append(alias)
+            # Preserve full user@host format for reverse lookup
+            hostname = jump_host
+            alias = self._reverse_lookup_alias(hostname)
+            display_parts.append(self._strip_username(alias))
 
-        # Add SSH destination (use label to show original name, strip user@)
-        ssh_dest_display = self._ssh_dest_label
-        if '@' in ssh_dest_display:
-            ssh_dest_display = ssh_dest_display.split('@', 1)[1]
-        display_parts.append(ssh_dest_display)
+        # Add SSH destination (the host we SSH into before running ping)
+        ssh_dest_display = self._reverse_lookup_alias(self._ssh_dest_label)
+        display_parts.append(self._strip_username(ssh_dest_display))
 
         # Add ping host with dns_mode adjustment
         if dns_mode == 'ip':
@@ -864,7 +892,7 @@ class SshPingMonitor(PingMonitor):
             ping_part = self.resolved_hostname or self._ping_host_label
         else:
             ping_part = self._ping_host_label
-        display_parts.append(ping_part)
+        display_parts.append(self._strip_username(ping_part))
 
         return " → ".join(display_parts)
 
@@ -926,6 +954,10 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
     # Track no-backref body lines already emitted (add-once logic).
     no_backref_emitted = set()
 
+    # Local SSH context tracking for nested :ssh-begin/:ssh-end inside :for
+    local_ssh_args = None
+    in_local_ssh_block = False
+
     for iteration_idx, (full_str, captures) in enumerate(rows):
         for line in body_lines:
             if line.startswith('##'):
@@ -941,6 +973,17 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
                     title_tmpl = parts[1].strip() if len(parts) > 1 else ''
                     title = _apply_backref(title_tmpl, captures, full_str)
                     entries.append(('section', title))
+                elif cmd_word == 'ssh-begin':
+                    # Open local SSH block — captures args with back-reference expansion
+                    ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                    in_local_ssh_block = True
+                    local_ssh_args = _apply_backref(ssh_args_tmpl, captures, full_str)
+                    continue  # Don't emit a command entry for :ssh-begin
+                elif cmd_word == 'ssh-end':
+                    # Close local SSH block
+                    in_local_ssh_block = False
+                    local_ssh_args = None
+                    continue  # Don't emit a command entry for :ssh-end
                 else:
                     # Generic command — apply back-references and emit every iteration.
                     expanded_cmd = _apply_backref(line, captures, full_str)
@@ -956,14 +999,15 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
                     except ValueError as e:
                         entries.append(('error', str(e)))
                         continue
+                    effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
                     for host in expanded_hosts:
-                        key = (ssh_block_args, host)
+                        key = (effective_ssh_args, host)
                         if key in seen_hosts:
                             entries.append(('warn', f"duplicate host ignored: {host}"))
                         else:
                             seen_hosts.add(key)
-                            if ssh_block_args is not None:
-                                entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
+                            if effective_ssh_args is not None:
+                                entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
                             else:
                                 entries.append(('host', host))
                 else:
@@ -977,14 +1021,15 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
                         except ValueError as e:
                             entries.append(('error', str(e)))
                             continue
+                        effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
                         for host in expanded_hosts:
-                            key = (ssh_block_args, host)
+                            key = (effective_ssh_args, host)
                             if key in seen_hosts:
                                 entries.append(('warn', f"duplicate host ignored: {host}"))
                             else:
                                 seen_hosts.add(key)
-                                if ssh_block_args is not None:
-                                    entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
+                                if effective_ssh_args is not None:
+                                    entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
                                 else:
                                     entries.append(('host', host))
 
