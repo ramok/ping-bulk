@@ -20,25 +20,9 @@ Covers:
   - mixed bare and brace forms in the same body line
 """
 
-import importlib.machinery
-import importlib.util
 import textwrap
 
 import pytest
-
-
-# ---------------------------------------------------------------------------
-# Module import
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope='session')
-def pb(app_path):
-    """The ping-bulk module, imported once for the whole test session."""
-    loader = importlib.machinery.SourceFileLoader('ping_bulk', app_path)
-    spec   = importlib.util.spec_from_loader('ping_bulk', loader)
-    mod    = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # ---------------------------------------------------------------------------

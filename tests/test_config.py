@@ -21,29 +21,9 @@ make_app(pb, cfg_path, config_text, ...)
     threads are started.
 """
 
-import importlib.machinery
-import importlib.util
 import os
 import pytest
 from unittest.mock import patch
-
-
-# ---------------------------------------------------------------------------
-# Module import
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope='session')
-def pb(app_path):
-    """The ping-bulk module, imported once for the whole test session.
-
-    spec_from_file_location() returns None for extension-less scripts, so we
-    construct the spec explicitly via SourceFileLoader.
-    """
-    loader = importlib.machinery.SourceFileLoader('ping_bulk', app_path)
-    spec = importlib.util.spec_from_loader('ping_bulk', loader)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # ---------------------------------------------------------------------------

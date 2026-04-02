@@ -66,6 +66,20 @@ def app_path() -> str:
 
 
 # ---------------------------------------------------------------------------
+# pb fixture - ping-bulk module loader
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope='session')
+def pb(app_path):
+    """Import ping-bulk as a module once for the whole test session."""
+    loader = importlib.machinery.SourceFileLoader('ping_bulk', app_path)
+    spec = importlib.util.spec_from_loader('ping_bulk', loader)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# ---------------------------------------------------------------------------
 # Dependency check fixture
 # ---------------------------------------------------------------------------
 

@@ -5,25 +5,9 @@ path, including edge cases where ncurses is unavailable or raises.
 """
 
 import curses
-import importlib.machinery
-import importlib.util
 import os
 import pytest
 from unittest.mock import patch, MagicMock
-
-
-# ---------------------------------------------------------------------------
-# Module-level fixture: load ping-bulk as a module once per session
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope='session')
-def pb(app_path):
-    """Import ping-bulk as a module once for the whole test session."""
-    loader = importlib.machinery.SourceFileLoader('ping_bulk', app_path)
-    spec = importlib.util.spec_from_loader('ping_bulk', loader)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # ---------------------------------------------------------------------------
