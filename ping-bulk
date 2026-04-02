@@ -984,6 +984,27 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
                     in_local_ssh_block = False
                     local_ssh_args = None
                     continue  # Don't emit a command entry for :ssh-end
+                elif cmd_word == 'ssh':
+                    # :ssh command inside :for loop
+                    # If we have an effective SSH context (local or outer), chain them
+                    effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
+                    inner_ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                    inner_ssh_args = _apply_backref(inner_ssh_args_tmpl, captures, full_str)
+
+                    if effective_ssh_args is not None:
+                        # Chain with -J: :ssh -J <outer> <inner>
+                        chained_cmd = f':ssh -J {effective_ssh_args} {inner_ssh_args}'
+                    else:
+                        # No outer SSH context, emit as-is
+                        chained_cmd = f':ssh {inner_ssh_args}'
+
+                    # Deduplicate: use command as key
+                    key = ('ssh', chained_cmd)
+                    if key in seen_hosts:
+                        entries.append(('warn', f'duplicate SSH command ignored: {chained_cmd}'))
+                    else:
+                        seen_hosts.add(key)
+                        entries.append(('cmd', chained_cmd))
                 else:
                     # Generic command — apply back-references and emit every iteration.
                     expanded_cmd = _apply_backref(line, captures, full_str)
@@ -1161,6 +1182,13 @@ def parse_hosts_file(filename):
                     for_loop_ssh_args = ssh_block_args
                 elif cmd_word == 'done':
                     entries.append(('error', ":done without :for"))
+                elif cmd_word == 'ssh' and ssh_block_args is not None:
+                    # Nested :ssh inside :ssh-begin — chain the jump hosts
+                    # :ssh-begin user1@host1 + :ssh user2@host2 target
+                    # becomes: :ssh -J user1@host1 user2@host2 target
+                    inner_ssh_args = parts[1].strip() if len(parts) > 1 else ''
+                    chained_cmd = f':ssh -J {ssh_block_args} {inner_ssh_args}'
+                    entries.append(('cmd', chained_cmd))
                 else:
                     entries.append(('cmd', line))
             else:
