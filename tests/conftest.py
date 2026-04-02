@@ -152,3 +152,28 @@ def tmux_app_15(app_path: str, check_integration_deps):
     yield sess
     sess.kill()
 
+
+@pytest.fixture
+def tmux_app_with_section(app_path: str, check_integration_deps, tmp_path):
+    """ping-bulk with a config file containing a section and a host."""
+    import tempfile
+
+    # Create a temporary config file with a section
+    config_content = """## My Section
+127.0.0.1
+"""
+    config_file = tmp_path / "test_config"
+    config_file.write_text(config_content)
+
+    # Start session and load the config file
+    sess = TmuxSession('ping-bulk-test-section', width=120, height=40)
+    try:
+        sess.send_literal(f'python3 {app_path} -f {config_file}')
+        sess.send_keys('Enter')
+        sess.wait_for('ping-bulk:', timeout=10)
+    except Exception:
+        sess.kill()
+        raise
+    yield sess
+    sess.kill()
+

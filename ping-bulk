@@ -718,6 +718,9 @@ class SshPingMonitor(PingMonitor):
       ping_host_label — original (pre-resolv) name of the ping target, used as the
                         display label in dns_mode='off' and 'hostname'.  Defaults
                         to ping_host when not supplied.
+      original_ssh_args — original SSH args before :resolv resolution, used for
+                          display purposes to show jump hosts as originally specified.
+      hosts_map       — reference to Application.hosts_map for reverse :resolv lookup
 
     The remote ping command is:
       ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>
@@ -727,18 +730,61 @@ class SshPingMonitor(PingMonitor):
     route, timeout) are transient and trigger the normal retry/backoff loop.
     """
 
-    def __init__(self, ssh_args, ping_host='localhost', ping_host_label=None):
+    def __init__(self, ssh_args, ping_host='localhost', ping_host_label=None, original_ssh_args=None, hosts_map=None):
         self._ssh_dest = ssh_args[-1] if ssh_args else ''
+        self._ssh_dest_label = (original_ssh_args[-1] if original_ssh_args else None) or self._ssh_dest
         self._ping_host_label = ping_host_label or ping_host
-        display = f"{self._ssh_dest}→{self._ping_host_label}"
+        display = f"{self._ssh_dest_label}→{self._ping_host_label}"
         super().__init__(display)
-        self._ssh_args = ssh_args      # e.g. ['-J', 'bastion', 'user@remote']
+        self._ssh_args = ssh_args      # e.g. ['-J', '10.0.0.1', 'user@remote'] (resolved)
+        self._original_ssh_args = original_ssh_args or ssh_args.copy()  # original args before :resolv
         self._ping_host = ping_host    # host that the remote ping targets
+        self._hosts_map = hosts_map or {}  # reference to Application.hosts_map
         # Pre-populate resolved_ip when ping_host is already an IP address.
         # This covers the :resolv case where actual_ping_host is already an IP
         # so dns_mode='ip' works immediately without an extra resolution thread.
         if _is_ip(ping_host):
             self.resolved_ip = ping_host
+
+    def _extract_jump_hosts(self, ssh_args):
+        """Extract jump hosts from -J and -o ProxyJump flags in SSH arguments.
+
+        Parses SSH command arguments to find ProxyJump hosts specified
+        via the -J flag or -o ProxyJump= option. Handles comma-separated
+        multi-hop jumps.
+
+        Args:
+            ssh_args: List of SSH command arguments to parse
+
+        Returns:
+            List of jump host strings in order (e.g., ['host1', 'user@host2'])
+            Empty list if no jump hosts found
+        """
+        jump_hosts = []
+        i = 0
+        while i < len(ssh_args):
+            if ssh_args[i] == '-J' and i + 1 < len(ssh_args):
+                # Split comma-separated hosts: -J host1,host2,host3
+                hosts_str = ssh_args[i + 1]
+                jump_hosts.extend([h.strip() for h in hosts_str.split(',') if h.strip()])
+                i += 2
+            elif ssh_args[i].startswith('-oProxyJump='):
+                # Format: -oProxyJump=host (no space)
+                hosts_str = ssh_args[i].split('=', 1)[1]
+                jump_hosts.extend([h.strip() for h in hosts_str.split(',') if h.strip()])
+                i += 1
+            elif ssh_args[i] == '-o' and i + 1 < len(ssh_args):
+                # Format: -o ProxyJump=host (with space)
+                next_arg = ssh_args[i + 1]
+                if next_arg.startswith('ProxyJump='):
+                    hosts_str = next_arg.split('=', 1)[1]
+                    jump_hosts.extend([h.strip() for h in hosts_str.split(',') if h.strip()])
+                    i += 2
+                else:
+                    i += 1
+            else:
+                i += 1
+        return jump_hosts
 
     def resolve_dns(self):
         """Resolve the *ping host* (not the SSH destination) to its IP and hostname.
@@ -759,21 +805,61 @@ class SshPingMonitor(PingMonitor):
         except Exception:
             self.resolved_hostname = None
 
+    def _reverse_lookup_alias(self, host_or_ip):
+        """Look up the original alias for a resolved host/IP in hosts_map.
+
+        Checks if host_or_ip appears as a resolved value in self._hosts_map
+        and returns the corresponding alias. Falls back to host_or_ip if no
+        mapping is found or _hosts_map is unavailable.
+
+        Args:
+            host_or_ip: Resolved host or IP address to look up
+
+        Returns:
+            Original alias if found in hosts_map, otherwise host_or_ip unchanged
+        """
+        if not hasattr(self, '_hosts_map') or not self._hosts_map:
+            return host_or_ip
+
+        for alias, (resolved_ip, _) in self._hosts_map.items():
+            if resolved_ip == host_or_ip:
+                return alias
+        return host_or_ip
+
     def get_display_name(self, dns_mode='off'):
-        """Return the display label as ``<ssh-dest>→<ping-host>``.
+        """Return the display label with complete jump host chain.
+
+        Format: jump1 → jump2 → ... → destination → ping-host
 
         The ping-host part is adjusted according to dns_mode:
           off      — self._ping_host_label (original name as typed on command line)
           ip       — self.resolved_ip, falling back to self._ping_host
           hostname — self.resolved_hostname, falling back to self._ping_host_label
+
+        Jump hosts are shown with their original aliases when available via
+        reverse lookup in hosts_map, falling back to the resolved value.
         """
+        display_parts = []
+
+        # Add jump host chain with alias lookup
+        jump_hosts = self._extract_jump_hosts(self._original_ssh_args)
+        for jump_host in jump_hosts:
+            alias = self._reverse_lookup_alias(jump_host)
+            display_parts.append(alias)
+
+        # Add SSH destination (use label to show original name)
+        display_parts.append(self._ssh_dest_label)
+
+        # Add ping host with dns_mode adjustment
         if dns_mode == 'ip':
             ping_part = self.resolved_ip or self._ping_host
         elif dns_mode == 'hostname':
             ping_part = self.resolved_hostname or self._ping_host_label
         else:
             ping_part = self._ping_host_label
-        return f"{self._ssh_dest}→{ping_part}"
+        display_parts.append(ping_part)
+
+        return " → ".join(display_parts)
 
     def _build_ping_cmd(self):
         """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
@@ -2765,6 +2851,9 @@ class Application:
                     ssh_args = tokens[:-1]
                     ssh_dest = ssh_args[-1]
 
+                    # Preserve original SSH args before applying :resolv mappings
+                    original_ssh_args = ssh_args.copy()
+
                     # Apply :resolv mapping to SSH destination
                     ssh_args[-1] = self._resolve_ssh_host(ssh_dest)
 
@@ -2848,7 +2937,9 @@ class Application:
                                                 if ping_host in self.hosts_map
                                                 else ping_host)
                             monitor = SshPingMonitor(ssh_args, actual_ping_host,
-                                                     ping_host_label=ping_host)
+                                                     ping_host_label=ping_host,
+                                                     original_ssh_args=original_ssh_args,
+                                                     hosts_map=self.hosts_map)
                             self.monitors.append(monitor)
                             self.entries.append(monitor)
                             if self._monitoring_started:
@@ -3158,6 +3249,8 @@ class Application:
         curses.curs_set(0)
         stdscr.nodelay(1)
         stdscr.timeout(100)
+        # Reduce ESC key delay from default 1000ms to 25ms for responsive UI
+        curses.set_escdelay(25)
 
         self._register_shift_tab_seqs()
         self._register_ctrl_arrow_seqs()

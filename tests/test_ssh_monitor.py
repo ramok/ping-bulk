@@ -89,43 +89,43 @@ class TestSshPingMonitorInit:
 class TestSshPingMonitorGetDisplayName:
     def test_dns_off_returns_label(self, pb):
         m = pb.SshPingMonitor(['user@remote'], 'target.host')
-        assert m.get_display_name('off') == 'user@remote→target.host'
+        assert m.get_display_name('off') == 'user@remote → target.host'
 
     def test_dns_off_default(self, pb):
         m = pb.SshPingMonitor(['user@remote'], 'target.host')
-        assert m.get_display_name() == 'user@remote→target.host'
+        assert m.get_display_name() == 'user@remote → target.host'
 
     def test_dns_off_uses_ping_host_label_not_ping_host(self, pb):
         m = pb.SshPingMonitor(['user@remote'], '10.0.0.5', ping_host_label='web01')
-        assert m.get_display_name('off') == 'user@remote→web01'
+        assert m.get_display_name('off') == 'user@remote → web01'
 
     def test_dns_ip_uses_resolved_ip(self, pb):
         m = pb.SshPingMonitor(['user@remote'], 'target.host')
         m.resolved_ip = '10.0.0.1'
-        assert m.get_display_name('ip') == 'user@remote→10.0.0.1'
+        assert m.get_display_name('ip') == 'user@remote → 10.0.0.1'
 
     def test_dns_ip_falls_back_to_ping_host_when_no_resolved_ip(self, pb):
         m = pb.SshPingMonitor(['user@remote'], 'target.host')
         assert m.resolved_ip is None
-        assert m.get_display_name('ip') == 'user@remote→target.host'
+        assert m.get_display_name('ip') == 'user@remote → target.host'
 
     def test_dns_hostname_uses_resolved_hostname(self, pb):
         m = pb.SshPingMonitor(['user@remote'], 'target.host')
         m.resolved_hostname = 'pretty.name'
-        assert m.get_display_name('hostname') == 'user@remote→pretty.name'
+        assert m.get_display_name('hostname') == 'user@remote → pretty.name'
 
     def test_dns_hostname_falls_back_to_ping_host_label(self, pb):
         m = pb.SshPingMonitor(['user@remote'], '10.0.0.5', ping_host_label='web01')
         assert m.resolved_hostname is None
-        assert m.get_display_name('hostname') == 'user@remote→web01'
+        assert m.get_display_name('hostname') == 'user@remote → web01'
 
     def test_dns_ip_pre_populated_ip(self, pb):
         m = pb.SshPingMonitor(['user@remote'], '10.0.0.5')
-        assert m.get_display_name('ip') == 'user@remote→10.0.0.5'
+        assert m.get_display_name('ip') == 'user@remote → 10.0.0.5'
 
     def test_jump_host_dest_in_display_name(self, pb):
         m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], 'target.host')
-        assert m.get_display_name('off') == 'user@remote→target.host'
+        assert m.get_display_name('off') == 'bastion → user@remote → target.host'
 
 
 # ── TestSshPingMonitorResolveDns ──────────────────────────────────────────────
@@ -466,4 +466,378 @@ class TestSshProxyJumpResolution:
             '-p', '2222',
             '192.168.1.10'
         ]
+
+
+# ── TestSshExtractJumpHosts ───────────────────────────────────────────────────
+
+class TestSshExtractJumpHosts:
+    """Test _extract_jump_hosts() method for parsing jump host arguments."""
+
+    def test_extract_J_simple(self, pb):
+        """Single -J jump host."""
+        m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion']
+
+    def test_extract_J_with_username(self, pb):
+        """Single -J with user@host format."""
+        m = pb.SshPingMonitor(['-J', 'admin@bastion', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['admin@bastion']
+
+    def test_extract_J_multihop_comma_separated(self, pb):
+        """Multiple jump hosts in single -J flag (comma-separated)."""
+        m = pb.SshPingMonitor(['-J', 'bastion1,bastion2', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion1', 'bastion2']
+
+    def test_extract_J_multihop_with_usernames(self, pb):
+        """Multi-hop with user@host format in comma-separated list."""
+        m = pb.SshPingMonitor(['-J', 'admin@bastion1,root@bastion2', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['admin@bastion1', 'root@bastion2']
+
+    def test_extract_J_multihop_mixed(self, pb):
+        """Multi-hop with mixed bare hostname and user@host."""
+        m = pb.SshPingMonitor(['-J', 'user@bastion1,bastion2,admin@bastion3', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['user@bastion1', 'bastion2', 'admin@bastion3']
+
+    def test_extract_J_whitespace_trimmed(self, pb):
+        """Whitespace around commas should be stripped."""
+        m = pb.SshPingMonitor(['-J', 'bastion1, bastion2 , bastion3', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion1', 'bastion2', 'bastion3']
+
+    def test_extract_J_empty_string(self, pb):
+        """-J with empty value (shouldn't happen but handled safely)."""
+        m = pb.SshPingMonitor(['-J', '', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == []
+
+    def test_extract_J_at_end_no_value(self, pb):
+        """-J at end of args with no value."""
+        m = pb.SshPingMonitor(['-J'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == []
+
+    def test_extract_o_ProxyJump_no_space(self, pb):
+        """-oProxyJump=host (no space between -o and ProxyJump)."""
+        m = pb.SshPingMonitor(['-oProxyJump=bastion', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion']
+
+    def test_extract_o_ProxyJump_with_space(self, pb):
+        """-o ProxyJump=host (with space)."""
+        m = pb.SshPingMonitor(['-o', 'ProxyJump=bastion', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion']
+
+    def test_extract_o_ProxyJump_multihop(self, pb):
+        """-o ProxyJump=host1,host2 comma-separated."""
+        m = pb.SshPingMonitor(['-o', 'ProxyJump=bastion1,bastion2', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion1', 'bastion2']
+
+    def test_extract_o_ProxyJump_with_username(self, pb):
+        """-o ProxyJump=user@host format."""
+        m = pb.SshPingMonitor(['-o', 'ProxyJump=admin@bastion', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['admin@bastion']
+
+    def test_extract_multiple_J_options(self, pb):
+        """Multiple separate -J options."""
+        m = pb.SshPingMonitor(['-J', 'bastion1', '-J', 'bastion2', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion1', 'bastion2']
+
+    def test_extract_mixed_J_and_o_ProxyJump(self, pb):
+        """Mix of -J and -o ProxyJump= in same command."""
+        m = pb.SshPingMonitor(['-J', 'bastion1', '-o', 'ProxyJump=bastion2', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion1', 'bastion2']
+
+    def test_extract_no_jump_hosts(self, pb):
+        """No jump host options present."""
+        m = pb.SshPingMonitor(['user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == []
+
+    def test_extract_o_other_option_ignored(self, pb):
+        """-o with non-ProxyJump option should not be extracted."""
+        m = pb.SshPingMonitor(['-o', 'StrictHostKeyChecking=no', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == []
+
+    def test_extract_mixed_options_with_other_flags(self, pb):
+        """Jump hosts extracted correctly even with other SSH options."""
+        m = pb.SshPingMonitor([
+            '-o', 'ConnectTimeout=10',
+            '-J', 'bastion1,bastion2',
+            '-p', '2222',
+            '-o', 'ProxyJump=bastion3',
+            'user@remote'
+        ], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion1', 'bastion2', 'bastion3']
+
+    def test_extract_trailing_comma_ignored(self, pb):
+        """Trailing comma in jump host list should be handled."""
+        m = pb.SshPingMonitor(['-J', 'bastion1,bastion2,', 'user@remote'], 'target.host')
+        jumps = m._extract_jump_hosts(m._ssh_args)
+        assert jumps == ['bastion1', 'bastion2']
+
+
+# ── TestSshReverseLookupAlias ─────────────────────────────────────────────────
+
+class TestSshReverseLookupAlias:
+    """Test _reverse_lookup_alias() for finding original aliases from resolved IPs."""
+
+    def test_reverse_lookup_exact_ip_match(self, pb):
+        """IP matches resolved IP in hosts_map."""
+        hosts_map = {'web01': ('10.0.0.5', 'web01.example.com')}
+        m = pb.SshPingMonitor(['user@remote'], 'target.host', hosts_map=hosts_map)
+        alias = m._reverse_lookup_alias('10.0.0.5')
+        assert alias == 'web01'
+
+    def test_reverse_lookup_no_match(self, pb):
+        """IP not in hosts_map returns unchanged."""
+        hosts_map = {'web01': ('10.0.0.5', 'web01.example.com')}
+        m = pb.SshPingMonitor(['user@remote'], 'target.host', hosts_map=hosts_map)
+        alias = m._reverse_lookup_alias('10.0.0.99')
+        assert alias == '10.0.0.99'
+
+    def test_reverse_lookup_hostname_match(self, pb):
+        """Hostname that matches resolved IP returns alias."""
+        hosts_map = {'web01': ('10.0.0.5', 'web01.example.com')}
+        m = pb.SshPingMonitor(['user@remote'], 'target.host', hosts_map=hosts_map)
+        # If 'web01.example.com' is the resolved IP (shouldn't be, but test the logic)
+        alias = m._reverse_lookup_alias('web01.example.com')
+        assert alias == 'web01.example.com'  # Not found as IP, returns unchanged
+
+    def test_reverse_lookup_empty_hosts_map(self, pb):
+        """Empty hosts_map returns input unchanged."""
+        m = pb.SshPingMonitor(['user@remote'], 'target.host', hosts_map={})
+        alias = m._reverse_lookup_alias('10.0.0.5')
+        assert alias == '10.0.0.5'
+
+    def test_reverse_lookup_no_hosts_map(self, pb):
+        """No hosts_map (None) returns input unchanged."""
+        m = pb.SshPingMonitor(['user@remote'], 'target.host')
+        alias = m._reverse_lookup_alias('10.0.0.5')
+        assert alias == '10.0.0.5'
+
+    def test_reverse_lookup_multiple_entries(self, pb):
+        """Multiple entries in hosts_map, correct match returned."""
+        hosts_map = {
+            'web01': ('10.0.0.5', 'web01.example.com'),
+            'web02': ('10.0.0.6', 'web02.example.com'),
+            'bastion': ('10.10.1.100', 'bastion.example.com')
+        }
+        m = pb.SshPingMonitor(['user@remote'], 'target.host', hosts_map=hosts_map)
+        assert m._reverse_lookup_alias('10.0.0.5') == 'web01'
+        assert m._reverse_lookup_alias('10.0.0.6') == 'web02'
+        assert m._reverse_lookup_alias('10.10.1.100') == 'bastion'
+
+    def test_reverse_lookup_with_username(self, pb):
+        """user@host format should still work for lookup."""
+        hosts_map = {'bastion': ('10.10.1.100', 'bastion.example.com')}
+        m = pb.SshPingMonitor(['user@remote'], 'target.host', hosts_map=hosts_map)
+        # The method only looks up host part, not user@host
+        alias = m._reverse_lookup_alias('user@10.10.1.100')
+        # Should return unchanged since 'user@10.10.1.100' won't match '10.10.1.100'
+        assert alias == 'user@10.10.1.100'
+
+
+# ── TestSshJumpChainDisplay ───────────────────────────────────────────────────
+
+class TestSshJumpChainDisplay:
+    """Test get_display_name() with jump host chains in various DNS modes."""
+
+    def test_jump_chain_display_single_jump_dns_off(self, pb):
+        """Single jump host with dns_mode='off' shows original names."""
+        hosts_map = {'bastion': ('10.10.1.100', 'bastion.example.com')}
+        original_ssh_args = ['-J', 'bastion', 'user@remote']
+        resolved_ssh_args = ['-J', '10.10.1.100', 'user@remote']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            'target.host',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        display = m.get_display_name('off')
+        assert display == 'bastion → user@remote → target.host'
+
+    def test_jump_chain_display_single_jump_dns_ip(self, pb):
+        """Single jump host with dns_mode='ip' shows resolved IPs."""
+        hosts_map = {'bastion': ('10.10.1.100', 'bastion.example.com')}
+        original_ssh_args = ['-J', 'bastion', 'user@remote']
+        resolved_ssh_args = ['-J', '10.10.1.100', 'user@remote']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            '10.0.0.5',
+            ping_host_label='target.host',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        m.resolved_ip = '10.0.0.5'
+        display = m.get_display_name('ip')
+        assert display == 'bastion → user@remote → 10.0.0.5'
+
+    def test_jump_chain_display_single_jump_dns_hostname(self, pb):
+        """Single jump host with dns_mode='hostname' shows hostnames."""
+        hosts_map = {'bastion': ('10.10.1.100', 'bastion.example.com')}
+        original_ssh_args = ['-J', 'bastion', 'user@remote']
+        resolved_ssh_args = ['-J', '10.10.1.100', 'user@remote']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            '10.0.0.5',
+            ping_host_label='target.host',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        m.resolved_hostname = 'target.example.com'
+        display = m.get_display_name('hostname')
+        assert display == 'bastion → user@remote → target.example.com'
+
+    def test_jump_chain_display_multihop_dns_off(self, pb):
+        """Multiple jump hosts with dns_mode='off' shows all in chain."""
+        hosts_map = {
+            'bastion1': ('10.10.1.100', 'bastion1.example.com'),
+            'bastion2': ('10.10.1.101', 'bastion2.example.com')
+        }
+        original_ssh_args = ['-J', 'bastion1,bastion2', 'user@remote']
+        resolved_ssh_args = ['-J', '10.10.1.100,10.10.1.101', 'user@remote']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            'target.host',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        display = m.get_display_name('off')
+        assert display == 'bastion1 → bastion2 → user@remote → target.host'
+
+    def test_jump_chain_display_multihop_with_usernames(self, pb):
+        """Multiple jump hosts with user@ prefixes."""
+        hosts_map = {
+            'bastion1': ('10.10.1.100', 'bastion1.example.com'),
+            'bastion2': ('10.10.1.101', 'bastion2.example.com')
+        }
+        original_ssh_args = ['-J', 'admin@bastion1,root@bastion2', 'user@remote']
+        resolved_ssh_args = ['-J', 'admin@10.10.1.100,root@10.10.1.101', 'user@remote']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            'target.host',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        display = m.get_display_name('off')
+        assert display == 'admin@bastion1 → root@bastion2 → user@remote → target.host'
+
+    def test_jump_chain_display_no_jump_hosts(self, pb):
+        """No jump hosts, only SSH destination."""
+        m = pb.SshPingMonitor(['user@remote'], 'target.host')
+        display = m.get_display_name('off')
+        assert display == 'user@remote → target.host'
+
+    def test_jump_chain_display_mixed_mapped_unmapped(self, pb):
+        """Mix of mapped and unmapped jump hosts."""
+        hosts_map = {'bastion1': ('10.10.1.100', 'bastion1.example.com')}
+        original_ssh_args = ['-J', 'bastion1,unmapped-host', 'user@remote']
+        resolved_ssh_args = ['-J', '10.10.1.100,unmapped-host', 'user@remote']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            'target.host',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        display = m.get_display_name('off')
+        # bastion1 should be looked up and found, unmapped-host stays as-is
+        assert display == 'bastion1 → unmapped-host → user@remote → target.host'
+
+    def test_jump_chain_display_ProxyJump_format(self, pb):
+        """-o ProxyJump= format should also extract jump hosts."""
+        hosts_map = {'bastion': ('10.10.1.100', 'bastion.example.com')}
+        original_ssh_args = ['-o', 'ProxyJump=bastion', 'user@remote']
+        resolved_ssh_args = ['-o', 'ProxyJump=10.10.1.100', 'user@remote']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            'target.host',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        display = m.get_display_name('off')
+        assert display == 'bastion → user@remote → target.host'
+
+    def test_jump_chain_display_ping_host_dns_ip(self, pb):
+        """Ping host shows resolved IP in dns_mode='ip'."""
+        m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], 'target.host')
+        m.resolved_ip = '10.0.0.5'
+        display = m.get_display_name('ip')
+        assert display == 'bastion → user@remote → 10.0.0.5'
+
+    def test_jump_chain_display_ping_host_dns_hostname(self, pb):
+        """Ping host shows resolved hostname in dns_mode='hostname'."""
+        m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], '10.0.0.5', ping_host_label='web01')
+        m.resolved_hostname = 'web01.example.com'
+        display = m.get_display_name('hostname')
+        assert display == 'bastion → user@remote → web01.example.com'
+
+    def test_jump_chain_display_fallback_no_resolved_ip(self, pb):
+        """dns_mode='ip' falls back to ping_host when resolution fails."""
+        m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], 'target.host')
+        # No resolved_ip set
+        display = m.get_display_name('ip')
+        assert display == 'bastion → user@remote → target.host'
+
+    def test_jump_chain_display_fallback_no_resolved_hostname(self, pb):
+        """dns_mode='hostname' falls back to ping_host_label when resolution fails."""
+        m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], '10.0.0.5', ping_host_label='web01')
+        # No resolved_hostname set
+        display = m.get_display_name('hostname')
+        assert display == 'bastion → user@remote → web01'
+
+    def test_jump_chain_display_empty_original_ssh_args(self, pb):
+        """No original_ssh_args provided, falls back to resolved args."""
+        m = pb.SshPingMonitor(['-J', '10.10.1.100', 'user@remote'], 'target.host')
+        display = m.get_display_name('off')
+        # Without original_ssh_args, it uses the resolved args
+        assert display == '10.10.1.100 → user@remote → target.host'
+
+    def test_jump_chain_display_three_jump_hops(self, pb):
+        """Three jump hosts in chain."""
+        hosts_map = {
+            'bastion1': ('10.10.1.100', 'bastion1.example.com'),
+            'bastion2': ('10.10.1.101', 'bastion2.example.com'),
+            'bastion3': ('10.10.1.102', 'bastion3.example.com')
+        }
+        original_ssh_args = ['-J', 'bastion1,bastion2,bastion3', 'user@remote']
+        resolved_ssh_args = ['-J', '10.10.1.100,10.10.1.101,10.10.1.102', 'user@remote']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            'target.host',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        display = m.get_display_name('off')
+        assert display == 'bastion1 → bastion2 → bastion3 → user@remote → target.host'
+
+    def test_jump_chain_display_ssh_dest_also_mapped(self, pb):
+        """SSH destination is also mapped via :resolv."""
+        hosts_map = {
+            'bastion': ('10.10.1.100', 'bastion.example.com'),
+            'ps-supervisor': ('192.168.1.10', 'ps-supervisor.example.com')
+        }
+        original_ssh_args = ['-J', 'bastion', 'ps-supervisor']
+        resolved_ssh_args = ['-J', '10.10.1.100', '192.168.1.10']
+        m = pb.SshPingMonitor(
+            resolved_ssh_args,
+            'localhost',
+            original_ssh_args=original_ssh_args,
+            hosts_map=hosts_map
+        )
+        m._ssh_dest_label = 'ps-supervisor'  # This is set by the implementation
+        display = m.get_display_name('off')
+        # The display should show original aliases for jump host, dest shows label
+        assert display == 'bastion → ps-supervisor → localhost'
 
