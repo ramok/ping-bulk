@@ -1407,7 +1407,7 @@ class Application:
         Timestamp format: ISO 8601 with timezone offset (e.g. 2026-03-20T14:05:32+0200).
         """
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-        max_host_len = max((len(m.host) for m in self.monitors), default=len(host))
+        max_host_len = max((len(m.get_display_name(dns_mode='off')) for m in self.monitors), default=len(host))
         line = f"{timestamp}   {host:<{max_host_len}} {message}"
         self.events.append(line)
         if self.log_file:
@@ -1624,18 +1624,22 @@ class Application:
                 # Log a fatal process error exactly once, as soon as it is detected.
                 if monitor.error is not None and not monitor.error_logged:
                     monitor.error_logged = True
-                    self.add_event(monitor.host, f"error: {monitor.error}")
+                    display_name = monitor.get_display_name(dns_mode='off')
+                    self.add_event(display_name, f"error: {monitor.error}")
 
                 current_state = monitor.alive
                 if monitor.last_state is None:
                     monitor.last_state = current_state
                     if current_state:
                         monitor.up_since = time.monotonic()
-                        self.add_event(monitor.host, "host starts up")
+                        display_name = monitor.get_display_name(dns_mode='off')
+                        self.add_event(display_name, "host starts up")
                     elif current_state is False:
                         monitor.down_since = time.monotonic()
-                        self.add_event(monitor.host, "host down")
+                        display_name = monitor.get_display_name(dns_mode='off')
+                        self.add_event(display_name, "host down")
                 elif monitor.last_state != current_state:
+                    display_name = monitor.get_display_name(dns_mode='off')
                     if current_state:
                         # Host recovered — report downtime if tracked
                         if monitor.down_since is not None:
@@ -1645,11 +1649,11 @@ class Application:
                         else:
                             msg = "host recover"
                         monitor.up_since = time.monotonic()
-                        self.add_event(monitor.host, msg)
+                        self.add_event(display_name, msg)
                     else:
                         monitor.down_since = time.monotonic()
                         monitor.up_since = None
-                        self.add_event(monitor.host, "host down")
+                        self.add_event(display_name, "host down")
                     monitor.last_state = current_state
             time.sleep(0.5)
 
