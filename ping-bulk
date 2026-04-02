@@ -838,17 +838,24 @@ class SshPingMonitor(PingMonitor):
 
         Jump hosts are shown with their original aliases when available via
         reverse lookup in hosts_map, falling back to the resolved value.
+        Username prefixes (user@) are stripped from all hosts in the chain.
         """
         display_parts = []
 
-        # Add jump host chain with alias lookup
+        # Add jump host chain with alias lookup and username stripping
         jump_hosts = self._extract_jump_hosts(self._original_ssh_args)
         for jump_host in jump_hosts:
             alias = self._reverse_lookup_alias(jump_host)
+            # Strip user@ prefix if present
+            if '@' in alias:
+                alias = alias.split('@', 1)[1]
             display_parts.append(alias)
 
-        # Add SSH destination (use label to show original name)
-        display_parts.append(self._ssh_dest_label)
+        # Add SSH destination (use label to show original name, strip user@)
+        ssh_dest_display = self._ssh_dest_label
+        if '@' in ssh_dest_display:
+            ssh_dest_display = ssh_dest_display.split('@', 1)[1]
+        display_parts.append(ssh_dest_display)
 
         # Add ping host with dns_mode adjustment
         if dns_mode == 'ip':
