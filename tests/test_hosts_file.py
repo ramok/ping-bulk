@@ -209,7 +209,7 @@ class TestInlineComment:
 # ===========================================================================
 
 class TestInlineCommentBackref:
-    """Inline '## comment' may contain $N / \\N back-references that are
+    """Inline '## comment' may contain $N back-references that are
     resolved against the brace-group captures for each expanded IP row.
 
     Example:  192.168.1.{2..5} ## workstation$1
@@ -242,17 +242,6 @@ class TestInlineCommentBackref:
             ('cmd',  ':resolv 10.0.0.2 ip-10.0.0.2'),
             ('host', '10.0.0.2'),
         ], f"$0 back-reference in inline comment not expanded; got {entries!r}"
-
-    def test_backslash_backref_form(self, pb, tmp_path):
-        r"""\\1 (backslash form) in the inline comment is equivalent to $1."""
-        content = r"10.1.0.{3,4} ## node\1" + "\n"
-        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
-        assert entries == [
-            ('cmd',  ':resolv 10.1.0.3 node3'),
-            ('host', '10.1.0.3'),
-            ('cmd',  ':resolv 10.1.0.4 node4'),
-            ('host', '10.1.0.4'),
-        ], r"\\1 back-reference in inline comment not expanded; got {entries!r}"
 
     def test_no_backref_comment_used_verbatim(self, pb, tmp_path):
         """An inline comment without any back-reference is used as-is for every row."""

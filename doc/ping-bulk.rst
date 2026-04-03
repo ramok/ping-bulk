@@ -207,9 +207,9 @@ Hosts and DNS
     expansion.  Back-reference placeholders in *hostname-template* are
     substituted for each expanded IP:
 
-    * ``\N`` / ``\{N}`` / ``$N`` / ``${N}`` — value produced by brace
+    * ``$N`` / ``${N}`` — value produced by brace
       group *N* (1-based).
-    * ``\0`` / ``$0`` — the full expanded IP address for this iteration.
+    * ``$0`` — the full expanded IP address for this iteration.
 
     Mappings work for both local ping targets and SSH destinations.
     When using ``user@hostname`` format with ``:ssh``, the hostname
@@ -217,13 +217,13 @@ Hosts and DNS
 
     Examples::
 
-        :resolv 10.0.1.{1..4} leaf-sw\1
+        :resolv 10.0.1.{1..4} leaf-sw$1
 
     Registers ``10.0.1.1``→``leaf-sw1``, ``10.0.1.2``→``leaf-sw2``,
     etc., so those IPs display with meaningful names and the ``ping``
     subprocess is also given the IP directly. ::
 
-        :resolv 10.{1..4}.{1..2} dc\1-rack\2
+        :resolv 10.{1..4}.{1..2} dc$1-rack$2
 
     Two brace groups: ``10.1.1.0``→``dc1-rack1``, ``10.1.2.0``→``dc1-rack2``,
     ``10.2.1.0``→``dc2-rack1``, etc.  (8 mappings total from a single line.) ::
@@ -295,11 +295,11 @@ Format
 ``:for pattern``
     Open a loop.  Every body line between ``:for`` and ``:done`` is
     repeated once for each expansion of *pattern*.  Back-reference
-    placeholders (``\N`` / ``$N``, N = 0–9) in body lines are
-    substituted with the value produced by brace group *N* of the
-    expanded pattern.  ``\0`` / ``$0`` is the entire expanded string.
-    Body lines without any back-reference are included only once.
-    ``:for`` may appear inside an ``:ssh-begin`` block.
+    placeholders (``$N`` / ``${N}`` for numeric, ``$name`` / ``${name}``
+    for named) in body lines are substituted with the value produced by
+    brace group *N* of the expanded pattern.  ``$0`` / ``${0}`` is the
+    entire expanded string.  Body lines without any back-reference are
+    included only once.  ``:for`` may appear inside an ``:ssh-begin`` block.
 
 ``:done``
     Close the current ``:for`` loop.
@@ -376,6 +376,29 @@ Mixed items (``{10,11..13,15}``) are allowed within a single group.
 Multiple brace groups in a single string produce the **cartesian
 product** of all groups.  Nested braces are expanded inside-out.
 
+Backreferences
+--------------
+
+When using brace expansion with ``:for`` loops or ``:resolv`` commands,
+you can reference the expanded values using backreference placeholders:
+
+**Numeric backreferences:**
+
+``$N`` or ``${N}``
+    Reference the value from brace group *N* (1-based index).
+    ``$0`` or ``${0}`` references the entire expanded string.
+
+**Named backreferences:**
+
+``$name`` or ``${name}``
+    Reference named capture groups when supported by the expansion
+    context. Names must start with a letter or underscore and may
+    contain letters, digits, and underscores.
+
+The braced form ``${...}`` is useful when the placeholder is immediately
+followed by a digit or letter that would otherwise be interpreted as part
+of the reference.
+
 Examples::
 
     10.0.0.{1,2,5}          → 10.0.0.1  10.0.0.2  10.0.0.5
@@ -385,6 +408,12 @@ Examples::
     web{1..3}.example.com   → web1.example.com … web3.example.com
     10.0.0.{10,11..12,14}   → .10 .11 .12 .14
     10.0.{1..2}.{10,2{1,2}} → 8 addresses (nested braces)
+
+    # Backreference examples
+    :for 10.0.{1..3}.{10..12}
+        :resolv $0 rack$1-node$2    # rack1-node10, rack1-node11, etc.
+        $0
+    :done
 
 
 HISTORY MODES

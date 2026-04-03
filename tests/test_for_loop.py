@@ -1,8 +1,8 @@
 """Unit tests for :for/:done loop handling in parse_hosts_file().
 
 Covers:
-  - basic backref expansion (\\N / $N)
-  - \\0 / $0 (full-string back-reference)
+  - basic backref expansion $N
+  - $0 (full-string back-reference)
   - no-backref host lines inside :for  → warn + add once
   - duplicate hosts (within loop, across iterations, vs. outside loop)
   - unclosed :for at EOF  → error entry
@@ -38,22 +38,8 @@ def write_hosts(tmp_path, content):
 class TestForLoopBasic:
     """Basic :for expansion with back-references."""
 
-    def test_single_group_backref_1(self, pb, tmp_path):
-        """:for with \\1 back-reference produces one host per iteration."""
-        content = """\
-            :for server-{1..3}
-            server-\\1.example.com
-            :done
-        """
-        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
-        assert entries == [
-            ('host', 'server-1.example.com'),
-            ('host', 'server-2.example.com'),
-            ('host', 'server-3.example.com'),
-        ], f"Unexpected entries: {entries!r}"
-
     def test_single_group_dollar_syntax(self, pb, tmp_path):
-        """$N syntax (dollar sign) works as an alias for \\N."""
+        """:for with $1 back-reference produces one host per iteration."""
         content = """\
             :for host-{a,b,c}
             $1.lan
@@ -67,10 +53,10 @@ class TestForLoopBasic:
         ], f"Unexpected entries: {entries!r}"
 
     def test_full_string_backref_0(self, pb, tmp_path):
-        """\\0 / $0 expands to the fully-expanded pattern string."""
+        """$0 expands to the fully-expanded pattern string."""
         content = """\
             :for node-{1,2}
-            \\0.cluster
+            $0.cluster
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -93,10 +79,10 @@ class TestForLoopBasic:
         ], f"Unexpected entries: {entries!r}"
 
     def test_two_groups_two_backrefs(self, pb, tmp_path):
-        """Two brace groups: \\1 and \\2 each capture their group value."""
+        """Two brace groups: $1 and $2 each capture their group value."""
         content = """\
             :for rack{1,2}-unit{3,4}
-            \\1-\\2.mgmt
+            $1-$2.mgmt
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -112,7 +98,7 @@ class TestForLoopBasic:
         """zsh-style n-m range inside :for pattern is supported."""
         content = """\
             :for sw{1-3}
-            sw\\1.local
+            sw$1.local
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -126,7 +112,7 @@ class TestForLoopBasic:
         """After back-reference substitution, remaining brace groups are expanded."""
         content = """\
             :for rack{1,2}
-            rack\\1-unit{1,2}
+            rack$1-unit{1,2}
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -142,8 +128,8 @@ class TestForLoopBasic:
         """Multiple host lines in the body each get expanded per iteration."""
         content = """\
             :for zone{1,2}
-            zone\\1-primary
-            zone\\1-secondary
+            zone$1-primary
+            zone$1-secondary
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -163,11 +149,11 @@ class TestForLoopSectionHeaders:
     """Section headers (## / :title) inside :for body."""
 
     def test_section_header_with_backref(self, pb, tmp_path):
-        """## headers with \\N back-references are emitted per iteration."""
+        """## headers with $N back-references are emitted per iteration."""
         content = """\
             :for dc{1,2}
-            ## Data Centre \\1
-            dc\\1-router
+            ## Data Centre $1
+            dc$1-router
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -179,11 +165,11 @@ class TestForLoopSectionHeaders:
         ], f"Unexpected entries: {entries!r}"
 
     def test_title_directive_with_backref(self, pb, tmp_path):
-        """:title inside :for with \\N back-reference."""
+        """:title inside :for with $N back-reference."""
         content = """\
             :for pod{a,b}
-            :title Pod \\1
-            pod\\1-host
+            :title Pod $1
+            pod$1-host
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -200,7 +186,7 @@ class TestForLoopSectionHeaders:
         content = """\
             :for node{1,2}
             ## Servers
-            node\\1
+            node$1
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -217,7 +203,7 @@ class TestForLoopSectionHeaders:
         content = """\
             :for sp{1,2}
             :title Static Section
-            sp\\1
+            sp$1
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -241,7 +227,7 @@ class TestForLoopComments:
         content = """\
             :for srv{1,2}
             # this is a comment
-            srv\\1
+            srv$1
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -348,7 +334,7 @@ class TestForLoopDuplicates:
         appearing twice), the second occurrence is warned and skipped."""
         content = """\
             :for dc{1,1,2}
-            dc\\1-server
+            dc$1-server
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -372,7 +358,7 @@ class TestForLoopDuplicates:
         content = """\
             node1.example.com
             :for node{1,2}
-            node\\1.example.com
+            node$1.example.com
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -391,7 +377,7 @@ class TestForLoopDuplicates:
         """A plain host declared after the :for loop is deduped if already added."""
         content = """\
             :for node{1,2}
-            node\\1.example.com
+            node$1.example.com
             :done
             node1.example.com
         """
@@ -464,11 +450,12 @@ class TestForLoopDuplicates:
 class TestForLoopErrors:
     """Error conditions: unclosed :for, :done without :for, nested :for."""
 
+    # TODO: allow to do not use :done
     def test_unclosed_for_at_eof_produces_error(self, pb, tmp_path):
         """A :for loop that reaches EOF without :done produces an error entry."""
         content = """\
             :for node{1,2}
-            node\\1
+            node$1
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         error_entries = [(k, v) for k, v in entries if k == 'error']
@@ -500,7 +487,7 @@ class TestForLoopErrors:
         content = """\
             :for dc{1,2}
             :for node{1,2}
-            dc\\1-node\\2
+            dc$1-node$2
             :done
             :done
         """
@@ -519,7 +506,7 @@ class TestForLoopErrors:
         """:ssh-begin inside a :for body produces an error entry."""
         content = """\
             :for dc{1,2}
-            :ssh-begin user@dc\\1
+            :ssh-begin user@dc$1
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -553,7 +540,7 @@ class TestForLoopErrors:
         """An invalid brace group in the :for pattern produces an error, not a crash."""
         content = """\
             :for host{}
-            host\\1
+            host$1
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -576,7 +563,7 @@ class TestForLoopInsideSshBlock:
         content = """\
             :ssh-begin user@gateway
             :for node{1,2}
-            192.168.1.\\1
+            192.168.1.$1
             :done
             :ssh-end
         """
@@ -599,7 +586,7 @@ class TestForLoopInsideSshBlock:
         content = """\
             :ssh-begin jump@bastion
             :for group{1,1,2}
-            app\\1.internal
+            app$1.internal
             :done
             :ssh-end
         """
@@ -657,7 +644,7 @@ class TestForLoopMixed:
         content = """\
             before.example.com
             :for mid{1,2}
-            mid\\1.example.com
+            mid$1.example.com
             :done
             after.example.com
         """
@@ -675,7 +662,7 @@ class TestForLoopMixed:
         content = """\
             ## My Group
             :for app{1,2}
-            app\\1
+            app$1
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -704,7 +691,7 @@ class TestForLoopMixed:
         with back-reference substitution applied."""
         content = """\
             :for {1,2}
-            :resolv 10.0.0.\\1 node\\1
+            :resolv 10.0.0.$1 node$1
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -720,7 +707,7 @@ class TestForLoopMixed:
         """:for pattern without brace groups runs a single iteration (full_str = pattern)."""
         content = """\
             :for static-host
-            \\0.local
+            $0.local
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))

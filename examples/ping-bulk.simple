@@ -12,6 +12,10 @@
 
 ## Local network
 192.168.1.1   ## gateway
-# $1 expands to the value of the first brace group (the last octet here)
-192.168.1.{2..5} ## workstation$1
+# Use :for loop with backreferences to assign names
+# $1 or ${1} expands to the value of the first brace group
+:for 192.168.1.{2..5}
+    :resolv $0 workstation$1
+    $0
+:done
 

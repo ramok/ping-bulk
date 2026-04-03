@@ -43,22 +43,12 @@ def write_hosts(tmp_path, content):
 class TestApplyBackref:
     """Direct tests for _apply_backref(template, captures, full_str)."""
 
-    # ── bare forms (regression guard) ────────────────────────────────────
-
-    def test_bare_backslash_n(self, pb):
-        r"""\\N (bare backslash) is substituted from captures."""
-        result = pb._apply_backref(r'host-\1.lan', ['42'], full_str='host-42')
-        assert result == 'host-42.lan'
+    # ── bare forms ────────────────────────────────────────────────────────
 
     def test_bare_dollar_n(self, pb):
         """$N (bare dollar) is substituted from captures."""
         result = pb._apply_backref('host-$1.lan', ['42'], full_str='host-42')
         assert result == 'host-42.lan'
-
-    def test_bare_zero_backslash(self, pb):
-        r"""\\0 is replaced by full_str."""
-        result = pb._apply_backref(r'\0.example.com', [], full_str='sensor-7')
-        assert result == 'sensor-7.example.com'
 
     def test_bare_zero_dollar(self, pb):
         """$0 is replaced by full_str."""
@@ -67,20 +57,10 @@ class TestApplyBackref:
 
     # ── brace forms ───────────────────────────────────────────────────────
 
-    def test_brace_backslash_n(self, pb):
-        r"""\\{N} is substituted from captures."""
-        result = pb._apply_backref(r'\{1}.lan', ['web'], full_str='web')
-        assert result == 'web.lan'
-
     def test_brace_dollar_n(self, pb):
         """${N} is substituted from captures."""
         result = pb._apply_backref('${1}.lan', ['web'], full_str='web')
         assert result == 'web.lan'
-
-    def test_brace_zero_backslash(self, pb):
-        r"""\\{0} is replaced by full_str."""
-        result = pb._apply_backref(r'\{0}.example.com', [], full_str='node-5')
-        assert result == 'node-5.example.com'
 
     def test_brace_zero_dollar(self, pb):
         """${0} is replaced by full_str."""
@@ -94,51 +74,32 @@ class TestApplyBackref:
         result = pb._apply_backref('host${1}9.lan', ['X'], full_str='hostX9')
         assert result == 'hostX9.lan'
 
-    def test_adjacent_digit_backslash_brace(self, pb):
-        r"""\\{1}9 → group-1 value followed by literal '9', not group 19."""
-        result = pb._apply_backref(r'host\{1}9.lan', ['X'], full_str='hostX9')
-        assert result == 'hostX9.lan'
-
-    def test_bare_adjacent_digit_not_disambiguated(self, pb):
-        r"""Bare \\19 → group 1 then literal '9' (single-digit regex, so '1' matches)."""
-        # The bare form only matches a single digit, so \19 → captures[0] + '9'
-        result = pb._apply_backref(r'\19.lan', ['A'], full_str='A9')
-        assert result == 'A9.lan'
-
     # ── multiple groups ───────────────────────────────────────────────────
 
     def test_two_groups_bare(self, pb):
-        r"""Two \\N references in one template, both substituted."""
-        result = pb._apply_backref(r'\1-\2', ['foo', 'bar'], full_str='foo-bar')
+        r"""Two $N references in one template, both substituted."""
+        result = pb._apply_backref(r'$1-$2', ['foo', 'bar'], full_str='foo-bar')
         assert result == 'foo-bar'
 
     def test_two_groups_brace(self, pb):
-        r"""Two \\{N} references in one template, both substituted."""
-        result = pb._apply_backref(r'\{1}-\{2}', ['foo', 'bar'], full_str='foo-bar')
+        r"""Two ${N} references in one template, both substituted."""
+        result = pb._apply_backref(r'${1}-${2}', ['foo', 'bar'], full_str='foo-bar')
         assert result == 'foo-bar'
-
-    def test_mixed_forms(self, pb):
-        r"""Mix of \\N, $N, \\{N}, ${N} in one template."""
-        captures = ['alpha', 'beta']
-        full_str = 'alpha-beta'
-        tmpl = r'\1/$2/\{1}/${2}'
-        result = pb._apply_backref(tmpl, captures, full_str=full_str)
-        assert result == 'alpha/beta/alpha/beta'
 
     # ── out-of-range / missing full_str ───────────────────────────────────
 
     def test_out_of_range_bare(self, pb):
-        r"""\\9 with only 2 captures → placeholder left unchanged."""
-        result = pb._apply_backref(r'\9.lan', ['a', 'b'], full_str='x')
-        assert result == r'\9.lan'
+        r"""$9 with only 2 captures → placeholder left unchanged."""
+        result = pb._apply_backref(r'$9.lan', ['a', 'b'], full_str='x')
+        assert result == r'$9.lan'
 
     def test_out_of_range_brace(self, pb):
-        r"""\\{9} with only 2 captures → placeholder left unchanged."""
-        result = pb._apply_backref(r'\{9}.lan', ['a', 'b'], full_str='x')
-        assert result == r'\{9}.lan'
+        r"""${9} with only 2 captures → placeholder left unchanged."""
+        result = pb._apply_backref(r'${9}.lan', ['a', 'b'], full_str='x')
+        assert result == r'${9}.lan'
 
     def test_zero_full_str_none(self, pb):
-        r"""\\0 when full_str=None → placeholder left unchanged."""
+        r"""$0 when full_str=None → placeholder left unchanged."""
         result = pb._apply_backref(r'\0.lan', [], full_str=None)
         assert result == r'\0.lan'
 
@@ -154,6 +115,54 @@ class TestApplyBackref:
         result = pb._apply_backref('plain.host.lan', ['a', 'b'], full_str='x')
         assert result == 'plain.host.lan'
 
+    # ── named backreferences (dict captures) ──────────────────────────────
+
+    def test_named_backref_bare(self, pb):
+        """$name (bare form) with dict captures is substituted."""
+        result = pb._apply_backref('host-$rack.lan', {'rack': '42'}, full_str='host-42')
+        assert result == 'host-42.lan'
+
+    def test_named_backref_brace(self, pb):
+        """${name} (brace form) with dict captures is substituted."""
+        result = pb._apply_backref('${zone}-server.lan', {'zone': 'west'}, full_str='west-server')
+        assert result == 'west-server.lan'
+
+    def test_named_backref_missing_key(self, pb):
+        """$name when key not in dict → placeholder left unchanged."""
+        result = pb._apply_backref('$missing.lan', {'zone': 'west'}, full_str='x')
+        assert result == '$missing.lan'
+
+    def test_named_backref_brace_missing_key(self, pb):
+        """${name} when key not in dict → placeholder left unchanged."""
+        result = pb._apply_backref('${missing}.lan', {'zone': 'west'}, full_str='x')
+        assert result == '${missing}.lan'
+
+    def test_named_backref_with_list_captures(self, pb):
+        """$name with list captures (not dict) → placeholder left unchanged."""
+        result = pb._apply_backref('$name.lan', ['42'], full_str='x')
+        assert result == '$name.lan'
+
+    def test_mixed_named_and_numbered(self, pb):
+        """Mixed $name and $N in one template with dict captures."""
+        captures = {'rack': 'r1', '1': 'node5'}
+        result = pb._apply_backref('$rack-$1.lan', captures, full_str='r1-node5')
+        assert result == 'r1-node5.lan'
+
+    def test_named_backref_adjacent_chars(self, pb):
+        """${name}9 allows named backref adjacent to other characters."""
+        result = pb._apply_backref('host${zone}9.lan', {'zone': 'A'}, full_str='hostA9')
+        assert result == 'hostA9.lan'
+
+    def test_named_backref_underscore(self, pb):
+        """$name_with_underscore is supported."""
+        result = pb._apply_backref('$dc_id.lan', {'dc_id': 'east'}, full_str='east')
+        assert result == 'east.lan'
+
+    def test_named_backref_digits_in_name(self, pb):
+        """$name2 (name with trailing digit) is supported."""
+        result = pb._apply_backref('$rack2.lan', {'rack2': 'r5'}, full_str='r5')
+        assert result == 'r5.lan'
+
 
 # ===========================================================================
 # TestHasBackref — unit tests for _has_backref()
@@ -164,43 +173,33 @@ class TestHasBackref:
 
     # ── each form alone ───────────────────────────────────────────────────
 
-    def test_bare_backslash(self, pb):
-        r"""\\1 → True."""
-        assert pb._has_backref(r'\1') is True
-
     def test_bare_dollar(self, pb):
         """$1 → True."""
         assert pb._has_backref('$1') is True
-
-    def test_brace_backslash(self, pb):
-        r"""\\{1} → True."""
-        assert pb._has_backref(r'\{1}') is True
 
     def test_brace_dollar(self, pb):
         """${1} → True."""
         assert pb._has_backref('${1}') is True
 
-    def test_bare_zero_backslash(self, pb):
-        r"""\\0 → True."""
-        assert pb._has_backref(r'\0') is True
-
     def test_bare_zero_dollar(self, pb):
         """$0 → True."""
         assert pb._has_backref('$0') is True
-
-    def test_brace_zero_backslash(self, pb):
-        r"""\\{0} → True."""
-        assert pb._has_backref(r'\{0}') is True
 
     def test_brace_zero_dollar(self, pb):
         """${0} → True."""
         assert pb._has_backref('${0}') is True
 
-    # ── mixed forms ───────────────────────────────────────────────────────
+    def test_named_backref_bare(self, pb):
+        """$name → True."""
+        assert pb._has_backref('$rack') is True
 
-    def test_mixed_forms_true(self, pb):
-        r"""String with both \\N and ${N} → True."""
-        assert pb._has_backref(r'\1-${2}') is True
+    def test_named_backref_brace(self, pb):
+        """${name} → True."""
+        assert pb._has_backref('${zone}') is True
+
+    def test_named_backref_underscore(self, pb):
+        """$name_with_underscore → True."""
+        assert pb._has_backref('$dc_id') is True
 
     # ── False cases ───────────────────────────────────────────────────────
 
@@ -209,16 +208,16 @@ class TestHasBackref:
         assert pb._has_backref('plain.host.lan') is False
 
     def test_dollar_letter(self, pb):
-        """$a (non-digit) → False."""
-        assert pb._has_backref('$a') is False
+        """$a (single letter name) → True."""
+        assert pb._has_backref('$a') is True
 
     def test_backslash_letter(self, pb):
         r"""\\n (letter, not digit) → False."""
         assert pb._has_backref(r'\n') is False
 
     def test_brace_nondecimal(self, pb):
-        """${x} → False (non-digit inside braces)."""
-        assert pb._has_backref('${x}') is False
+        """${x} → True (named backreference)."""
+        assert pb._has_backref('${x}') is True
 
     def test_empty_string(self, pb):
         """Empty string → False."""
@@ -231,20 +230,6 @@ class TestHasBackref:
 
 class TestBackrefIntegration:
     """Integration tests: brace-form back-references inside :for/:done blocks."""
-
-    def test_brace_backslash_in_for(self, pb, tmp_path):
-        r"""\\{1} inside :for body → correct host per iteration."""
-        content = """\
-            :for node-{1..3}
-            node-\\{1}.example.com
-            :done
-        """
-        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
-        assert entries == [
-            ('host', 'node-1.example.com'),
-            ('host', 'node-2.example.com'),
-            ('host', 'node-3.example.com'),
-        ], f"Unexpected entries: {entries!r}"
 
     def test_brace_dollar_in_for(self, pb, tmp_path):
         """${1} inside :for body → correct host per iteration."""
@@ -288,10 +273,10 @@ class TestBackrefIntegration:
         ], f"Unexpected entries: {entries!r}"
 
     def test_two_groups_brace_form(self, pb, tmp_path):
-        r"""Two-group pattern with \\{1} and \\{2} in body line."""
+        r"""Two-group pattern with ${1} and ${2} in body line."""
         content = """\
             :for {web,db}-{1,2}
-            \\{1}-\\{2}.local
+            ${1}-${2}.local
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -304,10 +289,10 @@ class TestBackrefIntegration:
         ], f"Unexpected hosts: {hosts!r}"
 
     def test_mixed_bare_and_brace_forms(self, pb, tmp_path):
-        r"""Bare \\1 and brace ${2} mixed in same body line."""
+        r"""Bare $1 and brace ${2} mixed in same body line."""
         content = """\
             :for {web,db}-{1,2}
-            \\1-${2}.internal
+            $1-${2}.internal
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))

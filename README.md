@@ -120,7 +120,7 @@ comments, and command directives:
 1.1.1.1
 
 ## Office LAN
-:resolv 10.1.0.{1..4}  switch\1
+:resolv 10.1.0.{1..4}  switch$1
 10.1.0.{1..4}
 
 ## Remote site — single host via SSH
