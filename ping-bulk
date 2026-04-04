@@ -3544,7 +3544,11 @@ class Application:
                     self._draw_details_overlay(stdscr, height, width)
                     curses.curs_set(0)
 
-                stdscr.refresh()
+                try:
+                    stdscr.refresh()
+                except KeyboardInterrupt:
+                    self.prompt = {'type': 'quit_confirm', 'chars': []}
+                    continue
 
                 # Handle input — map Ctrl+C (KeyboardInterrupt) to key code 3
                 # so modal layers can handle it uniformly as "cancel / dismiss".
