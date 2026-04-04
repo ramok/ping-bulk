@@ -3201,18 +3201,52 @@ class Application:
             alive = monitor.alive
             error = monitor.error
 
-        # Build content lines
-        lines = []
+        import shlex
+        import textwrap
+
         dns_mode = DNS_MODES[self.dns_mode]
         display_name = monitor.get_display_name(dns_mode)
+        cmd_list = monitor._build_ping_cmd()
+        raw_cmd_str = shlex.join(cmd_list)
+        raw_error_str = error if error is not None else ""
 
+        # Calculate dynamic width
+        ideal_w = 60
+        ideal_w = max(ideal_w, len(f"  Host: {display_name}") + 2)
+        ideal_w = max(ideal_w, len(f"  Cmd:  {raw_cmd_str}") + 2)
+        if error:
+            ideal_w = max(ideal_w, len(f"  Error:  {raw_error_str}") + 2)
+
+        # Constrain to terminal width (leave margin of 4, box borders need 2)
+        max_allowed_w = max(20, width - 4)
+        inner_w = min(ideal_w, max_allowed_w)
+
+        # Build content lines
+        lines = []
         lines.append(f"  Host: {display_name}")
-        lines.append("─" * 60)
+
+        cmd_wrap_w = max(10, inner_w - 8)
+        wrapped_cmd = textwrap.wrap(raw_cmd_str, width=cmd_wrap_w)
+        if wrapped_cmd:
+            lines.append(f"  Cmd:  {wrapped_cmd[0]}")
+            for w_line in wrapped_cmd[1:]:
+                lines.append(f"        {w_line}")
+        else:
+            lines.append(f"  Cmd:  -")
+
+        lines.append("─" * inner_w)
 
         # Status
         if error is not None:
             lines.append(f"  Status: ERROR")
-            lines.append(f"  Error:  {error[:50]}")  # truncate long error messages
+            err_wrap_w = max(10, inner_w - 10)
+            wrapped_err = textwrap.wrap(raw_error_str, width=err_wrap_w)
+            if wrapped_err:
+                lines.append(f"  Error:  {wrapped_err[0]}")
+                for e_line in wrapped_err[1:]:
+                    lines.append(f"          {e_line}")
+            else:
+                lines.append(f"  Error:  -")
         elif alive is True:
             lines.append(f"  Status: UP")
             if monitor.up_since is not None:
@@ -3274,7 +3308,6 @@ class Application:
         lines.append("  [Enter / q / Esc] Close")
 
         # Calculate box dimensions
-        inner_w = 60
         box_w = inner_w + 2
         box_h = len(lines) + 2
 
