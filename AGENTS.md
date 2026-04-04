@@ -43,3 +43,8 @@ The repository is structured to keep the core application as a single deployable
 - Enhance test coverage for edge cases in network failures and SSH connection drops.
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
+## 8. Recent Work
+- Implemented an expanded host details overlay with scrolling and integrated event logs.
+- Configured keyboard navigation (Up, Down, Page Up, Page Down) to handle scrolling within the details view.
+- Added ESC to the help text to indicate clearing host selection.
+

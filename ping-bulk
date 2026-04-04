@@ -1425,6 +1425,7 @@ class Application:
         self.help_scroll = 0      # first visible line index in the help overlay
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
+        self.details_scroll = 0   # Scroll offset for the host details overlay
         self.running = True
         self.threads = []
 
@@ -1821,13 +1822,14 @@ class Application:
         menu_items = [
             (f"[d]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
             (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
-            (f"[o]rder by {self.sort_by}", False),
+            (f"[o]rder by:{self.sort_by}", False),
             (f"[h]istory:{HISTORY_MODES[self.history_mode]}", False),
-            (f"[p]ause {'on' if self.paused else 'off'}", self.paused),
-            ("[Space]seen", False),
+            (f"[p]ause:{'on' if self.paused else 'off'}", self.paused),
+        ]
+        menu_items.extend([
             ("[C]lear log", False),
             ("[q]uit", False),
-        ]
+        ])
 
         prefix = "ping-bulk: "
         stdscr.addstr(0, 0, prefix)
@@ -1938,9 +1940,20 @@ class Application:
             mode_label = HISTORY_MODES[self.history_mode]
             display_label = 'scaled/100ms' if mode_label == 'scaled' else mode_label
             history_header = f"Ping history [{display_label}]"
+
+            if not self.help_open and not self.details_open and self.cmd is None and self.prompt is None:
+                if self.highlighted_index is None:
+                    history_header += " [↑/↓ select]"
+                else:
+                    entry = self.entries[self.highlighted_index] if 0 <= self.highlighted_index < len(self.entries) else None
+                    if isinstance(entry, SectionLabel):
+                        history_header += " [↑/↓ navigate, SPACE hide/show, ESC clear]"
+                    else:
+                        history_header += " [↑/↓ navigate, ENTER details, ESC clear]"
+
             if self.history_offset > 0:
-                history_header = (f"Ping history [{display_label}]"
-                                  f" [←{self.history_offset}  →live]")
+                history_header += f" [←{self.history_offset}  →live]"
+
             stdscr.addstr(start_row, hist_col_effective, history_header, curses.A_BOLD)
 
             if show_all and all_stats_col < width:
@@ -2297,7 +2310,7 @@ class Application:
         if self.log_offset == 0:
             # Live tail mode
             visible = event_list[-page_size:]
-            header = "Events"
+            header = "Events [SPACE to set \"seen\" mark]"
             if overflows:
                 header += " [↑/PgUp to scroll]"
         else:
@@ -3305,27 +3318,74 @@ class Application:
             lines.append(f"    StdDev:  -")
 
         lines.append("")
-        lines.append("  [Enter / q / Esc] Close")
+
+        # Add events related to this host
+        host_events = []
+        # get_display_name(dns_mode='off') is what add_event uses for logging host names
+        log_name = monitor.get_display_name(dns_mode='off')
+
+        # Look for events containing the host name
+        for event in self.events:
+            # Events look like: "2026-03-20T14:05:32+0200   hostname   message"
+            # We split by '   ' (3 spaces) which add_event uses
+            parts = event.split('   ', 1)
+            if len(parts) == 2:
+                rest = parts[1]
+                # Hostname is padded with spaces, so we just check if it starts with the log_name followed by space
+                # Or just do a simple search
+                if f" {log_name} " in event or event.startswith(f"{parts[0]}   {log_name}"):
+                    host_events.append(event)
+
+        if host_events:
+            lines.append("  Recent Events:")
+            # Show up to 50 most recent events for this host
+            for ev in host_events[-50:]:
+                # Wrap event lines if needed
+                ev_wrap_w = max(10, inner_w - 4)
+                wrapped_ev = textwrap.wrap(ev, width=ev_wrap_w)
+                for e_line in wrapped_ev:
+                    lines.append(f"    {e_line}")
+            lines.append("")
+
+        lines.append("  [Enter / q / Esc] Close  [↑ / ↓ / PgUp / PgDn] Scroll")
 
         # Calculate box dimensions
+        # Limit the box height to the terminal; always keep room for both borders.
+        box_h_available = min(len(lines) + 2, height)
+        visible_count = max(0, box_h_available - 2)
+
+        # Clamp scroll position so it never exceeds the last valid window start.
+        max_scroll = max(0, len(lines) - visible_count)
+        self.details_scroll = max(0, min(self.details_scroll, max_scroll))
+
         box_w = inner_w + 2
-        box_h = len(lines) + 2
 
         # Center the box
         col0 = max(0, (width - box_w) // 2)
-        row0 = max(0, (height - box_h) // 2)
+        row0 = max(0, (height - box_h_available) // 2)
 
         attr = curses.A_REVERSE
 
-        # Top border
+        # Top border — embed a scroll indicator when not all lines fit on screen.
         if row0 < height:
+            if max_scroll > 0:
+                line_first = self.details_scroll + 1
+                line_last  = self.details_scroll + visible_count
+                indicator  = f' ↑↓ {line_first}-{line_last}/{len(lines)} '
+                left_w  = (inner_w - len(indicator)) // 2
+                right_w = inner_w - left_w - len(indicator)
+                inner = '─' * left_w + indicator + '─' * right_w
+                top_border = '┌' + inner + '┐'
+            else:
+                top_border = '┌' + '─' * inner_w + '┐'
             try:
-                stdscr.addstr(row0, col0, ('┌' + '─' * inner_w + '┐')[:width - col0], attr)
+                stdscr.addstr(row0, col0, top_border[:width - col0], attr)
             except curses.error:
                 pass
 
-        # Content rows
-        for i, line in enumerate(lines):
+        # Content rows — show only the slice selected by details_scroll.
+        visible_lines = lines[self.details_scroll:self.details_scroll + visible_count]
+        for i, line in enumerate(visible_lines):
             r = row0 + 1 + i
             if r >= height:
                 break
@@ -3336,7 +3396,7 @@ class Application:
                 pass
 
         # Bottom border
-        r = row0 + 1 + len(lines)
+        r = row0 + 1 + visible_count
         if r < height:
             try:
                 stdscr.addstr(r, col0, ('└' + '─' * inner_w + '┘')[:width - col0], attr)
@@ -3509,6 +3569,14 @@ class Application:
                                ord('q'), ord('Q'), 27, 3):
                         self.details_open = False
                         self.details_monitor = None
+                    elif key == curses.KEY_UP:
+                        self.details_scroll = max(0, self.details_scroll - 1)
+                    elif key == curses.KEY_DOWN:
+                        self.details_scroll += 1
+                    elif key == curses.KEY_PPAGE:
+                        self.details_scroll = max(0, self.details_scroll - 10)
+                    elif key == curses.KEY_NPAGE:
+                        self.details_scroll += 10
                     continue
                 if self.cmd is not None:
                     if key != -1:
@@ -3546,7 +3614,7 @@ class Application:
                 elif key == ord(' '):
                     # If a section header is highlighted, toggle its folded state.
                     # If a PingMonitor is highlighted, Space does nothing.
-                    # If nothing is highlighted, insert a 'seen' marker.
+                    # If nothing is highlighted, insert a 'seen' marker (only if not scrolling log).
                     if (self.highlighted_index is not None and
                         0 <= self.highlighted_index < len(self.entries)):
                         entry = self.entries[self.highlighted_index]
@@ -3554,7 +3622,8 @@ class Application:
                             entry.folded = not entry.folded
                         # PingMonitor highlighted — no action for Space
                     else:
-                        self.mark_seen()
+                        if self.log_offset == 0:
+                            self.mark_seen()
                 elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
                     if (self.highlighted_index is not None and
                             0 <= self.highlighted_index < len(self.entries)):
