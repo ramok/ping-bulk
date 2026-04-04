@@ -1674,7 +1674,9 @@ class Application:
                 if monitor.error is not None and not monitor.error_logged:
                     monitor.error_logged = True
                     display_name = monitor.get_display_name(dns_mode='off')
-                    self.add_event(display_name, f"error: {monitor.error}")
+                    for err_line in monitor.error.splitlines():
+                        if err_line.strip():
+                            self.add_event(display_name, f"error: {err_line.strip()}")
 
                 current_state = monitor.alive
                 if monitor.last_state is None:
