@@ -60,8 +60,10 @@ OPTIONS
     Valid values: ``success``, ``rtt``, ``scaled``.
 
 ``HOST ...``
-    One or more host names or IP addresses to ping.  Brace expansion
-    is supported (see **BRACE EXPANSION** below).
+    One or more host names, IP addresses, or host:port combinations to monitor.
+    If a port is specified (e.g. ``example.com:443``), it will perform a TCP
+    connection check instead of an ICMP ping. Brace expansion is supported
+    (see **BRACE EXPANSION** below).
     Tokens beginning with ``:`` are treated as startup commands
     (same syntax as the interactive ``:`` command line).
 
@@ -202,8 +204,8 @@ Configuration
 Hosts and DNS
 -------------
 
-``:ping <host>``
-    Add a new host to monitor interactively.
+``:ping HOST[:port]``
+    Add a new host or TCP port to monitor interactively.
 
 ``:source <file>``
     Load hosts and commands from the specified file.
@@ -240,7 +242,16 @@ Hosts and DNS
     The SSH destination becomes ``user@192.168.1.10`` while preserving
     the username.
 
-SSH monitoring
+``:resolv-port <port> <service>``
+    Register a static port↔service mapping, overriding default names from
+    ``/etc/services``. This affects how TCP ports are displayed in the UI.
+
+    Examples::
+
+        :resolv-port 8080 http-alt
+        :resolv-port 8443 https-alt
+
+Monitoring via SSH JumpHost
 --------------
 
 ``:ssh [opts] <dest> <ping-host>``

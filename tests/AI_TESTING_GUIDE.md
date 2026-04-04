@@ -62,3 +62,44 @@ If tests fail or are interrupted abruptly, orphaned `tmux` sessions might be lef
 4. **Scoping:** Remember that UI tests are inherently slower. Use them strategically. For testing internal data parsing or isolated logic, consider unit tests that mock or invoke functions directly rather than driving the full UI.
 5. **No Network Dependency:** To prevent flaky tests, ensure network-dependent features (like `ping` or `ssh`) are mocked or directed to `127.0.0.1` (localhost is reliably reachable).
 
+## Test Template
+
+When creating a new test file, use the following template to maintain consistency with the existing suite:
+
+```python
+import pytest
+from utils.hosts_helper import write_hosts
+
+# Example 1: UI integration test using tmux
+class TestFeatureNameUI:
+    @pytest.fixture(autouse=True)
+    def setup(self, tmux_app_50):
+        # Or tmux_app_40, depending on viewport needs
+        self.sess = tmux_app_50
+
+    def test_basic_behavior(self):
+        # Trigger an action
+        self.sess.send_literal(":mycommand")
+        self.sess.send_keys("Enter")
+
+        # Wait for the expected state transition
+        self.sess.wait_for("expected output text")
+
+        # Capture pane and assert UI looks correct
+        screen = self.sess.capture_pane()
+        assert "expected output text" in screen
+
+# Example 2: Unit test using pb directly and write_hosts for config parsing
+class TestFeatureNameUnit:
+    def test_parsing_behavior(self, pb, tmp_path):
+        content = """
+        :section My Section
+        10.0.0.1
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('section', 'My Section'),
+            ('host', '10.0.0.1')
+        ]
+```
+

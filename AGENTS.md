@@ -33,6 +33,7 @@ The repository is structured to keep the core application as a single deployable
 ## 5. Development & Testing Workflow
 - **Running the Application**: You can run the script directly from the root directory: `./ping-bulk <hosts>`.
 - **Running Tests**: Navigate to the root directory and execute `pytest -n auto tests/` to run the test suite in parallel. It is **highly recommended** to use `pytest -n auto` for significantly faster test execution, as test sessions are fully isolated using unique `tmux` session names via `pytest-xdist`. Ensure any new features include appropriate tests, especially for complex parsing (like brace expansion or SSH directives). For more details on the testing infrastructure and how to write tests using the headless tmux environment, refer to `tests/AI_TESTING_GUIDE.md` and `SKILL.md`.
+  - **CRITICAL REQUIREMENT FOR AI AGENTS:** Before writing **any** new tests, you **MUST** read and fully understand `tests/AI_TESTING_GUIDE.md`. You **MUST** strictly follow the test templates provided in that guide to ensure consistency with the existing headless tmux testing infrastructure. Failure to do so will result in broken UI tests and test suite failures.
 - **Building Documentation**: Navigate to the `doc/` directory and run `make` (requires `docutils` installed via pip) to generate the updated man page and HTML documentation.
 - **Single-File Constraint**: When adding new functionality, remember the primary design goal: `ping-bulk` must remain a single, self-contained script. Avoid splitting the core logic into multiple files or adding third-party dependencies unless absolutely necessary and agreed upon.
 
@@ -46,8 +47,9 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- Fixed an `OverflowError` bug in `PortMonitor._resolve_port` when standard library `socket.getservbyport` fails with an out-of-bounds port by catching `OverflowError` alongside `OSError`.
 - Refactored the monitor class hierarchy to use a proper abstract base class (`Monitor`) for improved extensibility.
-- Implemented TCP port monitoring via `PortMonitor` and added the `:port <host> <port>` runtime command.
+- Implemented TCP port monitoring via `PortMonitor` and added the `:ping <host>:<port>` syntax.
 - Integrated event logs into the expanded host details overlay with scrolling support.
 - Configured keyboard navigation (Up, Down, Page Up, Page Down) to handle scrolling within the details view.
 - Added ESC to the help text to indicate clearing host selection.

@@ -113,6 +113,7 @@ _HELP_LINES = [
     "  :resolv <ip-pat> <host>  static name→IP mapping (overrides DNS for ping and SSH)",
     "                           ip-pat may use brace expansion; \\N in host = brace group N",
     "                           :ssh user@hostname resolves hostname, preserves username",
+    "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
     "  :ssh [opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
     "  :ssh-begin [opts] <dest> host lines → :ssh [opts] <dest> <host>",
     "  :ssh-end                 close :ssh-begin block (hosts file only)",
@@ -219,6 +220,36 @@ def _expand_brace_group(inner):
             result.append(item)
     return result
 
+
+def parse_target(target):
+    """Parse a target string into a (host, port) tuple.
+
+    Supports:
+      - Hostnames/IPv4 with port: 'example.com:80', '127.0.0.1:443'
+      - Hostnames/IPv4 without port: 'example.com', '127.0.0.1'
+      - IPv6 with brackets and port: '[2001:db8::1]:80'
+      - IPv6 with brackets and no port: '[2001:db8::1]'
+      - Raw IPv6 (no port possible without brackets): '2001:db8::1'
+    """
+    target = target.strip()
+    if not target:
+        return ("", None)
+
+    if target.startswith('['):
+        close_bracket = target.find(']')
+        if close_bracket != -1:
+            host = target[1:close_bracket]
+            remainder = target[close_bracket+1:]
+            if remainder.startswith(':'):
+                port = remainder[1:]
+                return (host, port if port else None)
+            return (host, None)
+
+    if target.count(':') == 1:
+        host, port = target.split(':', 1)
+        return (host, port if port else None)
+
+    return (target, None)
 
 def _expand_host(s):
     """Expand a host/IP string that may contain brace range/list notation.
@@ -737,10 +768,11 @@ class PortMonitor(Monitor):
     attempt a TCP connection.
     """
 
-    def __init__(self, host, port):
+    def __init__(self, host, port, port_map=None):
         self.port = port
         self.port_num = None
         self.port_name = None
+        self._port_map = port_map or {}
         super().__init__(f"{host}:{port}")
         self._ping_host = host
         # Try to resolve port name/number immediately
@@ -749,16 +781,24 @@ class PortMonitor(Monitor):
     def _resolve_port(self):
         try:
             self.port_num = int(self.port)
-            try:
-                self.port_name = socket.getservbyport(self.port_num)
-            except OSError:
-                self.port_name = str(self.port_num)
+            # Check port_map first for custom port→service mapping
+            if self.port_num in self._port_map:
+                self.port_name = self._port_map[self.port_num]
+            else:
+                try:
+                    self.port_name = socket.getservbyport(self.port_num)
+                except (OSError, OverflowError):
+                    self.port_name = str(self.port_num)
         except ValueError:
             self.port_name = self.port
-            try:
-                self.port_num = socket.getservbyname(self.port)
-            except OSError:
-                self.port_num = None
+            # Check port_map first for custom service→port mapping
+            if self.port in self._port_map:
+                self.port_num = self._port_map[self.port]
+            else:
+                try:
+                    self.port_num = socket.getservbyname(self.port)
+                except OSError:
+                    self.port_num = None
 
     def resolve_dns(self):
         """Resolve the host to both its IP address and its hostname."""
@@ -776,6 +816,9 @@ class PortMonitor(Monitor):
 
     def get_display_name(self, dns_mode="off"):
         """Return the display name for this host according to dns_mode."""
+        if dns_mode == "off":
+            return self.host
+
         host_part = self._ping_host
         if dns_mode == "hostname":
             host_part = self.resolved_hostname or self._ping_host
@@ -1498,10 +1541,12 @@ class CmdDef:
                     (e.g. filesystem paths); takes priority over arg_choices when set
     usage         — short argument synopsis shown in help (e.g. '[off|hostname|ip]')
     help          — one-line description shown in the help overlay
+    cli_flags     — tuple of CLI flags (e.g. ('-f', '--file')), if this command can be passed via CLI
+    cli_kwargs    — dict of kwargs to pass to argparse.add_argument() for the cli_flags
     """
-    __slots__ = ('names', 'action', 'arg_choices', 'arg_completer', 'usage', 'help', 'completable')
+    __slots__ = ('names', 'action', 'arg_choices', 'arg_completer', 'usage', 'help', 'completable', 'cli_flags', 'cli_kwargs')
 
-    def __init__(self, names, action, arg_choices=None, usage='', help='', arg_completer=None, completable=True):
+    def __init__(self, names, action, arg_choices=None, usage='', help='', arg_completer=None, completable=True, cli_flags=None, cli_kwargs=None):
         self.names         = names
         self.action        = action
         self.arg_choices   = arg_choices
@@ -1509,6 +1554,8 @@ class CmdDef:
         self.usage         = usage
         self.help          = help
         self.completable   = completable
+        self.cli_flags     = cli_flags
+        self.cli_kwargs    = cli_kwargs
 
 
 def _complete_log_arg(prefix):
@@ -1552,13 +1599,21 @@ CMD_REGISTRY = [
     CmdDef(['q', 'quit'],        '_cmd_quit',      None,
            '',                    'quit the application'),
     CmdDef(['dns'],              '_cmd_dns',        lambda: [m.lower() for m in DNS_MODES],
-           '[off|hostname|ip]',   'cycle or set DNS display mode'),
+           '[off|hostname|ip]',   'cycle or set DNS display mode',
+           cli_flags=('--dns',),
+           cli_kwargs={'metavar': 'MODE', 'choices': [m.lower() for m in DNS_MODES], 'help': f"DNS display mode at startup: {' | '.join(m.lower() for m in DNS_MODES)}"}),
     CmdDef(['stats'],            '_cmd_stats',      lambda: [m.lower() for m in STATS_MODES],
-           '[mode]',              'cycle or set stats column'),
+           '[mode]',              'cycle or set stats column',
+           cli_flags=('--stats',),
+           cli_kwargs={'metavar': 'MODE', 'choices': [m.lower() for m in STATS_MODES], 'help': f"stats column at startup: {' | '.join(m.lower() for m in STATS_MODES)}".replace('%', '%%')}),
     CmdDef(['sort'],             '_cmd_sort',       ['none', 'name', 'status', 'latency'],
-           '[mode]',              'cycle or set sort order'),
+           '[mode]',              'cycle or set sort order',
+           cli_flags=('--sort',),
+           cli_kwargs={'metavar': 'MODE', 'choices': ['none', 'name', 'status', 'latency'], 'help': 'sort order at startup: none | name | status | latency'}),
     CmdDef(['ping-view', 'history', 'hist'], '_cmd_history', lambda: [m.lower() for m in HISTORY_MODES],
-           '[mode]',              'cycle or set history display mode'),
+           '[mode]',              'cycle or set history display mode',
+           cli_flags=('--ping-view',),
+           cli_kwargs={'metavar': 'MODE', 'choices': [m.lower() for m in HISTORY_MODES], 'help': f"ping history display mode at startup: {' | '.join(m.lower() for m in HISTORY_MODES)}"}),
     CmdDef(['set'],              '_cmd_set',        [p.name for p in SET_PARAMS],
            '|'.join(p.name for p in SET_PARAMS) + ' [value]',
            'set any mode or parameter by name; omit value to cycle/show'),
@@ -1570,19 +1625,23 @@ CMD_REGISTRY = [
            '',                    'clear event log'),
     CmdDef(['log'],              '_cmd_log',        None,
            '[file|off]',          'show/set/disable the streaming log file',
-           arg_completer=_complete_log_arg),
+           arg_completer=_complete_log_arg,
+           cli_flags=('-l', '--log-file'),
+           cli_kwargs={'metavar': 'LOGFILE', 'help': 'append event log entries to this file in real time', 'dest': 'log_file'}),
     CmdDef(['saveconfig'],       '_cmd_saveconfig', None,
            '',                    'save current settings to config file'),
     CmdDef(['ping'],             '_cmd_ping',       None,
            '<host>',              'add a new host to monitor',
            arg_completer='_complete_ping_arg'),
-    CmdDef(['port'],             '_cmd_port', None,
-           '<host> <port>',      'monitor a TCP port instead of ICMP ping'),
     CmdDef(['source'],           '_cmd_source',     None,
            '<file>',              'load hosts/commands from file',
-           arg_completer=_complete_path_arg),
+           arg_completer=_complete_path_arg,
+           cli_flags=('-f', '--file'),
+           cli_kwargs={'metavar': 'FILE', 'help': 'hosts file (# comment, ## section header, one host per line)', 'dest': 'file'}),
     CmdDef(['resolv'],           '_cmd_resolv',     None,
            '<ip> <host>',         'static name→IP mapping (overrides DNS for ping and SSH)'),
+    CmdDef(['resolv-port'],      '_cmd_resolv_port', None,
+           '<port> <service>',    'static port→service mapping (overrides default port names from /etc/services)'),
     CmdDef(['ssh'],              '_cmd_ssh',        None,
            '[opts] <dest> <host>', 'remote ping over SSH (BatchMode, no password)'),
     CmdDef(['ssh-begin'],        '_cmd_ssh_begin',  None,
@@ -1619,6 +1678,7 @@ class Application:
         self.entries = []   # ordered display list: PingMonitor | SectionLabel
         self.monitors = []  # pure PingMonitor list for stats, threading, DNS
         self.hosts_map = {}  # static DNS overrides: ip→(ip, hostname) and hostname→(ip, hostname)
+        self.port_map = {}   # static port overrides: port_num→service_name and service_name→port_num
         self.history_size = 86400  # per-host ping history deque size (default 24 h at 1 ping/s)
         self.log_size = 10000
         self.events = deque(maxlen=self.log_size)
@@ -1649,14 +1709,19 @@ class Application:
         self.details_scroll = 0   # Scroll offset for the host details overlay
         self.running = True
         self.threads = []
+        self._start_time = None
 
         for kind, value in entries:
             if kind == 'host':
-                m = PingMonitor(value)
+                host_str, port_str = parse_target(value)
+                if port_str:
+                    m = PortMonitor(host_str, port_str, port_map=self.port_map)
+                else:
+                    m = PingMonitor(host_str)
                 # Apply any :resolv static DNS override that was processed earlier
                 # in the same file (hosts_map is populated by _apply_hosts_entry).
-                if value in self.hosts_map:
-                    ip, hostname = self.hosts_map[value]
+                if host_str in self.hosts_map:
+                    ip, hostname = self.hosts_map[host_str]
                     m.resolved_ip = ip
                     m.resolved_hostname = hostname
                     m.resolv_static = True
@@ -1879,6 +1944,7 @@ class Application:
     def start_monitoring(self):
         """Start all ping threads"""
         self._monitoring_started = True
+        self._start_time = time.monotonic()
         for monitor in self.monitors:
             thread = threading.Thread(target=monitor.ping, daemon=True)
             thread.start()
@@ -2182,6 +2248,10 @@ class Application:
                         history_header += " [↑/↓ navigate, SPACE hide/show, ESC clear]"
                     else:
                         history_header += " [↑/↓ navigate, ENTER details, ESC clear]"
+
+            if self._start_time is not None:
+                elapsed = time.monotonic() - self._start_time
+                history_header += f" [{_format_updown_time(elapsed)}]"
 
             if self.history_offset > 0:
                 history_header += f" [←{self.history_offset}  →live]"
@@ -3034,19 +3104,24 @@ class Application:
 
     def _cmd_ping(self, args=''):
         """Ping a host directly.
-        Usage: :ping <host>
+        Usage: :ping <host>[:port]
         """
         if not args:
             self.add_event("cmd", "ping: missing host argument")
             return
 
-        host = args.split()[0]
+        target = args.split()[0]
+        host, port = parse_target(target)
 
-        if host in [m.host for m in self.monitors]:
-            self.add_event("cmd", f"ping: host '{host}' already monitored")
+        if target in [m.host for m in self.monitors]:
+            self.add_event("cmd", f"ping: host '{target}' already monitored")
             return
 
-        monitor = PingMonitor(host)
+        if port:
+            monitor = PortMonitor(host, port, port_map=self.port_map)
+        else:
+            monitor = PingMonitor(host)
+
         self.monitors.append(monitor)
         self.entries.append(monitor)
 
@@ -3055,35 +3130,8 @@ class Application:
             thread.start()
             self.threads.append(thread)
 
-        self.add_event("cmd", f"ping: added '{host}' to monitor list")
+        self.add_event("cmd", f"ping: added '{target}' to monitor list")
 
-    def _cmd_port(self, args=""):
-        """Monitor a TCP port instead of ICMP ping.
-        Usage: :port <host> <port>
-        """
-        parts = args.split()
-        if len(parts) != 2:
-            self.add_event("cmd", "port: usage: :port <host> <port>")
-            return
-
-        host, port = parts[0], parts[1]
-
-        # Check if already monitored
-        display_name = f"{host}:{port}"
-        if display_name in [m.host for m in self.monitors]:
-            self.add_event("cmd", f"port: '{display_name}' already monitored")
-            return
-
-        monitor = PortMonitor(host, port)
-        self.monitors.append(monitor)
-        self.entries.append(monitor)
-
-        if self._monitoring_started:
-            thread = threading.Thread(target=monitor.ping, daemon=True)
-            thread.start()
-            self.threads.append(thread)
-
-        self.add_event("cmd", f"port: added '{display_name}' to monitor list")
 
     def _cmd_source(self, args=""):
         """Source a file containing hosts and commands.
@@ -3103,11 +3151,18 @@ class Application:
             new_entries = parse_hosts_file(filename)
             for kind, value in new_entries:
                 if kind == 'host':
-                    if value not in [m.host for m in self.monitors]:
-                        m = PingMonitor(value)
+                    host_str, port_str = parse_target(value)
+
+                    target = f"{host_str}:{port_str}" if port_str else host_str
+
+                    if target not in [m.host for m in self.monitors]:
+                        if port_str:
+                            m = PortMonitor(host_str, port_str, port_map=self.port_map)
+                        else:
+                            m = PingMonitor(host_str)
                         # Apply any :resolv static DNS override
-                        if value in self.hosts_map:
-                            ip, hostname = self.hosts_map[value]
+                        if host_str in self.hosts_map:
+                            ip, hostname = self.hosts_map[host_str]
                             m.resolved_ip = ip
                             m.resolved_hostname = hostname
                             m.resolv_static = True
@@ -3308,6 +3363,30 @@ class Application:
                         continue
                     hostname = _apply_backref(hostname_tmpl, captures)
                     self._apply_hosts_entry(expanded_ip, hostname)
+
+    def _cmd_resolv_port(self, args=''):
+        """Apply a static port→service mapping: :resolv-port <port-pattern> <service-template>."""
+        parts = args.split(None, 1)
+        if len(parts) != 2:
+            self.add_event("cmd", "resolv-port: usage: :resolv-port <port> <service>")
+        else:
+            port_pattern, service_tmpl = parts[0], parts[1].strip()
+            try:
+                rows = _expand_host_with_captures(port_pattern)
+            except ValueError as e:
+                self.add_event("cmd", f"resolv-port: brace expansion error: {e}")
+            else:
+                for expanded_port, captures in rows:
+                    try:
+                        port_num = int(expanded_port)
+                    except ValueError:
+                        self.add_event("cmd",
+                            f"resolv-port: '{expanded_port}' is not a valid port number — skipped")
+                        continue
+                    service = _apply_backref(service_tmpl, captures)
+                    # Store bidirectional mapping
+                    self.port_map[port_num] = service
+                    self.port_map[service] = port_num
 
     def _cmd_ssh(self, args=''):
         """Add a remote-ping monitor: :ssh [opts] <dest> <ping-host>."""
@@ -4080,40 +4159,12 @@ hosts file format:
 press '?' inside the app for the full keyboard reference.\
 """,
     )
-    parser.add_argument(
-        '-f', '--file',
-        metavar='FILE',
-        help='hosts file (# comment, ## section header, one host per line)',
-    )
-    parser.add_argument(
-        '-l', '--log-file',
-        metavar='LOGFILE',
-        help='append event log entries to this file in real time',
-    )
-    parser.add_argument(
-        '--dns',
-        metavar='MODE',
-        choices=[m.lower() for m in DNS_MODES],
-        help=f"DNS display mode at startup: {' | '.join(m.lower() for m in DNS_MODES)}",
-    )
-    parser.add_argument(
-        '--stats',
-        metavar='MODE',
-        choices=[m.lower() for m in STATS_MODES],
-        help=f"stats column at startup: {' | '.join(m.lower() for m in STATS_MODES)}".replace('%', '%%'),
-    )
-    parser.add_argument(
-        '--sort',
-        metavar='MODE',
-        choices=['none', 'name', 'status', 'latency'],
-        help='sort order at startup: none | name | status | latency',
-    )
-    parser.add_argument(
-        '--ping-view',
-        metavar='MODE',
-        choices=[m.lower() for m in HISTORY_MODES],
-        help=f"ping history display mode at startup: {' | '.join(m.lower() for m in HISTORY_MODES)}",
-    )
+
+    # Dynamically add arguments from CMD_REGISTRY
+    for cmd in CMD_REGISTRY:
+        if cmd.cli_flags:
+            parser.add_argument(*cmd.cli_flags, **(cmd.cli_kwargs or {}))
+
     parser.add_argument(
         'hosts',
         nargs='*',

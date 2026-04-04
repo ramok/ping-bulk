@@ -27,6 +27,14 @@
 ## Servers
 10.0.2.{1..8}
 
+## TCP Port Monitoring (TCP connection check)
+# Optionally, you can override the resolved port name via :resolv-port
+:resolv-port 8443 alt-https
+example.com:443
+1.1.1.1:53
+1.1.1.1:8443
+google.com:https
+
 ## Public DNS (for connectivity check)
 8.8.8.8
 1.1.1.1

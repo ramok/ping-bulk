@@ -10,5 +10,10 @@
 1.0.0.1   ## Cloudflare DNS secondary
 9.9.9.9   ## Quad9 DNS
 
+## Public Services
+google.com
+gmail.com:443
+youtube.com:https
+
 ## Local network
 192.168.1.1   ## gateway
