@@ -115,7 +115,19 @@ def pb(app_path):
 # Dependency check fixture
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope='session')
+@pytest.fixture(autouse=True)
+def check_integration_deps_for_tmux_tests(request):
+    """Automatically check dependencies for any test that relies on TmuxSession."""
+    needs_tmux = False
+    if any(f.startswith('tmux_app') for f in request.fixturenames):
+        needs_tmux = True
+    if hasattr(request.module, 'TmuxSession'):
+        needs_tmux = True
+
+    if needs_tmux:
+        request.getfixturevalue('check_integration_deps')
+
+@pytest.fixture(scope='function')
 def check_integration_deps():
     """Skip integration tests when required system tools are not on PATH.
 

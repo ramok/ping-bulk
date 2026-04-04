@@ -17,11 +17,8 @@ import pytest
 # Helper
 # ---------------------------------------------------------------------------
 
-def write_hosts(tmp_path, content):
-    """Write *content* to a temp file and return its path (str)."""
-    p = tmp_path / 'hosts.txt'
-    p.write_text(textwrap.dedent(content))
-    return str(p)
+from utils.hosts_helper import write_hosts
+
 
 
 class TestApplyNamedBackref:
