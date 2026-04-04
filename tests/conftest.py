@@ -33,6 +33,38 @@ import shutil
 import sys
 import pytest
 
+def pytest_sessionstart(session):
+    """Cleanup any stale tmux sessions before the test run."""
+    if hasattr(session.config, "workerinput"):
+        return  # Skip cleanup in worker nodes
+    import subprocess
+    result = subprocess.run(
+        ['tmux', 'ls', '-F', '#{session_name}'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        for name in result.stdout.splitlines():
+            if name.startswith('ping-bulk-test'):
+                subprocess.run(['tmux', 'kill-session', '-t', name], check=False)
+
+def pytest_sessionfinish(session, exitstatus):
+    """Cleanup any stale tmux sessions after the test run."""
+    if hasattr(session.config, "workerinput"):
+        return  # Skip cleanup in worker nodes
+    import subprocess
+    result = subprocess.run(
+        ['tmux', 'ls', '-F', '#{session_name}'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        for name in result.stdout.splitlines():
+            if name.startswith('ping-bulk-test'):
+                subprocess.run(['tmux', 'kill-session', '-t', name], check=False)
+
 # Make the tests/ directory importable without installing anything.
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -140,7 +172,7 @@ import uuid
 @pytest.fixture
 def tmux_app_40(app_path: str, check_integration_deps):
     """ping-bulk in a 120×40 window.  Help overlay shows a scroll indicator."""
-    sess_name = f'ping-bulk-test-40-{uuid.uuid4().hex[:8]}'
+    sess_name = f'ping-bulk-test-40'
     sess = _make_app_session(sess_name, app_path, width=120, height=40)
     yield sess
     sess.kill()
@@ -149,7 +181,7 @@ def tmux_app_40(app_path: str, check_integration_deps):
 @pytest.fixture
 def tmux_app_50(app_path: str, check_integration_deps):
     """ping-bulk in a 120×50 window.  Help overlay still needs scroll (max_scroll=2)."""
-    sess_name = f'ping-bulk-test-50-{uuid.uuid4().hex[:8]}'
+    sess_name = f'ping-bulk-test-50'
     sess = _make_app_session(sess_name, app_path, width=120, height=50)
     yield sess
     sess.kill()
@@ -158,7 +190,7 @@ def tmux_app_50(app_path: str, check_integration_deps):
 @pytest.fixture
 def tmux_app_53(app_path: str, check_integration_deps):
     """ping-bulk in a 120×NO_SCROLL_HEIGHT window.  All help lines fit; no scroll indicator."""
-    sess_name = f'ping-bulk-test-53-{uuid.uuid4().hex[:8]}'
+    sess_name = f'ping-bulk-test-53'
     sess = _make_app_session(sess_name, app_path, width=120, height=NO_SCROLL_HEIGHT)
     yield sess
     sess.kill()
@@ -167,7 +199,7 @@ def tmux_app_53(app_path: str, check_integration_deps):
 @pytest.fixture
 def tmux_app_15(app_path: str, check_integration_deps):
     """ping-bulk in a 120×15 window.  Very short; larger scroll range."""
-    sess_name = f'ping-bulk-test-15-{uuid.uuid4().hex[:8]}'
+    sess_name = f'ping-bulk-test-15'
     sess = _make_app_session(sess_name, app_path, width=120, height=15)
     yield sess
     sess.kill()
@@ -186,7 +218,7 @@ def tmux_app_with_section(app_path: str, check_integration_deps, tmp_path):
     config_file.write_text(config_content)
 
     # Start session and load the config file
-    sess_name = f'ping-bulk-test-section-{uuid.uuid4().hex[:8]}'
+    sess_name = f'ping-bulk-test-section'
     sess = TmuxSession(sess_name, width=120, height=40)
     try:
         sess.send_literal(f'python3 {app_path} -f {config_file}')

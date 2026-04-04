@@ -21,25 +21,27 @@ class TmuxSession:
     """Manage a single detached tmux session for integration testing."""
 
     def __init__(self, name: str, width: int = 120, height: int = 40):
-        self.name = name
+        import uuid
+        # Always use a unique session ID by appending a uuid
+        self.name = f"{name}-{uuid.uuid4().hex[:8]}"
         self.width = width
         self.height = height
 
         # Kill any stale session with this name left over from a previous
         # test run that crashed without cleanup.
         stale = subprocess.run(
-            ['tmux', 'has-session', '-t', name],
+            ['tmux', 'has-session', '-t', self.name],
             check=False,
         )
         if stale.returncode == 0:
-            subprocess.run(['tmux', 'kill-session', '-t', name], check=False)
+            subprocess.run(['tmux', 'kill-session', '-t', self.name], check=False)
 
         # Create a new detached session with the requested dimensions.
         subprocess.run(
             [
                 'tmux', 'new-session',
                 '-d',            # detached
-                '-s', name,
+                '-s', self.name,
                 '-x', str(width),
                 '-y', str(height),
             ],
@@ -51,7 +53,7 @@ class TmuxSession:
         subprocess.run(
             [
                 'tmux', 'resize-window',
-                '-t', name,
+                '-t', self.name,
                 '-x', str(width),
                 '-y', str(height),
             ],
@@ -160,10 +162,27 @@ class TmuxSession:
             check=True,
         )
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+    def start_app(self, args: list[str]) -> None:
+        """Start the ping-bulk application with the given arguments."""
+        import os
+        self.send_keys(f"python3 {os.path.abspath('ping-bulk')} {' '.join(args)}")
+        self.send_keys("Enter")
+        # Give the app a moment to start
+        time.sleep(0.5)
+
     def kill(self) -> None:
         """Kill the tmux session.  Safe to call even if already dead."""
         subprocess.run(
             ['tmux', 'kill-session', '-t', self.name],
             check=False,
         )
+
+    def stop(self) -> None:
+        self.kill()
 
