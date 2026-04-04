@@ -15,6 +15,7 @@ import sys
 import textwrap
 import threading
 import time
+from abc import ABC, abstractmethod
 from collections import deque
 from datetime import datetime
 from threading import Thread
@@ -93,7 +94,7 @@ _HELP_LINES = [
     "  :              open command line",
     "  ?              show this help",
     "  ← / →          scroll history ← older (step) / → live (step)",
-  "  Ctrl+← / Ctrl+→  scroll history ← older (page) / → live (page)",
+    "  Ctrl+← / Ctrl+→  scroll history ← older (page) / → live (page)",
     "  ↑ / ↓          scroll event log up / down",
     "  PgUp / PgDn    scroll event log by page",
     "─" * _HELP_INNER_W,
@@ -517,7 +518,8 @@ def _history_char(val, mode):
         return '>' if scaled > 9 else str(scaled)
     return '.'  # 'success' mode
 
-class PingMonitor:
+
+class Monitor(ABC):
     def __init__(self, host):
         self.host = host
         self.resolved_ip = None        # IP address resolved from a hostname
@@ -531,36 +533,78 @@ class PingMonitor:
         self.last_state = None
         self.down_since = None  # monotonic timestamp of when the host went down
         self.up_since = None    # monotonic timestamp of when the host came up
-        self.ping_count = 0    # total pings ever sent (never capped, unlike history deque)
+        self.ping_count = 0     # total pings ever sent (never capped, unlike history deque)
         self.running = True
         self.lock = threading.Lock()
         self.error = None          # str when a fatal process-level error occurred, else None
         self.error_logged = False  # True once the error has been added to the event log
         self._proc = None          # active Popen handle for the persistent ping subprocess
-        self.resolv_static = False  # True when a :resolv static mapping overrides DNS
+        self.resolv_static = False # True when a :resolv static mapping overrides DNS
 
     def resolve_dns(self):
-        """Resolve the host to both its IP address and its hostname.
-
-        resolved_ip       — forward DNS: hostname → IP (or self if already an IP)
-        resolved_hostname — reverse DNS: IP → hostname (or self if already a hostname)
-        Both fields are populated in a single call so switching modes never
-        requires a second resolution thread.
-        """
-        # Forward: resolve to IP address
+        """Resolve the host to both its IP address and its hostname."""
         try:
             ip = socket.gethostbyname(self.host)
             self.resolved_ip = ip
         except Exception:
             self.resolved_ip = None
 
-        # Reverse: resolve to hostname via the IP we just found (or the host itself)
         lookup_addr = self.resolved_ip if self.resolved_ip else self.host
         try:
             self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
         except Exception:
             self.resolved_hostname = None
 
+    def get_display_name(self, dns_mode="off"):
+        """Return the display name for this host according to dns_mode."""
+        if dns_mode == "hostname":
+            return self.resolved_hostname or self.host
+        if dns_mode == "ip":
+            return self.resolved_ip or self.host
+        return self.host
+
+    def get_history_string(self, length=50, offset=0, mode="success", cell_width=1):
+        """Get history as a string of given length ending offset steps from the newest sample."""
+        with self.lock:
+            history_list = list(self.history)
+            total = len(history_list)
+            end = total - offset
+            start = end - length
+            result = []
+            for i in range(start, end):
+                if i < 0 or i >= total:
+                    cell = " " * cell_width if cell_width > 1 else " "
+                else:
+                    val = history_list[i]
+                    if cell_width > 1:
+                        num_w = cell_width - 1
+                        if val is None:
+                            cell = "X" * num_w + " "
+                        elif val == "ERR":
+                            cell = "?" * num_w + " "
+                        else:
+                            capped = min(int(round(val)), 10**num_w - 1)
+                            cell = f"{capped:>{num_w}} "
+                    else:
+                        cell = _history_char(val, mode)
+                result.append(cell)
+            return "".join(reversed(result))
+
+    def stop(self):
+        """Stop the ping loop and terminate the subprocess cleanly."""
+        self.running = False
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+    @abstractmethod
+    def ping(self):
+        pass
+
+
+class PingMonitor(Monitor):
     def _build_ping_cmd(self):
         """Return the command list used to launch the ping subprocess.
 
@@ -685,63 +729,129 @@ class PingMonitor:
         text = stderr_text.lower()
         return any(pattern in text for pattern in _FATAL_PING_ERRORS)
 
-    def get_history_string(self, length=50, offset=0, mode='success', cell_width=1):
-        """Get history as a string of given length ending offset steps from the newest sample.
-        offset=0     -> most recent samples (live view)
-        offset>0     -> scroll back into the past
-        mode         -> one of HISTORY_MODES ('success', 'rtt', 'scaled')
-        cell_width   -> characters per ping cell; >1 used by 'rtt' mode only
 
-        When cell_width > 1 (rtt mode) each cell is exactly cell_width characters wide:
-          success  -> right-justified integer in (cell_width-1) chars + one trailing space
-          timeout  -> 'X' repeated (cell_width-1) times + one trailing space
-          error    -> '?' repeated (cell_width-1) times + one trailing space
-          blank    -> cell_width spaces
-        The returned string therefore has length * cell_width characters.
-        """
-        with self.lock:
-            history_list = list(self.history)
-            total = len(history_list)
-            end = total - offset
-            start = end - length
-            result = []
-            for i in range(start, end):
-                if i < 0 or i >= total:
-                    cell = ' ' * cell_width if cell_width > 1 else ' '
-                else:
-                    val = history_list[i]
-                    if cell_width > 1:
-                        # rtt mode: right-justify ms value in a fixed-width field
-                        num_w = cell_width - 1  # digits field width
-                        if val is None:
-                            cell = 'X' * num_w + ' '
-                        elif val == 'ERR':
-                            cell = '?' * num_w + ' '
-                        else:
-                            # Cap at the max representable value so the field never overflows
-                            # (Python's str.format does NOT truncate, it just widens).
-                            capped = min(int(round(val)), 10 ** num_w - 1)
-                            cell = f"{capped:>{num_w}} "
-                    else:
-                        cell = _history_char(val, mode)
-                result.append(cell)
-            return ''.join(reversed(result))
+class PortMonitor(Monitor):
+    """A PingMonitor that checks a TCP port instead of ICMP ping.
 
-    def get_display_name(self, dns_mode='off'):
-        """Return the display name for this host according to dns_mode.
+    Instead of spawning a subprocess, it uses Python's socket module to
+    attempt a TCP connection.
+    """
 
-        off      — return self.host exactly as given on the command line
-        hostname — return resolved_hostname if available, else fall back to host
-        ip       — return resolved_ip if available, else fall back to host
-        """
-        if dns_mode == 'hostname':
-            return self.resolved_hostname or self.host
-        if dns_mode == 'ip':
-            return self.resolved_ip or self.host
-        return self.host  # 'off'
+    def __init__(self, host, port):
+        self.port = port
+        self.port_num = None
+        self.port_name = None
+        super().__init__(f"{host}:{port}")
+        self._ping_host = host
+        # Try to resolve port name/number immediately
+        self._resolve_port()
+
+    def _resolve_port(self):
+        try:
+            self.port_num = int(self.port)
+            try:
+                self.port_name = socket.getservbyport(self.port_num)
+            except OSError:
+                self.port_name = str(self.port_num)
+        except ValueError:
+            self.port_name = self.port
+            try:
+                self.port_num = socket.getservbyname(self.port)
+            except OSError:
+                self.port_num = None
+
+    def resolve_dns(self):
+        """Resolve the host to both its IP address and its hostname."""
+        try:
+            ip = socket.gethostbyname(self._ping_host)
+            self.resolved_ip = ip
+        except Exception:
+            self.resolved_ip = None
+
+        lookup_addr = self.resolved_ip if self.resolved_ip else self._ping_host
+        try:
+            self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
+        except Exception:
+            self.resolved_hostname = None
+
+    def get_display_name(self, dns_mode="off"):
+        """Return the display name for this host according to dns_mode."""
+        host_part = self._ping_host
+        if dns_mode == "hostname":
+            host_part = self.resolved_hostname or self._ping_host
+        elif dns_mode == "ip":
+            host_part = self.resolved_ip or self._ping_host
+
+        port_part = self.port
+        if dns_mode == "hostname" and self.port_name:
+            port_part = self.port_name
+        elif dns_mode == "ip" and self.port_num:
+            port_part = str(self.port_num)
+
+        return f"{host_part}:{port_part}"
+
+    def ping(self):
+        """Continuously check the TCP port using socket connections."""
+
+        if self.port_num is None:
+            self.error = f"unknown port: {self.port}"
+            with self.lock:
+                self.history.append("ERR")
+            return
+
+        while self.running:
+            target = (
+                self.resolved_ip
+                if (self.resolv_static and self.resolved_ip)
+                else self._ping_host
+            )
+
+            start_time = time.monotonic()
+            success = False
+
+            try:
+                # 1 second timeout for the connection attempt
+                with socket.create_connection((target, self.port_num), timeout=1.0):
+                    success = True
+            except (ConnectionRefusedError, TimeoutError, OSError):
+                success = False
+            except Exception as exc:
+                # Other errors might be fatal
+                self.error = str(exc)
+                with self.lock:
+                    self.history.append("ERR")
+                break
+
+            latency_ms = (time.monotonic() - start_time) * 1000.0
+
+            if success:
+                with self.lock:
+                    self.latency = latency_ms
+                    self.alive = True
+                    self.history.append(latency_ms)
+                    self.rx_count += 1
+                    self.latencies.append(latency_ms)
+            else:
+                with self.lock:
+                    self.alive = False
+                    self.latency = None
+                    self.history.append(None)
+                    self.xx_count += 1
+
+            self.ping_count += 1
+
+            # Sleep for exactly 1 second minus the time taken to check,
+            # ensuring roughly 1 check per second like standard ping.
+            sleep_time = max(0.1, 1.0 - (latency_ms / 1000.0))
+
+            # If not running anymore, don't sleep
+            if not self.running:
+                break
+
+            time.sleep(sleep_time)
 
 
-class SshPingMonitor(PingMonitor):
+class SshPingMonitor(Monitor):
     """A PingMonitor that runs ping remotely over an SSH connection.
 
     Connects to the remote host using 'ssh -o BatchMode=yes' (no interactive
@@ -946,6 +1056,89 @@ class SshPingMonitor(PingMonitor):
         """Return True if stderr_text contains a known non-retryable SSH or ping error."""
         text = stderr_text.lower()
         return any(pattern in text for pattern in _FATAL_SSH_ERRORS + _FATAL_PING_ERRORS)
+
+    def ping(self):
+        """Continuously ping the host using a single persistent subprocess.
+
+        Launches the remote ping command and reads its stdout line-by-line,
+        updating stats on each success ('time=') or -O timeout
+        ('no answer yet') line.  The '-D' Unix-timestamp prefix is stripped
+        before parsing.
+        """
+        backoff = 1  # seconds; doubles on each unexpected exit, capped at 30
+
+        while self.running:
+            try:
+                self._proc = subprocess.Popen(
+                    self._build_ping_cmd(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
+            except Exception as exc:
+                self.error = str(exc)
+                with self.lock:
+                    self.history.append("ERR")
+                break
+
+            got_output = False
+
+            for raw_line in self._proc.stdout:
+                if not self.running:
+                    break
+
+                line = raw_line.rstrip()
+
+                if line.startswith("["):
+                    close = line.find("]")
+                    if close != -1:
+                        line = line[close + 2 :]
+
+                if "time=" in line:
+                    try:
+                        latency = float(line.split("time=")[1].split()[0])
+                    except (IndexError, ValueError):
+                        continue
+                    with self.lock:
+                        self.latency = latency
+                        self.alive = True
+                        self.history.append(latency)
+                        self.rx_count += 1
+                        self.latencies.append(latency)
+                    self.ping_count += 1
+                    got_output = True
+                    backoff = 1
+                elif "no answer yet" in line:
+                    with self.lock:
+                        self.alive = False
+                        self.latency = None
+                        self.history.append(None)
+                        self.xx_count += 1
+                    self.ping_count += 1
+                    got_output = True
+                    backoff = 1
+
+            if not self.running:
+                break
+
+            try:
+                stderr_text = self._proc.stderr.read()
+            except Exception:
+                stderr_text = ""
+            self._proc.wait()
+
+            if self._is_fatal_error(stderr_text):
+                self.error = stderr_text.strip()
+                with self.lock:
+                    self.history.append("ERR")
+                break
+
+            if not got_output:
+                pass
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
 
 class SectionLabel:
@@ -1383,6 +1576,8 @@ CMD_REGISTRY = [
     CmdDef(['ping'],             '_cmd_ping',       None,
            '<host>',              'add a new host to monitor',
            arg_completer='_complete_ping_arg'),
+    CmdDef(['port'],             '_cmd_port', None,
+           '<host> <port>',      'monitor a TCP port instead of ICMP ping'),
     CmdDef(['source'],           '_cmd_source',     None,
            '<file>',              'load hosts/commands from file',
            arg_completer=_complete_path_arg),
@@ -2347,7 +2542,7 @@ class Application:
         if self.log_offset == 0:
             # Live tail mode
             visible = event_list[-page_size:]
-            header = "Events [SPACE to set \"seen\" mark]"
+            header = 'Events [SPACE to set "seen" mark]'
             if overflows:
                 header += " [↑/PgUp to scroll]"
         else:
@@ -2862,7 +3057,35 @@ class Application:
 
         self.add_event("cmd", f"ping: added '{host}' to monitor list")
 
-    def _cmd_source(self, args=''):
+    def _cmd_port(self, args=""):
+        """Monitor a TCP port instead of ICMP ping.
+        Usage: :port <host> <port>
+        """
+        parts = args.split()
+        if len(parts) != 2:
+            self.add_event("cmd", "port: usage: :port <host> <port>")
+            return
+
+        host, port = parts[0], parts[1]
+
+        # Check if already monitored
+        display_name = f"{host}:{port}"
+        if display_name in [m.host for m in self.monitors]:
+            self.add_event("cmd", f"port: '{display_name}' already monitored")
+            return
+
+        monitor = PortMonitor(host, port)
+        self.monitors.append(monitor)
+        self.entries.append(monitor)
+
+        if self._monitoring_started:
+            thread = threading.Thread(target=monitor.ping, daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+        self.add_event("cmd", f"port: added '{display_name}' to monitor list")
+
+    def _cmd_source(self, args=""):
         """Source a file containing hosts and commands.
         Usage: :source <file>
         """

@@ -20,11 +20,13 @@ The repository is structured to keep the core application as a single deployable
   - A terminal with color support.
 - **Testing**: `pytest`, `pytest-xdist` (see `requirements-dev.txt`).
 - **Documentation**: `docutils` (optional, for building man pages and HTML docs).
+- **Formatters**: **never** use formatters such as ruff to fix code
 
 ## 4. Key Features & Functionality
 - **Parallel Monitoring**: Each host is monitored in its own background thread with a persistent `ping` subprocess, ensuring high concurrency and responsive UI.
 - **Interactive UI**: Users can navigate the host list with arrow keys, view detailed stats, scroll history, toggle display modes (DNS, stats columns, history view), and fold sections.
 - **SSH Monitoring**: The ability to run `ping` on a remote machine via `ssh` and aggregate the results alongside local targets.
+- **TCP Port Monitoring**: Ability to monitor connectivity to specific TCP ports (e.g., `example.com:80`).
 - **Advanced Configuration**: Supports command-line arguments and robust "hosts files" with directives for brace expansion (`{1..50}`), loop blocks (`:for`/`:done`), and DNS overrides (`:resolv`).
 - **Persistent Configuration**: User preferences are saved in `~/.config/ping-bulk/config`.
 
@@ -44,7 +46,48 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
-- Implemented an expanded host details overlay with scrolling and integrated event logs.
+- Refactored the monitor class hierarchy to use a proper abstract base class (`Monitor`) for improved extensibility.
+- Implemented TCP port monitoring via `PortMonitor` and added the `:port <host> <port>` runtime command.
+- Integrated event logs into the expanded host details overlay with scrolling support.
 - Configured keyboard navigation (Up, Down, Page Up, Page Down) to handle scrolling within the details view.
 - Added ESC to the help text to indicate clearing host selection.
+
+## 9. Monitor Class Architecture
+
+The monitor classes use an abstract base class pattern to unify ICMP and TCP monitoring logic.
+
+### Structure
+- `Monitor` (ABC) - Abstract base class with common attributes and shared methods.
+- `PingMonitor(Monitor)` - Standard ICMP ping implementation using system `ping`.
+- `PortMonitor(Monitor)` - TCP port monitoring using Python's `socket.create_connection`.
+- `SshPingMonitor(Monitor)` - SSH-based remote ping monitoring.
+
+### Method Categorization
+
+*Abstract methods (implemented by subclasses):*
+- `ping()` - Main monitoring loop.
+- `_build_ping_cmd()` - Build command for subprocess (used by `PingMonitor` and `SshPingMonitor`).
+- `_is_fatal_error(stderr_text)` - Determine if an error is non-retryable.
+
+*Shared/Overridable methods (in `Monitor` base class):*
+- `resolve_dns()` - Resolve host to IP/hostname.
+- `get_display_name(dns_mode)` - Format display name according to DNS mode.
+- `get_history_string(length, offset, mode, cell_width)` - Format ping history visualization.
+- `stop()` - Stop monitoring and cleanup.
+
+### Common Attributes (in `Monitor` base class)
+- `host`: Target hostname/IP or display name.
+- `resolved_ip`: Forward DNS resolution result.
+- `resolved_hostname`: Reverse DNS resolution result.
+- `alive`: Current status (True/False/None).
+- `latency`: Last measured latency in ms.
+- `history`: deque of ping results.
+- `latencies`: List of all successful latencies.
+- `rx_count`, `xx_count`, `ping_count`: Statistics counters.
+- `last_state`, `down_since`, `up_since`: State tracking timestamps.
+- `running`: Control flag for monitoring thread.
+- `lock`: Thread synchronization.
+- `error`, `error_logged`: Error tracking for fatal process errors.
+- `_proc`: Subprocess handle (if applicable).
+- `resolv_static`: Flag for static DNS mappings.
 
