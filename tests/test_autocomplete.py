@@ -110,7 +110,7 @@ class TestGetCompletions:
     def test_partial_prefix_s_filters_to_matching_commands(self, app):
         """'s' prefix must match saveconfig, seen, set, sort, ssh, stats (and no others)."""
         result = app._get_completions('s')
-        assert set(result) == {'saveconfig', 'seen', 'set', 'sort', 'ssh', 'stats'}, (
+        assert set(result) == {'saveconfig', 'seen', 'set', 'sort', 'source', 'ssh', 'stats'}, (
             f"Unexpected results for 's': {sorted(result)}"
         )
 

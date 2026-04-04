@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
+import argparse
+import ctypes
+import ctypes.util
 import curses
+import glob as _glob
+import itertools
 import math
 import os
+import re
 import shlex
+import socket
 import subprocess
+import sys
+import textwrap
 import threading
 import time
-import sys
-import socket
 from collections import deque
 from datetime import datetime
+from threading import Thread
 
 # Stats column modes cycled with [s]; 'off' means hidden
 STATS_MODES = ['off', 'Down', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', 'All']
@@ -91,6 +99,8 @@ _HELP_LINES = [
     "─" * _HELP_INNER_W,
     "  Commands",
     "  :q  :quit                quit",
+    "  :ping <host>             add a new host to monitor",
+    "  :source <file>           load hosts/commands from file",
     f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
     "                           set display modes; omit value to cycle/show",
     "                           log-size / history-size: numeric value only",
@@ -191,8 +201,6 @@ def _expand_brace_group(inner):
       - empty group: {}
       - empty item:  {a,,b}  or  {,}  (trailing/leading/consecutive comma)
     """
-    import re
-
     if not inner:
         raise ValueError("empty brace group '{}'")
 
@@ -1334,6 +1342,18 @@ def _complete_log_arg(prefix):
     return results
 
 
+def _complete_path_arg(prefix):
+    import glob as _glob
+    results = []
+    pattern = prefix + '*'
+    try:
+        matches = _glob.glob(pattern)
+    except Exception:
+        matches = []
+    for m in sorted(matches):
+        results.append(m + '/' if os.path.isdir(m) else m)
+    return results
+
 # Master command registry — single source of truth for names, handlers, and completions.
 CMD_REGISTRY = [
     CmdDef(['q', 'quit'],        '_cmd_quit',      None,
@@ -1360,6 +1380,12 @@ CMD_REGISTRY = [
            arg_completer=_complete_log_arg),
     CmdDef(['saveconfig'],       '_cmd_saveconfig', None,
            '',                    'save current settings to config file'),
+    CmdDef(['ping'],             '_cmd_ping',       None,
+           '<host>',              'add a new host to monitor',
+           arg_completer='_complete_ping_arg'),
+    CmdDef(['source'],           '_cmd_source',     None,
+           '<file>',              'load hosts/commands from file',
+           arg_completer=_complete_path_arg),
     CmdDef(['resolv'],           '_cmd_resolv',     None,
            '<ip> <host>',         'static name→IP mapping (overrides DNS for ping and SSH)'),
     CmdDef(['ssh'],              '_cmd_ssh',        None,
@@ -1607,6 +1633,8 @@ class Application:
             arg_prefix = parts[1] if len(parts) == 2 else ''
             cmd_def = _CMD_MAP.get(cmd)
             if cmd_def and cmd_def.arg_completer is not None:
+                if isinstance(cmd_def.arg_completer, str):
+                    return getattr(self, cmd_def.arg_completer)(arg_prefix)
                 return cmd_def.arg_completer(arg_prefix)
             if cmd_def and cmd_def.arg_choices is not None:
                 arg_prefix_lower = arg_prefix.lower()
@@ -1644,6 +1672,14 @@ class Application:
             new_text = text[:last_space + 1] + candidate
         c['chars'] = list(new_text)
         c['cursor'] = len(new_text)
+
+    def _complete_ping_arg(self, prefix):
+        """Return Tab-completion candidates for the :ping command argument.
+
+        Matches against statically mapped IPs and hostnames (from :resolv).
+        """
+        prefix_lower = prefix.lower()
+        return sorted(k for k in self.hosts_map if k.lower().startswith(prefix_lower))
 
     def start_monitoring(self):
         """Start all ping threads"""
@@ -1828,6 +1864,7 @@ class Application:
         ]
         menu_items.extend([
             ("[C]lear log", False),
+            ("help:[?]", False),
             ("[q]uit", False),
         ])
 
@@ -2799,6 +2836,75 @@ class Application:
     def _cmd_quit(self, args=''):
         """Quit the application."""
         self.running = False
+
+    def _cmd_ping(self, args=''):
+        """Ping a host directly.
+        Usage: :ping <host>
+        """
+        if not args:
+            self.add_event("cmd", "ping: missing host argument")
+            return
+
+        host = args.split()[0]
+
+        if host in [m.host for m in self.monitors]:
+            self.add_event("cmd", f"ping: host '{host}' already monitored")
+            return
+
+        monitor = PingMonitor(host)
+        self.monitors.append(monitor)
+        self.entries.append(monitor)
+
+        if self._monitoring_started:
+            thread = threading.Thread(target=monitor.ping, daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+        self.add_event("cmd", f"ping: added '{host}' to monitor list")
+
+    def _cmd_source(self, args=''):
+        """Source a file containing hosts and commands.
+        Usage: :source <file>
+        """
+        if not args:
+            self.add_event("cmd", "source: missing file argument")
+            return
+
+        filename = args.strip()
+
+        if not os.path.exists(filename):
+            self.add_event("cmd", f"source: file '{filename}' not found")
+            return
+
+        try:
+            new_entries = parse_hosts_file(filename)
+            for kind, value in new_entries:
+                if kind == 'host':
+                    if value not in [m.host for m in self.monitors]:
+                        m = PingMonitor(value)
+                        # Apply any :resolv static DNS override
+                        if value in self.hosts_map:
+                            ip, hostname = self.hosts_map[value]
+                            m.resolved_ip = ip
+                            m.resolved_hostname = hostname
+                            m.resolv_static = True
+                        self.monitors.append(m)
+                        self.entries.append(m)
+                        if self._monitoring_started:
+                            thread = threading.Thread(target=m.ping, daemon=True)
+                            thread.start()
+                            self.threads.append(thread)
+                elif kind == 'section':
+                    self.entries.append(SectionLabel(value))
+                elif kind == 'cmd':
+                    self._dispatch_cmd(value)
+                elif kind == 'warn':
+                    self.add_event("hosts", f"warning: {value}")
+                elif kind == 'error':
+                    self.add_event("hosts", f"expansion error: {value}")
+            self.add_event("cmd", f"source: loaded '{filename}'")
+        except Exception as e:
+            self.add_event("cmd", f"source error: {e}")
 
     def _cmd_dns(self, args=''):
         """Cycle (no arg) or set DNS display mode."""
@@ -3809,11 +3915,22 @@ def main(stdscr, args):
             print(f"ping-bulk: cannot open '{args.file}': {e}", file=sys.stderr)
             return
 
+    seen_cli_hosts = set()
     for host in args.hosts:
         if host.startswith(':'):
             entries.append(('cmd', host))
         else:
-            entries.append(('host', host))
+            try:
+                expanded = _expand_host(host)
+            except ValueError as e:
+                entries.append(('error', str(e)))
+            else:
+                for h in expanded:
+                    if h in seen_cli_hosts:
+                        entries.append(('warn', f"duplicate host ignored: {h}"))
+                    else:
+                        seen_cli_hosts.add(h)
+                        entries.append(('host', h))
 
     if not entries:
         print("ping-bulk: no hosts to monitor", file=sys.stderr)

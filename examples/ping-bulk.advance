@@ -61,3 +61,10 @@
 :ssh ops@remote-b 10.20.0.1
 :ssh ops@remote-b 10.20.0.{2..5}
 
+# ── Dynamic Additions ──────────────────────────────────────────────────────
+# You can also dynamically source other config files or add specific hosts directly
+# from within this script or interactively at runtime.
+#
+:ping 1.0.0.1
+:source ./examples/ping-bulk.simple
+

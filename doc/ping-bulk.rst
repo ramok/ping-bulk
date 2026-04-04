@@ -202,6 +202,12 @@ Configuration
 Hosts and DNS
 -------------
 
+``:ping <host>``
+    Add a new host to monitor interactively.
+
+``:source <file>``
+    Load hosts and commands from the specified file.
+
 ``:resolv <ip-pattern> <hostname-template>``
     Register a static name↔IP mapping.  *ip-pattern* may use brace
     expansion.  Back-reference placeholders in *hostname-template* are
