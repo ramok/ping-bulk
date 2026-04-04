@@ -131,6 +131,8 @@ def _make_app_session(name: str, app_path: str, width: int, height: int) -> Tmux
     return sess
 
 
+import uuid
+
 # ---------------------------------------------------------------------------
 # Per-test fixtures (function scope — each test gets a fresh session)
 # ---------------------------------------------------------------------------
@@ -138,7 +140,8 @@ def _make_app_session(name: str, app_path: str, width: int, height: int) -> Tmux
 @pytest.fixture
 def tmux_app_40(app_path: str, check_integration_deps):
     """ping-bulk in a 120×40 window.  Help overlay shows a scroll indicator."""
-    sess = _make_app_session('ping-bulk-test-40', app_path, width=120, height=40)
+    sess_name = f'ping-bulk-test-40-{uuid.uuid4().hex[:8]}'
+    sess = _make_app_session(sess_name, app_path, width=120, height=40)
     yield sess
     sess.kill()
 
@@ -146,7 +149,8 @@ def tmux_app_40(app_path: str, check_integration_deps):
 @pytest.fixture
 def tmux_app_50(app_path: str, check_integration_deps):
     """ping-bulk in a 120×50 window.  Help overlay still needs scroll (max_scroll=2)."""
-    sess = _make_app_session('ping-bulk-test-50', app_path, width=120, height=50)
+    sess_name = f'ping-bulk-test-50-{uuid.uuid4().hex[:8]}'
+    sess = _make_app_session(sess_name, app_path, width=120, height=50)
     yield sess
     sess.kill()
 
@@ -154,7 +158,8 @@ def tmux_app_50(app_path: str, check_integration_deps):
 @pytest.fixture
 def tmux_app_53(app_path: str, check_integration_deps):
     """ping-bulk in a 120×NO_SCROLL_HEIGHT window.  All help lines fit; no scroll indicator."""
-    sess = _make_app_session('ping-bulk-test-53', app_path, width=120, height=NO_SCROLL_HEIGHT)
+    sess_name = f'ping-bulk-test-53-{uuid.uuid4().hex[:8]}'
+    sess = _make_app_session(sess_name, app_path, width=120, height=NO_SCROLL_HEIGHT)
     yield sess
     sess.kill()
 
@@ -162,7 +167,8 @@ def tmux_app_53(app_path: str, check_integration_deps):
 @pytest.fixture
 def tmux_app_15(app_path: str, check_integration_deps):
     """ping-bulk in a 120×15 window.  Very short; larger scroll range."""
-    sess = _make_app_session('ping-bulk-test-15', app_path, width=120, height=15)
+    sess_name = f'ping-bulk-test-15-{uuid.uuid4().hex[:8]}'
+    sess = _make_app_session(sess_name, app_path, width=120, height=15)
     yield sess
     sess.kill()
 
@@ -180,7 +186,8 @@ def tmux_app_with_section(app_path: str, check_integration_deps, tmp_path):
     config_file.write_text(config_content)
 
     # Start session and load the config file
-    sess = TmuxSession('ping-bulk-test-section', width=120, height=40)
+    sess_name = f'ping-bulk-test-section-{uuid.uuid4().hex[:8]}'
+    sess = TmuxSession(sess_name, width=120, height=40)
     try:
         sess.send_literal(f'python3 {app_path} -f {config_file}')
         sess.send_keys('Enter')

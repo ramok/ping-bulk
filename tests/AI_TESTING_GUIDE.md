@@ -35,6 +35,23 @@ Provides function-scoped `tmux` session fixtures so that each test gets a fresh,
 ### 3. CLI Tests
 - **`test_cli.py`**: Tests command-line arguments (like `--help` and no arguments) directly without spinning up curses. This ensures that the CLI logic operates cleanly without requiring a `tmux` environment.
 
+## Parallel Testing
+
+Since the test suite interacts with an actual `tmux` session, running tests in parallel previously caused collisions due to shared session names. The fixtures in `conftest.py` have been updated to generate isolated session names using a unique 8-character UUID for each test, resolving these collisions.
+
+### How to Execute Tests in Parallel
+1. Install `pytest-xdist`: `pip install pytest-xdist`
+2. Run the test suite: `pytest -n auto` (or specify the number of workers, e.g., `pytest -n 4`)
+
+### Handling Hanging Tests
+If tests fail or are interrupted abruptly, orphaned `tmux` sessions might be left running in the background. This can cause subsequent test runs to fail or consume system resources.
+- **Detect Orphaned Sessions**: Run `tmux ls` to list active sessions.
+- **Cleanup**: To kill all `ping-bulk` test sessions, run:
+  ```bash
+  tmux kill-server
+  ```
+  *(Note: This will terminate all tmux sessions for the current user. Use `tmux kill-session -t <session_name>` to selectively kill test sessions if you have other important tmux work running.)*
+
 ## Patterns & Best Practices for AI
 
 1. **Wait for State Changes:** Always use `sess.wait_for(text)` after sending an input that triggers a UI transition. Do not rely on hardcoded `time.sleep()`, as UI rendering speeds vary.
