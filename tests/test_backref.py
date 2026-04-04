@@ -2,9 +2,9 @@
 
 Covers:
   _apply_backref
-  - bare forms \\N / $N (regression guard — previously the only forms)
-  - brace forms \\{N} / ${N} (adjacent-digit disambiguation)
-  - \\0 / $0 / \\{0} / ${0}  (full-string back-reference)
+  - bare forms $N (regression guard — previously the only forms)
+  - brace forms / ${N} (adjacent-digit disambiguation)
+  - $0 / ${0}  (full-string back-reference)
   - out-of-range index → placeholder left unchanged
   - full_str=None with index-0 placeholder → placeholder left unchanged
   - mixed forms in one template
@@ -15,7 +15,7 @@ Covers:
   - False for plain strings, escaped-looking but non-placeholder chars
 
   Integration (parse_hosts_file + :for/:done)
-  - \\{N} and ${N} brace forms work inside a :for body
+  - ${N} brace forms work inside a :for body
   - adjacent-digit disambiguation via ${1}9 in a :for body
   - mixed bare and brace forms in the same body line
 """

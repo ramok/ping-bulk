@@ -36,7 +36,7 @@ Events
 - **Static DNS overrides** — map IPs to names without relying on DNS.
 - **Brace expansion** — `10.0.0.{1..50}` expands to 50 hosts in one line.
 - **Loop blocks** — `:for`/`:done` repeats body lines for every expansion of
-  a pattern, substituting back-references (`$0`–`$9`) per iteration.
+  a pattern, substituting back-references (`$0`–`$9` or `$name`) per iteration.
 - **Event log** — timestamped up/down/recover events, scrollable on screen
   and optionally streamed to a file.
 - **Persistent config** — display preferences saved to

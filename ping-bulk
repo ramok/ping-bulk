@@ -428,7 +428,7 @@ def _apply_backref(template, captures, full_str=None):
         else:
             return captures[idx - 1] if 1 <= idx <= len(captures) else m.group(0)
 
-    return re.sub(r'\$(?:\{(\d+)\}|(\d+)|\{([a-zA-Z_]\w*)\}|([a-zA-Z_]\w+))', _sub, template)
+    return re.sub(r'\$(?:\{(\d+)\}|(\d)|\{([a-zA-Z_]\w*)\}|([a-zA-Z_]\w*))', _sub, template)
 
 
 def _has_backref(s):
@@ -947,10 +947,10 @@ class SectionLabel:
         self.folded = False  # True when section is collapsed
 
 
-def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
+def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_names=None):
     """Expand a ``:for`` loop and return a list of entry tuples.
 
-    Applies back-references (``\\0``–``\\9`` / ``$0``–``$9``) to each body
+    Applies back-references (``$0``–``$9`` or ``$name``) to each body
     line for every expansion of *pattern*.  Body lines that contain no
     back-reference are included only once (on the very first iteration) and a
     ``('warn', …)`` entry is emitted so the event log surfaces the issue.
@@ -968,6 +968,10 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
     ssh_block_args : str or None
         When non-``None`` the loop is nested inside an ``:ssh-begin`` block;
         plain host lines become ``:ssh <ssh_block_args> <host>`` commands.
+    var_names : list[str] or None
+        When non-``None``, a list of variable names for named back-references
+        (e.g. ``['x', 'y']`` from ``:for x,y in pattern``).
+        When ``None``, numbered back-references are used (``$1``, ``$2``, ...).
 
     Returns
     -------
@@ -989,6 +993,8 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None):
     in_local_ssh_block = False
 
     for iteration_idx, (full_str, captures) in enumerate(rows):
+        if var_names is not None:
+            captures = dict(zip(var_names, captures))
         for line in body_lines:
             if line.startswith('##'):
                 # Section header — apply back-references and emit every iteration.
@@ -1172,6 +1178,7 @@ def parse_hosts_file(filename):
                         entries.extend(_process_for_loop(
                             for_loop_pattern, for_loop_body,
                             seen_hosts, for_loop_ssh_args,
+                            var_names=for_loop_var_name
                         ))
                         for_loop_pattern = None
                         for_loop_body = []
@@ -1208,7 +1215,18 @@ def parse_hosts_file(filename):
                     ssh_block_args = None
                 elif cmd_word == 'for':
                     # Start :for loop — capture pattern and current SSH context.
-                    for_loop_pattern = parts[1].strip() if len(parts) > 1 else ''
+                    # Support both syntaxes:
+                    #   :for pattern              → numbered backrefs ($1, $2, ...)
+                    #   :for x,y in pattern       → named backrefs ($x, $y, ...)
+                    for_args = parts[1].strip() if len(parts) > 1 else ''
+                    if ' in ' in for_args:
+                        var_part, pattern_part = for_args.split(' in ', 1)
+                        var_names = [v.strip() for v in var_part.split(',')]
+                        for_loop_pattern = pattern_part.strip()
+                        for_loop_var_name = var_names  # store as list for processing
+                    else:
+                        for_loop_pattern = for_args
+                        for_loop_var_name = None
                     for_loop_body = []
                     for_loop_ssh_args = ssh_block_args
                 elif cmd_word == 'done':

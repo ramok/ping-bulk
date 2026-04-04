@@ -415,6 +415,12 @@ Examples::
         $0
     :done
 
+    # Named backreference examples
+    :for r,n in 10.0.{1..3}.{10..12}
+        :resolv $0 rack$r-node$n    # rack1-node10, rack1-node11, etc.
+        $0
+    :done
+
 
 HISTORY MODES
 =============
