@@ -31,6 +31,9 @@ The repository is structured to keep the core application as a single deployable
 - **Persistent Configuration**: User preferences are saved in `~/.config/ping-bulk/config`.
 
 ## 5. Development & Testing Workflow
+- **Git Commit Etiquette for AI Agents**:
+  - **NEVER use `git add .`** or `git commit -a`. You must always meticulously specify only the intended files to add (e.g. `git add <specific file>`). Blindly adding all files risks committing unintended, unrelated, or temporary files.
+  - **Commit messages must focus on User Experience (UX) impact, not just technical implementation details**. Frame the commit message to explain *how* the change affects the end user (e.g., "feat: simplify port monitoring syntax for users"), rather than just listing what functions changed. The commit message should be human-readable, formatted nicely, and concisely explain the value to the user.
 - **Running the Application**: You can run the script directly from the root directory: `./ping-bulk <hosts>`.
 - **Running Tests**: Navigate to the root directory and execute `pytest -n auto tests/` to run the test suite in parallel. It is **highly recommended** to use `pytest -n auto` for significantly faster test execution, as test sessions are fully isolated using unique `tmux` session names via `pytest-xdist`. Ensure any new features include appropriate tests, especially for complex parsing (like brace expansion or SSH directives). For more details on the testing infrastructure and how to write tests using the headless tmux environment, refer to `tests/AI_TESTING_GUIDE.md` and `SKILL.md`.
   - **CRITICAL REQUIREMENT FOR AI AGENTS:** Before writing **any** new tests, you **MUST** read and fully understand `tests/AI_TESTING_GUIDE.md`. You **MUST** strictly follow the test templates provided in that guide to ensure consistency with the existing headless tmux testing infrastructure. Failure to do so will result in broken UI tests and test suite failures.
