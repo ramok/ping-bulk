@@ -1105,58 +1105,68 @@ class SshPingMonitor(Monitor):
         and returns the corresponding alias. Falls back to host_or_ip if no
         mapping is found or _hosts_map is unavailable.
 
-        User@host format is returned unchanged - no reverse lookup is performed
-        when a username is present, as these are explicit SSH connection strings
-        that should be preserved as-is.
+        If host_or_ip contains user@host format, strips the username before
+        performing the lookup, then returns the result (username is stripped
+        for display purposes by the caller).
 
         Args:
             host_or_ip: Resolved host or IP address to look up, optionally
                        prefixed with 'user@'
 
         Returns:
-            Original alias if found in hosts_map (plain host/IP only),
-            otherwise host_or_ip unchanged
+            Original alias if found in hosts_map, otherwise the host part
+            (with username stripped if present)
         """
         if not hasattr(self, '_hosts_map') or not self._hosts_map:
             return host_or_ip
 
-        # User@host format: return unchanged (no lookup)
-        if '@' in host_or_ip:
-            return host_or_ip
+        # Strip username if present for lookup
+        lookup_target = self._strip_username(host_or_ip)
 
-        # Plain host/IP: lookup directly
+        # Perform reverse lookup on the host/IP part only
         for alias, (resolved_ip, _) in self._hosts_map.items():
-            if resolved_ip == host_or_ip:
+            if resolved_ip == lookup_target:
                 return alias
-        return host_or_ip
+        return lookup_target
 
     def get_display_name(self, dns_mode='off'):
         """Return the display label with complete jump host chain.
 
         Format: jump1 → jump2 → ... → destination → ping-host
 
+        All hosts in the chain respect dns_mode:
+          off      — original aliases/names as defined by user (via :resolv reverse lookup)
+          ip       — resolved IP addresses (from :resolv mappings)
+          hostname — hostnames from reverse DNS lookup
+
         The ping-host part is adjusted according to dns_mode:
           off      — self._ping_host_label (original name as typed on command line)
           ip       — self.resolved_ip, falling back to self._ping_host
           hostname — self.resolved_hostname, falling back to self._ping_host_label
 
-        Jump hosts are shown with their original aliases when available via
-        reverse lookup in hosts_map, falling back to the resolved value.
         Username prefixes (user@) are stripped from all hosts in the chain.
         """
         display_parts = []
 
-        # Add jump host chain with alias lookup (preserving username)
-        jump_hosts = self._extract_jump_hosts(self._original_ssh_args)
+        # Add jump host chain respecting dns_mode
+        jump_hosts = self._extract_jump_hosts(self._ssh_args)
         for jump_host in jump_hosts:
-            # Preserve full user@host format for reverse lookup
-            hostname = jump_host
-            alias = self._reverse_lookup_alias(hostname)
-            display_parts.append(self._strip_username(alias))
+            if dns_mode == 'ip':
+                # dns_mode='ip': show resolved IP
+                display_parts.append(self._strip_username(jump_host))
+            else:
+                # dns_mode='off' or 'hostname': reverse lookup to get alias
+                alias = self._reverse_lookup_alias(jump_host)
+                display_parts.append(self._strip_username(alias))
 
         # Add SSH destination (the host we SSH into before running ping)
-        ssh_dest_display = self._reverse_lookup_alias(self._ssh_dest_label)
-        display_parts.append(self._strip_username(ssh_dest_display))
+        if dns_mode == 'ip':
+            # dns_mode='ip': show resolved value
+            display_parts.append(self._strip_username(self._ssh_dest))
+        else:
+            # dns_mode='off' or 'hostname': reverse lookup to get alias/label
+            ssh_dest_display = self._reverse_lookup_alias(self._ssh_dest_label)
+            display_parts.append(self._strip_username(ssh_dest_display))
 
         # Add ping host with dns_mode adjustment
         if dns_mode == 'ip':

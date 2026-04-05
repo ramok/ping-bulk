@@ -629,13 +629,13 @@ class TestSshReverseLookupAlias:
         assert m._reverse_lookup_alias('10.10.1.100') == 'bastion'
 
     def test_reverse_lookup_with_username(self, pb):
-        """user@host format should still work for lookup."""
+        """user@host format should strip username and perform lookup."""
         hosts_map = {'bastion': ('10.10.1.100', 'bastion.example.com')}
         m = pb.SshPingMonitor(['user@remote'], 'target.host', hosts_map=hosts_map)
-        # The method only looks up host part, not user@host
+        # The method strips username and looks up the host part
         alias = m._reverse_lookup_alias('user@10.10.1.100')
-        # Should return unchanged since 'user@10.10.1.100' won't match '10.10.1.100'
-        assert alias == 'user@10.10.1.100'
+        # Should return 'bastion' (alias found for 10.10.1.100 after stripping user@)
+        assert alias == 'bastion'
 
 
 # ── TestSshJumpChainDisplay ───────────────────────────────────────────────────
@@ -658,7 +658,7 @@ class TestSshJumpChainDisplay:
         assert display == 'bastion → remote → target.host'
 
     def test_jump_chain_display_single_jump_dns_ip(self, pb):
-        """Single jump host with dns_mode='ip' shows resolved IPs."""
+        """Single jump host with dns_mode='ip' shows resolved IPs for all hosts."""
         hosts_map = {'bastion': ('10.10.1.100', 'bastion.example.com')}
         original_ssh_args = ['-J', 'bastion', 'user@remote']
         resolved_ssh_args = ['-J', '10.10.1.100', 'user@remote']
@@ -671,7 +671,7 @@ class TestSshJumpChainDisplay:
         )
         m.resolved_ip = '10.0.0.5'
         display = m.get_display_name('ip')
-        assert display == 'bastion → remote → 10.0.0.5'
+        assert display == '10.10.1.100 → remote → 10.0.0.5'
 
     def test_jump_chain_display_single_jump_dns_hostname(self, pb):
         """Single jump host with dns_mode='hostname' shows hostnames."""
