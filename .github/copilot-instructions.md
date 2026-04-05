@@ -52,11 +52,21 @@ Before executing any destructive or irreversible commands, always use `ask_user`
 - Process termination: `kill -9`, `killall`
 - Permission changes that affect security: `chmod 777`, `chown`
 
-For routine operations (git add, git commit, pytest runs, file edits), confirmation is not required.
+**User Configuration Files Require Confirmation:**
+Before modifying any user configuration files, always use `ask_user` to get explicit confirmation:
+- Shell configs: `~/.bashrc`, `~/.zshrc`, `~/.profile`, `~/.bash_profile`
+- Terminal configs: `~/.tmux.conf`, `~/.screenrc`, `~/.Xresources`, `~/.config/*`
+- Editor configs: `~/.vimrc`, `~/.vim/`, `~/.emacs`, `~/.config/nvim/`
+- Git configs: `~/.gitconfig`, `~/.gitignore_global`
+- SSH configs: `~/.ssh/config`, `~/.ssh/authorized_keys`
+- Any dotfiles in user's home directory (`~/.*`)
+
+For routine operations (git add, git commit, pytest runs, file edits within the project), confirmation is not required.
 
 ## Git Commit Guidelines
 
 - **Do NOT add** `Co-authored-by: Copilot <...>` trailers to commit messages
+- **Remove trailing whitespace** from commit messages (no empty lines with spaces)
 - Follow the commit message format described in `AGENTS.md` (UX-focused, concise)
 - Always use `git add <specific-file>` - never `git add .` or `git commit -a`
 
