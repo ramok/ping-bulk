@@ -73,12 +73,9 @@ SET_PARAMS = [
 _SET_PARAM_MAP: dict = {p.name: p for p in SET_PARAMS}
 
 
-# Help overlay content — displayed in a popup window, never written to the event log.
-# Each string is padded/truncated to _HELP_INNER_W characters when rendered.
-_HELP_INNER_W = 70
-_HELP_LINES = [
+_FULL_HELP = [
     "  ping-bulk — keyboard reference                      [q / Esc] close",
-    "─" * _HELP_INNER_W,
+    "-DIVIDER-",
     "  Hotkeys",
     "  q / Q         quit",
     "  d / D         cycle DNS mode forward / backward",
@@ -97,28 +94,28 @@ _HELP_LINES = [
     "  Ctrl+← / Ctrl+→  scroll history ← older (page) / → live (page)",
     "  ↑ / ↓          scroll event log up / down",
     "  PgUp / PgDn    scroll event log by page",
-    "─" * _HELP_INNER_W,
+    "-DIVIDER-",
     "  Commands",
-    "  :q  :quit                quit",
-    "  :ping <host>             add a new host to monitor",
-    "  :source <file>           load hosts/commands from file",
+    "  :q  :quit                 quit",
+    "  :ping <host>              add a new host to monitor",
+    "  :source <file>            load hosts/commands from file",
     f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
-    "                           set display modes; omit value to cycle/show",
-    "                           log-size / history-size: numeric value only",
-    "  :pause                   toggle pause on/off",
-    "  :seen                    insert 'seen' marker in event log",
-    "  :clear                   clear event log",
-    "  :log [file|off]          show active log file, set/save log to file, or disable logging",
-    "  :saveconfig              save current settings to config file",
-    "  :resolv <ip-pat> <host>  static name→IP mapping (overrides DNS for ping and SSH)",
-    "                           ip-pat may use brace expansion; \\N in host = brace group N",
-    "                           :ssh user@hostname resolves hostname, preserves username",
+    "                            set display modes; omit value to cycle/show",
+    "                            log-size / history-size: numeric value only",
+    "  :pause                    toggle pause on/off",
+    "  :seen                     insert 'seen' marker in event log",
+    "  :clear                    clear event log",
+    "  :log [file|off]           show active log file, set/save log to file, or disable logging",
+    "  :saveconfig               save current settings to config file",
+    "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
+    "                            ip-pat may use brace expansion; \\N in host = brace group N",
+    "                            :ssh user@hostname resolves hostname, preserves username",
     "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
     "  :ssh [opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
-    "  :ssh-begin [opts] <dest> host lines → :ssh [opts] <dest> <host>",
-    "  :ssh-end                 close :ssh-begin block (hosts file only)",
-    "  :help  or  ?             show this help",
-    "─" * _HELP_INNER_W,
+    "  :ssh-begin [opts] <dest>  host lines → :ssh [opts] <dest> <host>",
+    "  :ssh-end                  close :ssh-begin block (hosts file only)",
+    "  :help  or  ?              show this help",
+    "-DIVIDER-",
     "  Host / range expansion  (hosts file and :ssh ping-host argument)",
     "  10.0.0.{1,2,5}          brace list  → 10.0.0.1, 10.0.0.2, 10.0.0.5",
     "  10.0.0.{1..4}           brace range → 10.0.0.1 … 10.0.0.4",
@@ -129,6 +126,91 @@ _HELP_LINES = [
     "  web{a,b,c}.example.com  brace list  → weba, webb, webc .example.com",
     "  10.0.{1..2}.{10,2{1,2}} nested      → cartesian product (8 addresses)",
 ]
+
+_EXAMPLE_HELP = """\
+#!/bin/sh
+# the next line restarts using ping-bulk \\
+    exec ping-bulk -f "$0" "$@"
+
+# Full-featured example showing sections, brace expansion, static DNS
+# overrides, :for loops, and SSH-based remote monitoring.
+#
+# Run directly:  chmod +x network.hosts && ./network.hosts
+# Or:            ping-bulk -f network.hosts
+
+# ── Static DNS overrides ───────────────────────────────────────────────────
+# Map IP ranges to meaningful names.
+# Back-references (all equivalent): $N  ${N}  (N = 1 for first brace group)
+# $0 expands to the full expanded host string for each iteration.
+:resolv 10.0.0.1      gw-core
+:resolv 10.0.1.{1..4} leaf-sw$1
+:resolv 10.0.2.{1..8} server${1}
+
+# ── Display preferences (optional) ────────────────────────────────────────
+:set stats down
+:set ping-view scaled
+:set dns hostname
+
+## Core
+10.0.0.1
+
+## Distribution switches
+10.0.1.{1..4}
+
+## Servers
+10.0.2.{1..8}
+
+## TCP Port Monitoring (TCP connection check)
+# Optionally, you can override the resolved port name via :resolv-port
+:resolv-port 8443 alt-https
+example.com:443
+1.1.1.1:53
+1.1.1.1:8443
+google.com:https
+
+## Public DNS (for connectivity check)
+8.8.8.8
+1.1.1.1
+
+# ── Use :for loop with backreferences to assign names ──────────────────────
+# $0 expands to the full expanded host string for each iteration.
+# Numbered ($1) or named variables ($x) refer to brace groups.
+:for x in 192.168.1.{2..5}
+    :resolv $0 workstation$x
+    $0
+:done
+
+# ── for-loop: two brace groups → two back-references ───────────────────────
+# $r = rack number (first group),  $n = node number (second group)
+# Generates 6 entries: 10.3.1.1, 10.3.1.2, 10.3.2.1, 10.3.2.2, 10.3.3.1, 10.3.3.2
+## Pod servers
+:for r,n in 10.3.{1..3}.{1..2}
+    :resolv $0 rack$r-node$n
+    $0
+:done
+
+# ── Remote monitoring over SSH ─────────────────────────────────────────────
+# Ping hosts on a remote network segment as seen from a remote server.
+# Requires passwordless SSH access (key or agent).
+
+:title Remote site A (via ssh jump)
+:ssh-begin -J bastion.example.com ops@remote-a
+    10.10.0.{1..4}
+:ssh-end
+
+:title Remote site B
+:ssh ops@remote-b 10.20.0.1
+:ssh ops@remote-b 10.20.0.{2..5}
+
+# ── Dynamic Additions ──────────────────────────────────────────────────────
+# You can also dynamically source other config files or add specific hosts directly
+# from within this script or interactively at runtime.
+#
+:ping 1.0.0.1
+:source ./examples/ping-bulk.simple
+
+"""
+
 
 # Stderr substrings that indicate a permanent (non-retryable) ping failure.
 _FATAL_PING_ERRORS = (
@@ -2117,7 +2199,7 @@ class Application:
         The character inside brackets is rendered with bold+underline to stand out.
         """
         menu_items = [
-            (f"[d]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
+            (f"[D]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
             (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
             (f"[o]rder by:{self.sort_by}", False),
             (f"[h]istory:{HISTORY_MODES[self.history_mode]}", False),
@@ -3528,8 +3610,8 @@ class Application:
     def _draw_help_overlay(self, stdscr, height, width):
         """Draw the help overlay as a centered bordered popup with scroll support.
 
-        Uses _HELP_LINES as content; each line is padded / truncated to
-        _HELP_INNER_W characters.  The box is drawn with box-drawing characters
+        Uses _FULL_HELP as content; each line is padded / truncated to
+        inner_w characters.  The box is drawn with box-drawing characters
         and rendered in reverse-video so it floats visually above the main UI.
         The overlay is closed by pressing q, Q, or Esc (handled in run()).
 
@@ -3541,14 +3623,16 @@ class Application:
         can see where they are.  The scroll position is clamped here so callers
         may increment it freely without worrying about bounds.
         """
-        box_w = _HELP_INNER_W + 2   # inner width + two border chars
+        ideal_w = max(len(line) for line in _FULL_HELP if line != "-DIVIDER-")
+        inner_w = min(ideal_w, max(20, width - 4))
+        box_w = inner_w + 2   # inner width + two border chars
 
         # Limit the box height to the terminal; always keep room for both borders.
-        box_h_available = min(len(_HELP_LINES) + 2, height)
+        box_h_available = min(len(_FULL_HELP) + 2, height)
         visible_count = max(0, box_h_available - 2)
 
         # Clamp scroll position so it never exceeds the last valid window start.
-        max_scroll = max(0, len(_HELP_LINES) - visible_count)
+        max_scroll = max(0, len(_FULL_HELP) - visible_count)
         self.help_scroll = max(0, min(self.help_scroll, max_scroll))
 
         col0 = max(0, (width - box_w) // 2)
@@ -3561,36 +3645,42 @@ class Application:
             if max_scroll > 0:
                 line_first = self.help_scroll + 1
                 line_last  = self.help_scroll + visible_count
-                indicator  = f' ↑↓ {line_first}-{line_last}/{len(_HELP_LINES)} '
-                left_w  = (_HELP_INNER_W - len(indicator)) // 2
-                right_w = _HELP_INNER_W - left_w - len(indicator)
+                indicator  = f' ↑↓ {line_first}-{line_last}/{len(_FULL_HELP)} '
+                left_w  = (inner_w - len(indicator)) // 2
+                right_w = inner_w - left_w - len(indicator)
                 inner = '─' * left_w + indicator + '─' * right_w
                 top_border = '┌' + inner + '┐'
             else:
-                top_border = '┌' + '─' * _HELP_INNER_W + '┐'
+                top_border = '┌' + '─' * inner_w + '┐'
             try:
                 stdscr.addstr(row0, col0, top_border[:width - col0], attr)
             except curses.error:
                 pass
 
         # Content rows — show only the slice selected by help_scroll.
-        visible_lines = _HELP_LINES[self.help_scroll:self.help_scroll + visible_count]
+        visible_lines = _FULL_HELP[self.help_scroll:self.help_scroll + visible_count]
         for i, line in enumerate(visible_lines):
             r = row0 + 1 + i
             if r >= height:
                 break
-            padded = line.ljust(_HELP_INNER_W)[:_HELP_INNER_W]
-            try:
-                stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
-            except curses.error:
-                pass
+            if line == "-DIVIDER-":
+                try:
+                    stdscr.addstr(r, col0, ('├' + '─' * inner_w + '┤')[:width - col0], attr)
+                except curses.error:
+                    pass
+            else:
+                padded = line.ljust(inner_w)[:inner_w]
+                try:
+                    stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
+                except curses.error:
+                    pass
 
         # Bottom border
         r = row0 + 1 + visible_count
         if r < height:
             try:
                 stdscr.addstr(r, col0,
-                              ('└' + '─' * _HELP_INNER_W + '┘')[:width - col0], attr)
+                              ('└' + '─' * inner_w + '┘')[:width - col0], attr)
             except curses.error:
                 pass
 
@@ -4126,7 +4216,6 @@ class Application:
             for monitor in self.monitors:
                 monitor.stop()
 
-
 def _parse_args():
     """Parse command-line arguments outside of curses so errors print cleanly.
 
@@ -4165,13 +4254,21 @@ press '?' inside the app for the full keyboard reference.\
         if cmd.cli_flags:
             parser.add_argument(*cmd.cli_flags, **(cmd.cli_kwargs or {}))
 
-    parser.add_argument(
-        'hosts',
-        nargs='*',
-        metavar='HOST',
-        help='hosts/IPs to ping',
-    )
+    parser.add_argument('hosts', nargs='*', metavar='HOST', help='hosts/IPs to ping')
+    parser.add_argument('--help-full',    action='store_true',
+                        help='show full manual and exit')
+    parser.add_argument('--help-example', action='store_true',
+                        help='show full advanced example and exit')
     args = parser.parse_args()
+
+    if args.help_full:
+        print(*['  ' + '-'*20 if x == "-DIVIDER-" else x for x in _FULL_HELP[1:]], sep='\n')
+        sys.exit(0)
+
+    if args.help_example:
+        print(_EXAMPLE_HELP, end='')
+        sys.exit(0)
+
     if not args.hosts and not args.file:
         parser.print_help()
         sys.exit(0)

@@ -5,7 +5,7 @@ on the rendered pane content.
 
 Geometry recap
 --------------
-N = len(_HELP_LINES); _HELP_INNER_W = 70; box_w = 72.
+N = len(_FULL_HELP); inner_w is dynamic.
 NO_SCROLL_HEIGHT = N + 2  (smallest terminal height where all lines fit).
 
   height          | visible_count | max_scroll | indicator at scroll=0
@@ -40,7 +40,7 @@ _mod = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_mod)
 
 # N: total number of help lines; NO_SCROLL_HEIGHT: smallest height that fits all.
-N = len(_mod._HELP_LINES)
+N = len(_mod._FULL_HELP)
 NO_SCROLL_HEIGHT = N + 2
 
 

@@ -68,7 +68,7 @@ def pytest_sessionfinish(session, exitstatus):
 # Make the tests/ directory importable without installing anything.
 sys.path.insert(0, os.path.dirname(__file__))
 
-# Load _HELP_LINES from the ping-bulk script (no .py extension) so fixtures
+# Load _FULL_HELP from the ping-bulk script (no .py extension) so fixtures
 # can compute NO_SCROLL_HEIGHT dynamically instead of hardcoding the line count.
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _loader = importlib.machinery.SourceFileLoader(
@@ -79,7 +79,7 @@ _mod = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_mod)
 
 # Smallest terminal height at which all help lines fit without scrolling.
-NO_SCROLL_HEIGHT = len(_mod._HELP_LINES) + 2
+NO_SCROLL_HEIGHT = len(_mod._FULL_HELP) + 2
 
 from tmux_helper import TmuxSession  # noqa: E402
 

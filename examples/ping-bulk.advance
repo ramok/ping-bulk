@@ -1,4 +1,7 @@
-#!/usr/bin/env -S ping-bulk -f
+#!/bin/sh
+# \
+    exec ping-bulk -f "$0" "$@"
+
 # Full-featured example showing sections, brace expansion, static DNS
 # overrides, :for loops, and SSH-based remote monitoring.
 #

@@ -88,7 +88,7 @@ Tests the `?` / `:help` overlay rendered inside a live curses session:
 ## Help overlay geometry
 
 ```
-_HELP_LINES count : 46
+_FULL_HELP count : 46
 _HELP_INNER_W     : 70
 box_w             : 72  (inner + 2 border chars)
 
