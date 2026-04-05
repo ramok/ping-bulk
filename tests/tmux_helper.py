@@ -171,10 +171,10 @@ class TmuxSession:
     def start_app(self, args: list[str]) -> None:
         """Start the ping-bulk application with the given arguments."""
         import os
-        self.send_keys(f"python3 {os.path.abspath('ping-bulk')} {' '.join(args)}")
+        self.send_literal(f"python3 {os.path.abspath('ping-bulk')} {' '.join(args)}")
         self.send_keys("Enter")
-        # Give the app a moment to start
-        time.sleep(0.5)
+        # Wait for the app to initialize
+        self.wait_for('ping-bulk:', timeout=10)
 
     def kill(self) -> None:
         """Kill the tmux session.  Safe to call even if already dead."""

@@ -35,35 +35,39 @@ import pytest
 
 def pytest_sessionstart(session):
     """Cleanup any stale tmux sessions before the test run."""
+    # Only run cleanup in the main process, not in xdist workers
     if hasattr(session.config, "workerinput"):
-        return  # Skip cleanup in worker nodes
+        return
+    
     import subprocess
+    import time
+    
     result = subprocess.run(
-        ['tmux', 'ls', '-F', '#{session_name}'],
+        ['tmux', 'ls', '-F', '#{session_name}:#{session_created}'],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode == 0:
-        for name in result.stdout.splitlines():
-            if name.startswith('ping-bulk-test'):
-                subprocess.run(['tmux', 'kill-session', '-t', name], check=False)
+        for line in result.stdout.splitlines():
+            if ':' not in line:
+                continue
+            name, created_str = line.split(':', 1)
+            # Only clean up ping-bulk test sessions
+            if name.startswith('ping-bulk-test-') and len(name) > 20:
+                try:
+                    created = int(created_str)
+                    age_seconds = time.time() - created
+                    # Only kill sessions older than 120 seconds (stale from previous runs)
+                    if age_seconds > 120:
+                        subprocess.run(['tmux', 'kill-session', '-t', name], check=False)
+                except (ValueError, IndexError):
+                    pass
 
 def pytest_sessionfinish(session, exitstatus):
-    """Cleanup any stale tmux sessions after the test run."""
-    if hasattr(session.config, "workerinput"):
-        return  # Skip cleanup in worker nodes
-    import subprocess
-    result = subprocess.run(
-        ['tmux', 'ls', '-F', '#{session_name}'],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0:
-        for name in result.stdout.splitlines():
-            if name.startswith('ping-bulk-test'):
-                subprocess.run(['tmux', 'kill-session', '-t', name], check=False)
+    """Cleanup is handled by individual test fixtures, not globally."""
+    # We don't clean up here to avoid killing sessions from parallel pytest runs
+    pass
 
 # Make the tests/ directory importable without installing anything.
 sys.path.insert(0, os.path.dirname(__file__))
