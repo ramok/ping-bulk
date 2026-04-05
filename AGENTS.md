@@ -31,6 +31,11 @@ The repository is structured to keep the core application as a single deployable
 - **Persistent Configuration**: User preferences are saved in `~/.config/ping-bulk/config`.
 
 ## 5. Development & Testing Workflow
+- **Copilot Tool Permissions**:
+  - This project maintains a list of pre-approved tools in `.github/copilot-instructions.md`.
+  - When starting a new session, approve the tools listed in that file.
+  - If a new tool is needed and approved during development, update `.github/copilot-instructions.md` to include it for future sessions.
+  - This ensures consistent tool availability across sessions while maintaining security through explicit approval.
 - **Git Commit Etiquette for AI Agents**:
   - **NEVER use `git add .`** or `git commit -a`. You must always meticulously specify only the intended files to add (e.g. `git add <specific file>`). Blindly adding all files risks committing unintended, unrelated, or temporary files.
   - **Commit messages must focus on User Experience (UX) impact, not just technical implementation details**. Frame the commit message to explain *how* the change affects the end user (e.g., "feat: simplify port monitoring syntax for users"), rather than just listing what functions changed. The commit message should be human-readable, formatted nicely, and concisely explain the value to the user.
