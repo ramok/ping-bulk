@@ -2309,6 +2309,71 @@ class Application:
         if action:
             self._do_fold_action(action)
 
+    # ── Section summary helpers ───────────────────────────────────────────────
+
+    def _get_section_monitors(self, section_idx):
+        """Return all Monitor descendants of the section at *section_idx*.
+
+        Walks self.entries forward from section_idx+1, collecting every Monitor
+        until a SectionLabel whose level is <= the parent section's level is
+        encountered (i.e. a sibling or ancestor section).  Sub-sections and
+        their hosts are included.
+        """
+        section = self.entries[section_idx]
+        monitors = []
+        for entry in self.entries[section_idx + 1:]:
+            if isinstance(entry, SectionLabel):
+                if entry.level <= section.level:
+                    break  # sibling or ancestor — stop
+            else:
+                monitors.append(entry)
+        return monitors
+
+    @staticmethod
+    def _worst_history_char(chars):
+        """Return the worst character from a list of per-monitor history chars.
+
+        Priority (worst first): '?' (process error) > 'X' (timeout) > '.' (ok) > ' ' (no data).
+        """
+        if '?' in chars:
+            return '?'
+        if 'X' in chars:
+            return 'X'
+        if '.' in chars:
+            return '.'
+        return ' '
+
+    def _section_summary(self, monitors, length, offset):
+        """Compute ``(badge_str, history_str)`` for a list of monitors.
+
+        badge_str   — ``'N↑/N↓/N-'`` status count; zero-count groups omitted.
+        history_str — worst-of-all-monitors per time slot, always in 'success' mode.
+        """
+        # Badge
+        up = sum(1 for m in monitors if m.alive is True)
+        down = sum(1 for m in monitors if m.alive is False)
+        unknown = sum(1 for m in monitors if m.alive is None)
+        parts = []
+        if up:      parts.append(f"{up}↑")
+        if down:    parts.append(f"{down}↓")
+        if unknown: parts.append(f"{unknown}-")
+        badge = '/'.join(parts) if parts else '-'
+
+        # History — worst char per slot across all monitors
+        if not monitors:
+            history = ' ' * length
+        else:
+            per_monitor = [
+                m.get_history_string(length=length, offset=offset, mode='success', cell_width=1)
+                for m in monitors
+            ]
+            history = ''.join(
+                self._worst_history_char([row[i] for row in per_monitor])
+                for i in range(length)
+            )
+
+        return badge, history
+
     def _get_visible_entry_indices(self):
         """Return a list of self.entries indices that are currently visible.
 
@@ -2459,11 +2524,18 @@ class Application:
         show_all = (mode_name == 'All')
         show_single = (self.stats_mode > 0 and not show_all)
 
-        # Adaptive hostname column: wide enough for all display names and the header label
+        # Adaptive hostname column: wide enough for all display names, the header
+        # label, and all section title prefixes (so section titles are never truncated).
         max_name_len = max(
             (len(m.get_display_name(DNS_MODES[self.dns_mode])) for m in self.monitors), default=8
         )
-        name_col_width = max(len("Hostname"), max_name_len)
+        # Each section header occupies: (level-1) indent + "── [-] " (7) + title length
+        max_section_len = max(
+            ((e.level - 1) + 7 + len(e.title)
+             for e in self.entries if isinstance(e, SectionLabel)),
+            default=0
+        )
+        name_col_width = max(len("Hostname"), max_name_len, max_section_len)
         stat_col = name_col_width + 1   # stat value starts 1 col after hostname
         hist_col = stat_col + 7         # history starts 7 cols after stat (6-char value + 1 gap)
 
@@ -2583,18 +2655,70 @@ class Application:
             # Base attribute for the entire row (highlight if selected)
             row_attr = curses.A_REVERSE if is_highlighted else 0
 
-            # Section label — render as a bold divider row and skip to the next entry
+            # Section label — render header row with status badge, and history when folded
             if isinstance(item, SectionLabel):
                 # Maintain the section stack: pop same/deeper levels
                 while section_stack and section_stack[-1].level >= item.level:
                     section_stack.pop()
                 section_stack.append(item)
+
+                # Compute badge and (if folded) history for all descendant monitors
+                sec_monitors = self._get_section_monitors(actual_entry_index)
+                badge, sec_history = self._section_summary(
+                    sec_monitors, display_count, self.history_offset
+                )
+
+                # Badge color: any error → bright red, any down → red,
+                #              any unknown → yellow, all up → green
+                has_error   = any(m.error is not None for m in sec_monitors)
+                has_down    = any(m.alive is False for m in sec_monitors)
+                has_unknown = any(m.alive is None for m in sec_monitors)
+                if has_error:
+                    badge_color = curses.color_pair(2) | curses.A_BOLD
+                elif has_down:
+                    badge_color = curses.color_pair(2)
+                elif has_unknown:
+                    badge_color = curses.color_pair(3)
+                else:
+                    badge_color = curses.color_pair(1)
+
                 # Show fold indicator: [+] if folded, [-] if expanded
                 fold_indicator = "[+]" if item.folded else "[-]"
                 sec_indent = ' ' * (item.level - 1)
-                section_text = f"{sec_indent}── {fold_indicator} {item.title}"[:width - 1]
+                prefix = f"{sec_indent}── {fold_indicator} "
+                # Truncate title so badge and history have room
+                title_max = stat_col - len(prefix) - 1
+                title_part = item.title[:max(0, title_max)]
+                section_text = (prefix + title_part).ljust(stat_col - 1)[:stat_col - 1]
+
                 section_attr = curses.A_BOLD | row_attr
                 stdscr.addstr(row, 0, section_text, section_attr)
+
+                # Badge at stat_col
+                badge_display = f"{badge:<6}"[:6]
+                if stat_col < width:
+                    stdscr.addstr(row, stat_col, badge_display, badge_color | row_attr)
+
+                # History bar — only when folded
+                if item.folded and hist_col_effective < width:
+                    col = hist_col_effective
+                    for char in sec_history:
+                        if col >= width:
+                            break
+                        if char == 'X':
+                            attr = curses.color_pair(2) | row_attr
+                        elif char == '?':
+                            attr = curses.color_pair(2) | curses.A_BOLD | row_attr
+                        elif char == '.':
+                            attr = curses.color_pair(1) | row_attr
+                        else:
+                            attr = row_attr
+                        try:
+                            stdscr.addstr(row, col, char, attr)
+                        except curses.error:
+                            pass
+                        col += 1
+
                 row += 1
                 entry_index += 1
                 continue

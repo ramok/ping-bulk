@@ -265,6 +265,106 @@ class TestHierarchicalFolding:
 
 
 # ===========================================================================
+# Unit tests — section summary helpers
+# ===========================================================================
+
+class TestSectionSummaryHelpers:
+    """_get_section_monitors and _section_summary logic."""
+
+    def _make_app(self, pb):
+        entries = [
+            ('section', 'Top A', 1),
+            ('host', '10.0.0.1'),
+            ('section', 'Sub A1', 2),
+            ('host', '10.0.0.2'),
+            ('section', 'Top B', 1),
+            ('host', '10.0.0.3'),
+        ]
+        return pb.Application(entries)
+
+    def test_get_section_monitors_level1(self, pb):
+        """Top A (level 1) collects hosts from itself and Sub A1."""
+        app = self._make_app(pb)
+        # Top A is at index 0
+        monitors = app._get_section_monitors(0)
+        assert len(monitors) == 2
+        hosts = {m.host for m in monitors}
+        assert hosts == {'10.0.0.1', '10.0.0.2'}
+        for m in app.monitors: m.stop()
+
+    def test_get_section_monitors_level2(self, pb):
+        """Sub A1 (level 2) collects only its own host."""
+        app = self._make_app(pb)
+        # Sub A1 is at index 2
+        monitors = app._get_section_monitors(2)
+        assert len(monitors) == 1
+        assert monitors[0].host == '10.0.0.2'
+        for m in app.monitors: m.stop()
+
+    def test_get_section_monitors_stops_at_sibling(self, pb):
+        """Top B stops before collecting Top B's host."""
+        app = self._make_app(pb)
+        # Top A is index 0, Top B is index 4
+        monitors_top_a = app._get_section_monitors(0)
+        assert not any(m.host == '10.0.0.3' for m in monitors_top_a)
+        for m in app.monitors: m.stop()
+
+    def test_worst_history_char_priority(self, pb):
+        """? beats X beats . beats space."""
+        wc = pb.Application._worst_history_char
+        assert wc(['?', 'X', '.']) == '?'
+        assert wc(['X', '.', ' ']) == 'X'
+        assert wc(['.', ' '])      == '.'
+        assert wc([' ', ' '])      == ' '
+
+    def test_badge_all_up(self, pb):
+        """All-up monitors produce N↑ badge with no ↓ or - parts."""
+        app = self._make_app(pb)
+        for m in app.monitors:
+            m.alive = True
+        badge, _ = app._section_summary(app.monitors, length=5, offset=0)
+        assert '↑' in badge
+        assert '↓' not in badge
+        assert '-' not in badge
+        for m in app.monitors: m.stop()
+
+    def test_badge_mixed(self, pb):
+        """Mixed alive states show all three groups."""
+        app = self._make_app(pb)
+        monitors = app.monitors
+        monitors[0].alive = True
+        monitors[1].alive = False
+        monitors[2].alive = None
+        badge, _ = app._section_summary(monitors, length=5, offset=0)
+        assert '1↑' in badge
+        assert '1↓' in badge
+        assert '1-' in badge
+        for m in app.monitors: m.stop()
+
+    def test_badge_zero_groups_omitted(self, pb):
+        """Zero-count groups are not shown in the badge."""
+        app = self._make_app(pb)
+        for m in app.monitors:
+            m.alive = True
+        badge, _ = app._section_summary(app.monitors, length=5, offset=0)
+        assert '-' not in badge
+        assert '↓' not in badge
+        for m in app.monitors: m.stop()
+
+    def test_history_worst_aggregation(self, pb):
+        """History picks worst char per slot across monitors."""
+        app = self._make_app(pb)
+        from collections import deque
+        # monitor 0: success (.); monitor 1: timeout (X)
+        app.monitors[0].history = deque([10.0], maxlen=100)
+        app.monitors[1].history = deque([None], maxlen=100)
+        monitors = app.monitors[:2]
+        _, history = app._section_summary(monitors, length=1, offset=0)
+        assert history == 'X'
+        for m in app.monitors: m.stop()
+
+
+# ===========================================================================
 # Integration tests — indentation and fold keys via tmux
 # ===========================================================================
 
@@ -359,3 +459,25 @@ class TestHierarchicalTitlesUI:
         screen = self.sess.capture_pane()
         assert "[z]" not in screen
         assert "[-]" in screen  # sections still unfolded
+
+    def test_badge_shown_on_open_section(self):
+        """Badge (↑ or ↓ or -) appears on section row even when unfolded."""
+        screen = self.sess.capture_pane()
+        lines = screen.splitlines()
+        top_line = next((l for l in lines if 'Top' in l and '──' in l), None)
+        assert top_line is not None, f"No Top section line found in:\n{screen}"
+        # The badge should contain at least one arrow/dash indicator
+        assert any(ch in top_line for ch in ('↑', '↓', '-')), (
+            f"Expected badge on section row, got: {top_line!r}")
+
+    def test_history_shown_when_folded(self):
+        """After folding, the section row shows a history bar (. or X chars)."""
+        self.sess.send_keys("[")          # fold all
+        self.sess.wait_for("[+]")
+        import time; time.sleep(1.5)      # wait for at least one ping result
+        screen = self.sess.capture_pane()
+        lines = screen.splitlines()
+        top_line = next((l for l in lines if 'Top' in l and '──' in l), None)
+        assert top_line is not None, f"No Top section line found in:\n{screen}"
+        assert any(ch in top_line for ch in ('.', 'X', '?')), (
+            f"Expected history bar on folded section row, got: {top_line!r}")
