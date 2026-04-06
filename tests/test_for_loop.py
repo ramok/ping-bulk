@@ -155,9 +155,9 @@ class TestForLoopSectionHeaders:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Data Centre 1'),
+            ('section', 'Data Centre 1', 1),
             ('host',    'dc1-router'),
-            ('section', 'Data Centre 2'),
+            ('section', 'Data Centre 2', 1),
             ('host',    'dc2-router'),
         ], f"Unexpected entries: {entries!r}"
 
@@ -171,9 +171,9 @@ class TestForLoopSectionHeaders:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Pod a'),
+            ('section', 'Pod a', 1),
             ('host',    'poda-host'),
-            ('section', 'Pod b'),
+            ('section', 'Pod b', 1),
             ('host',    'podb-host'),
         ], f"Unexpected entries: {entries!r}"
 
@@ -189,9 +189,9 @@ class TestForLoopSectionHeaders:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         # Section emitted twice; no 'warn' tuples expected
         assert entries == [
-            ('section', 'Servers'),
+            ('section', 'Servers', 1),
             ('host',    'node1'),
-            ('section', 'Servers'),
+            ('section', 'Servers', 1),
             ('host',    'node2'),
         ], f"Unexpected entries: {entries!r}"
 
@@ -205,9 +205,9 @@ class TestForLoopSectionHeaders:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Static Section'),
+            ('section', 'Static Section', 1),
             ('host',    'sp1'),
-            ('section', 'Static Section'),
+            ('section', 'Static Section', 1),
             ('host',    'sp2'),
         ], f"Unexpected entries: {entries!r}"
 
@@ -663,10 +663,10 @@ class TestForLoopMixed:
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
-        assert entries[0] == ('section', 'My Group'), (
+        assert entries[0] == ('section', 'My Group', 1), (
             f"First entry should be section header; got {entries[0]!r}"
         )
-        host_entries = [v for k, v in entries if k == 'host']
+        host_entries = [rest[0] for k, *rest in entries if k == 'host']
         assert host_entries == ['app1', 'app2'], (
             f"Expected two hosts after section; got {host_entries!r}"
         )

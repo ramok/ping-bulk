@@ -85,7 +85,7 @@ _FULL_HELP = [
     "  p / P         toggle pause",
     "  ↑ / ↓          navigate host list",
     "  Enter          show detailed stats for highlighted host",
-    "  Space          insert 'seen' marker (or toggle section fold)",
+    "  Space          insert 'seen' marker (or toggle section fold = za)",
     "  C              clear event log",
     "  Esc            clear host selection",
     "  :              open command line",
@@ -94,6 +94,19 @@ _FULL_HELP = [
     "  Ctrl+← / Ctrl+→  scroll history ← older (page) / → live (page)",
     "  ↑ / ↓          scroll event log up / down",
     "  PgUp / PgDn    scroll event log by page",
+    "-DIVIDER-",
+    "  Section folding  (highlight a section header, then press)",
+    "  z a / Space    toggle fold of highlighted section",
+    "  z A / Ctrl+Spc toggle fold recursively (section + all sub-sections)",
+    "  z o            open (unfold) highlighted section",
+    "  z O            open highlighted section and all sub-sections",
+    "  z c            close (fold) highlighted section",
+    "  z C            close highlighted section and all sub-sections",
+    "  z R / ]        open (unfold) ALL sections",
+    "  z M / [        close (fold) ALL sections",
+    "  z r            open one fold level (deepest closed level)",
+    "  z m            close one fold level (shallowest open level)",
+    "  (type 'z' → [z] appears bottom-right → press second key)",
     "-DIVIDER-",
     "  Commands",
     "  :q  :quit                 quit",
@@ -106,6 +119,8 @@ _FULL_HELP = [
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
     "  :log [file|off]           show active log file, set/save log to file, or disable logging",
+    "  :fold-all                 fold (collapse) all sections",
+    "  :unfold-all               unfold (expand) all sections",
     "  :saveconfig               save current settings to config file",
     "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
     "                            ip-pat may use brace expansion; \\N in host = brace group N",
@@ -115,6 +130,12 @@ _FULL_HELP = [
     "  :ssh-begin [opts] <dest>  host lines → :ssh [opts] <dest> <host>",
     "  :ssh-end                  close :ssh-begin block (hosts file only)",
     "  :help  or  ?              show this help",
+    "-DIVIDER-",
+    "  Section headers  (hosts file)",
+    "  ## Title        level-1 header  (also :title Title)",
+    "  ### Title       level-2 header  (also :title2 Title) — indented 1 space",
+    "  #### Title      level-3 header  (also :title3 Title) — indented 2 spaces",
+    "  host ## label   inline label after hostname (stripped; ## / ### / #### ...)",
     "-DIVIDER-",
     "  Host / range expansion  (hosts file and :ssh ping-host argument)",
     "  10.0.0.{1,2,5}          brace list  → 10.0.0.1, 10.0.0.2, 10.0.0.5",
@@ -233,23 +254,26 @@ _FATAL_SSH_ERRORS = (
 
 
 def _strip_inline_comment(line):
-    """Strip an inline ``##`` comment from *line* and return ``(main, comment)``.
+    """Strip an inline ``##``-style comment from *line* and return ``(main, comment)``.
 
-    A ``##`` at the very start of the line (a section-header) is **not** treated
-    as an inline comment — the line is returned unchanged with an empty comment.
+    Any run of two or more ``#`` characters surrounded by spaces is treated as
+    an inline comment delimiter (``##``, ``###``, ``####``, …).  A run at the
+    very start of the line is a section-header — not stripped.
 
     Examples::
 
-        '10.0.0.1 ## router'  → ('10.0.0.1', 'router')
-        '## Section'          → ('## Section', '')
-        '10.0.0.1'            → ('10.0.0.1', '')
+        '10.0.0.1 ## router'   → ('10.0.0.1', 'router')
+        '10.0.0.1 ### router'  → ('10.0.0.1', 'router')
+        '## Section'           → ('## Section', '')
+        '### Sub'              → ('### Sub', '')
+        '10.0.0.1'             → ('10.0.0.1', '')
     """
     if line.startswith('##'):
         return line, ''
-    idx = line.find(' ## ')
-    if idx == -1:
+    m = re.search(r' #{2,} ', line)
+    if m is None:
         return line, ''
-    return line[:idx].rstrip(), line[idx + 4:].strip()
+    return line[:m.start()].rstrip(), line[m.end():].strip()
 
 
 def _is_ip(s):
@@ -1277,9 +1301,10 @@ class SshPingMonitor(Monitor):
 
 
 class SectionLabel:
-    """A non-pingable display row for ## section headers from a hosts file."""
-    def __init__(self, title):
+    """A non-pingable display row for section headers (## / :title)."""
+    def __init__(self, title, level=1):
         self.title = title
+        self.level = max(1, int(level))  # 1 = top-level, 2 = sub-section, …
         self.folded = False  # True when section is collapsed
 
 
@@ -1334,17 +1359,20 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
         for line in body_lines:
             if line.startswith('##'):
                 # Section header — apply back-references and emit every iteration.
-                title_tmpl = line[2:].strip()
+                n_hashes = len(line) - len(line.lstrip('#'))
+                title_tmpl = line[n_hashes:].strip()
                 title = _apply_backref(title_tmpl, captures, full_str)
-                entries.append(('section', title))
+                entries.append(('section', title, n_hashes - 1))
 
             elif line.startswith(':'):
                 parts = line.split(None, 1)
                 cmd_word = parts[0][1:].lower()
-                if cmd_word == 'title':
+                m_title = re.match(r'^title(\d*)$', cmd_word)
+                if m_title:
+                    level = int(m_title.group(1)) if m_title.group(1) else 1
                     title_tmpl = parts[1].strip() if len(parts) > 1 else ''
                     title = _apply_backref(title_tmpl, captures, full_str)
-                    entries.append(('section', title))
+                    entries.append(('section', title, level))
                 elif cmd_word == 'ssh-begin':
                     # Open local SSH block — captures args with back-reference expansion
                     ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
@@ -1534,16 +1562,19 @@ def parse_hosts_file(filename):
 
             # ── Normal line processing (outside a :for loop) ───────────────
             if line.startswith('##'):
-                title = line[2:].strip()
-                entries.append(('section', title))
+                n_hashes = len(line) - len(line.lstrip('#'))
+                title = line[n_hashes:].strip()
+                entries.append(('section', title, n_hashes - 1))
             elif line.startswith('#'):
                 continue  # comment — skip
             elif line.startswith(':'):
                 parts = line.split(None, 1)
                 cmd_word = parts[0][1:].lower()  # strip leading ':'
-                if cmd_word == 'title':
+                m_title = re.match(r'^title(\d*)$', cmd_word)
+                if m_title:
+                    level = int(m_title.group(1)) if m_title.group(1) else 1
                     title = parts[1].strip() if len(parts) > 1 else ''
-                    entries.append(('section', title))
+                    entries.append(('section', title, level))
                 elif cmd_word == 'ssh-begin':
                     # Start SSH block — remainder of line is the SSH args (opts + dest)
                     ssh_block_args = parts[1].strip() if len(parts) > 1 else ''
@@ -1740,6 +1771,10 @@ CMD_REGISTRY = [
            '[opts] <dest>',       'open SSH block (hosts file only)',       completable=False),
     CmdDef(['ssh-end'],          '_cmd_ssh_end',    None,
            '',                    'close SSH block (hosts file only)',       completable=False),
+    CmdDef(['fold-all'],         '_cmd_fold_all',   None,
+           '',                    'fold (collapse) all sections  [alias: zM / []'),
+    CmdDef(['unfold-all'],       '_cmd_unfold_all', None,
+           '',                    'unfold (expand) all sections  [alias: zR / ]]'),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
 ]
@@ -1799,11 +1834,13 @@ class Application:
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
         self.details_scroll = 0   # Scroll offset for the host details overlay
+        self.pending_key = None   # Pending multi-key prefix (e.g. 'z' waiting for second key)
         self.running = True
         self.threads = []
         self._start_time = None
 
-        for kind, value in entries:
+        for kind, *rest in entries:
+            value = rest[0] if rest else ''
             if kind == 'host':
                 host_str, port_str = parse_target(value)
                 if port_str:
@@ -1820,7 +1857,8 @@ class Application:
                 self.monitors.append(m)
                 self.entries.append(m)
             elif kind == 'section':
-                self.entries.append(SectionLabel(value))
+                level = rest[1] if len(rest) > 1 else 1
+                self.entries.append(SectionLabel(value, level))
             elif kind == 'cmd':
                 self._dispatch_cmd(value)
             elif kind == 'warn':
@@ -2158,26 +2196,149 @@ class Application:
             except OSError:
                 pass
 
+    # ── Fold helpers ──────────────────────────────────────────────────────────
+
+    def _section_set_fold(self, section, state, recursive=False):
+        """Set the folded state of *section*, optionally recursively.
+
+        When *recursive* is True, all descendant SectionLabels (those with
+        a higher level immediately following *section* in self.entries) are
+        set to *state* as well.
+        """
+        section.folded = state
+        if not recursive:
+            return
+        in_subtree = False
+        for entry in self.entries:
+            if entry is section:
+                in_subtree = True
+                continue
+            if not isinstance(entry, SectionLabel):
+                continue
+            if in_subtree and entry.level > section.level:
+                entry.folded = state
+            elif in_subtree and entry.level <= section.level:
+                break  # left the subtree
+
+    def _fold_all(self, state):
+        """Set all SectionLabels to *state* (True = folded, False = open)."""
+        for entry in self.entries:
+            if isinstance(entry, SectionLabel):
+                entry.folded = state
+
+    def _fold_level_step(self, direction):
+        """Open or close sections one level at a time (global, like zr/zm).
+
+        direction < 0 (zr): find the deepest closed level and open all at that level.
+        direction > 0 (zm): find the shallowest open level and close all at that level.
+        """
+        sections = [e for e in self.entries if isinstance(e, SectionLabel)]
+        if not sections:
+            return
+        levels = sorted({s.level for s in sections})
+        if direction > 0:
+            # zm — close the shallowest level that has any open section
+            for lvl in levels:
+                if any(s.level == lvl and not s.folded for s in sections):
+                    for s in sections:
+                        if s.level == lvl:
+                            s.folded = True
+                    break
+        else:
+            # zr — open the deepest level that has any closed section
+            for lvl in reversed(levels):
+                if any(s.level == lvl and s.folded for s in sections):
+                    for s in sections:
+                        if s.level == lvl:
+                            s.folded = False
+                    break
+
+    def _do_fold_action(self, action):
+        """Execute a named fold action (zo, zO, zc, zC, za, zA, zR, zM, zr, zm).
+
+        Section-specific actions (zo/zO/zc/zC/za/zA) act on the currently
+        highlighted SectionLabel; they are silently ignored when no section is
+        highlighted.  Global actions (zR/zM/zr/zm) work regardless of selection.
+        """
+        entry = None
+        if (self.highlighted_index is not None and
+                0 <= self.highlighted_index < len(self.entries)):
+            entry = self.entries[self.highlighted_index]
+        section = entry if isinstance(entry, SectionLabel) else None
+
+        if action == 'zo':
+            if section:
+                self._section_set_fold(section, False, recursive=False)
+        elif action == 'zO':
+            if section:
+                self._section_set_fold(section, False, recursive=True)
+        elif action == 'zc':
+            if section:
+                self._section_set_fold(section, True, recursive=False)
+        elif action == 'zC':
+            if section:
+                self._section_set_fold(section, True, recursive=True)
+        elif action == 'za':
+            if section:
+                self._section_set_fold(section, not section.folded, recursive=False)
+        elif action == 'zA':
+            if section:
+                self._section_set_fold(section, not section.folded, recursive=True)
+        elif action == 'zR':
+            self._fold_all(False)
+        elif action == 'zM':
+            self._fold_all(True)
+        elif action == 'zr':
+            self._fold_level_step(-1)
+        elif action == 'zm':
+            self._fold_level_step(1)
+
+    def _handle_z_sequence(self, key):
+        """Dispatch a z* two-key fold sequence after 'z' was pressed.
+
+        Unrecognised follow-up keys are silently ignored.
+        """
+        action_map = {
+            ord('o'): 'zo', ord('O'): 'zO',
+            ord('c'): 'zc', ord('C'): 'zC',
+            ord('a'): 'za', ord('A'): 'zA',
+            ord('R'): 'zR', ord('M'): 'zM',
+            ord('r'): 'zr', ord('m'): 'zm',
+        }
+        action = action_map.get(key)
+        if action:
+            self._do_fold_action(action)
+
     def _get_visible_entry_indices(self):
         """Return a list of self.entries indices that are currently visible.
 
         An entry is visible if:
-        - It's a section label AND sort_by == 'none'
-        - It's a monitor AND (sort_by != 'none' OR it doesn't belong to a folded section)
+        - It's a section label AND sort_by == 'none' AND no ancestor section is folded
+        - It's a monitor AND (sort_by != 'none' OR no ancestor section is folded)
+
+        Folding is hierarchical: folding a level-1 section hides its level-2
+        subsections and all hosts underneath.  A section stack tracks ancestors
+        — when a level-N section is encountered, all stack entries with
+        level >= N are popped first.
 
         Returns indices in display order (sorted when sort_by != 'none').
         """
         if self.sort_by == 'none':
-            # No sorting: walk self.entries in order, tracking current section
             visible = []
-            current_section = None
+            section_stack = []  # list of SectionLabel, shallowest first
             for idx, entry in enumerate(self.entries):
                 if isinstance(entry, SectionLabel):
-                    current_section = entry
-                    visible.append(idx)  # section labels are always visible
+                    # Pop sections at same or deeper level — they are siblings/children
+                    # of the new section and no longer in scope.
+                    while section_stack and section_stack[-1].level >= entry.level:
+                        section_stack.pop()
+                    # This section is visible only if no ancestor is folded
+                    if not any(s.folded for s in section_stack):
+                        visible.append(idx)
+                    section_stack.append(entry)
                 else:
-                    # Monitor: visible only if not in a folded section
-                    if current_section is None or not current_section.folded:
+                    # Monitor: visible only if no section in the stack is folded
+                    if not any(s.folded for s in section_stack):
                         visible.append(idx)
             return visible
         else:
@@ -2395,8 +2556,8 @@ class Application:
                 # Sweep phase: snap to half, grow back to ping_length-1, repeat
                 display_count = half + ((max_ping_count - ping_length) % half)
 
-        # Track current section for folding logic
-        current_section = None
+        # Section stack for hierarchical fold tracking (shallowest first)
+        section_stack = []
         entry_index = 0  # index in self.entries (not sorted_monitors)
 
         for item in sorted_monitors:
@@ -2424,26 +2585,33 @@ class Application:
 
             # Section label — render as a bold divider row and skip to the next entry
             if isinstance(item, SectionLabel):
-                current_section = item
+                # Maintain the section stack: pop same/deeper levels
+                while section_stack and section_stack[-1].level >= item.level:
+                    section_stack.pop()
+                section_stack.append(item)
                 # Show fold indicator: [+] if folded, [-] if expanded
                 fold_indicator = "[+]" if item.folded else "[-]"
-                section_text = f"── {fold_indicator} {item.title}"[:width - 1]
+                sec_indent = ' ' * (item.level - 1)
+                section_text = f"{sec_indent}── {fold_indicator} {item.title}"[:width - 1]
                 section_attr = curses.A_BOLD | row_attr
                 stdscr.addstr(row, 0, section_text, section_attr)
                 row += 1
                 entry_index += 1
                 continue
 
-            # Skip this monitor if it belongs to a folded section
-            if current_section is not None and current_section.folded:
+            # Skip this monitor if any section in the stack is folded
+            if any(s.folded for s in section_stack):
                 entry_index += 1
                 continue
 
             monitor = item
 
-            # Hostname
+            # Hostname (indented by current section depth)
+            host_indent = section_stack[-1].level * 2 if section_stack else 0
             display_name = monitor.get_display_name(DNS_MODES[self.dns_mode])
-            stdscr.addstr(row, 0, display_name[:name_col_width].ljust(name_col_width), row_attr)
+            display_width = name_col_width - host_indent
+            padded_name = (' ' * host_indent + display_name[:display_width]).ljust(name_col_width)
+            stdscr.addstr(row, 0, padded_name, row_attr)
 
             # Stat col: Last latency (off) or single stat value; hidden in All mode
             if not show_all:
@@ -3241,7 +3409,8 @@ class Application:
 
         try:
             new_entries = parse_hosts_file(filename)
-            for kind, value in new_entries:
+            for kind, *rest in new_entries:
+                value = rest[0] if rest else ''
                 if kind == 'host':
                     host_str, port_str = parse_target(value)
 
@@ -3265,7 +3434,8 @@ class Application:
                             thread.start()
                             self.threads.append(thread)
                 elif kind == 'section':
-                    self.entries.append(SectionLabel(value))
+                    level = rest[1] if len(rest) > 1 else 1
+                    self.entries.append(SectionLabel(value, level))
                 elif kind == 'cmd':
                     self._dispatch_cmd(value)
                 elif kind == 'warn':
@@ -3606,6 +3776,14 @@ class Application:
         """Report that :ssh-end is a hosts-file-only directive."""
         self.add_event("cmd",
             "ssh-end: only supported in hosts files — use :ssh for interactive SSH")
+
+    def _cmd_fold_all(self, args=''):
+        """Fold (collapse) all sections."""
+        self._fold_all(True)
+
+    def _cmd_unfold_all(self, args=''):
+        """Unfold (expand) all sections."""
+        self._fold_all(False)
 
     def _cmd_help(self, args=''):
         """Open the help overlay (sets self.help_open = True).
@@ -4052,6 +4230,15 @@ class Application:
                     self._draw_details_overlay(stdscr, height, width)
                     curses.curs_set(0)
 
+                # Pending-key indicator — drawn last so nothing overwrites it
+                if self.pending_key:
+                    indicator = f"[{self.pending_key}]"
+                    try:
+                        stdscr.addstr(height - 1, width - len(indicator) - 1,
+                                      indicator, curses.A_REVERSE)
+                    except curses.error:
+                        pass
+
                 try:
                     stdscr.refresh()
                 except KeyboardInterrupt:
@@ -4098,6 +4285,15 @@ class Application:
                     if key != -1:
                         self._handle_prompt_key(key)
                     continue
+                # ── pending z* sequence ────────────────────────────────────
+                if self.pending_key == 'z':
+                    if key != -1:   # real key: complete the sequence
+                        self.pending_key = None
+                        if key != 27:   # ESC just cancels, doesn't dispatch
+                            self._handle_z_sequence(key)
+                    continue         # wait (timeout) or move on after dispatch
+                if key == -1:
+                    continue         # no key pressed this tick
                 if key == ord('q') or key == ord('Q'):
                     self.running = False
                     break
@@ -4124,18 +4320,27 @@ class Application:
                 elif key == ord('H'):
                     self.cycle_history_mode(-1)
                 elif key == ord(' '):
-                    # If a section header is highlighted, toggle its folded state.
+                    # If a section header is highlighted, toggle its folded state (= za).
                     # If a PingMonitor is highlighted, Space does nothing.
                     # If nothing is highlighted, insert a 'seen' marker (only if not scrolling log).
                     if (self.highlighted_index is not None and
                         0 <= self.highlighted_index < len(self.entries)):
                         entry = self.entries[self.highlighted_index]
                         if isinstance(entry, SectionLabel):
-                            entry.folded = not entry.folded
+                            self._do_fold_action('za')
                         # PingMonitor highlighted — no action for Space
                     else:
                         if self.log_offset == 0:
                             self.mark_seen()
+                elif key == 0:  # Ctrl+Space — zA: recursive toggle on highlighted section
+                    self._do_fold_action('zA')
+                elif key == ord('z'):
+                    # Start a z* two-key fold sequence; indicator shown in bottom-right
+                    self.pending_key = 'z'
+                elif key == ord('['):
+                    self._fold_all(True)   # fold all (zM alias)
+                elif key == ord(']'):
+                    self._fold_all(False)  # unfold all (zR alias)
                 elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
                     if (self.highlighted_index is not None and
                             0 <= self.highlighted_index < len(self.entries)):
@@ -4246,8 +4451,11 @@ examples:
 
 hosts file format:
   # comment line (ignored)
-  ## Section title          — section divider in the UI
-  :title Section title      — preferred section divider syntax
+  ## Title              — level-1 section header (also :title Title)
+  ### Sub-title         — level-2 section header (also :title2 Title)
+  #### Sub-sub-title    — level-3 section header (also :title3 Title)
+  10.0.0.1 ## label     — inline label; ## / ### / #### treated as comment
+  :title Title          — same as ##; :title2 = ###; :title3 = ####
   10.0.0.1                  — host or IP to ping
   10.0.0.{1..5}             — brace range expansion (5 hosts)
   :resolv <ip> <hostname>   — static DNS override

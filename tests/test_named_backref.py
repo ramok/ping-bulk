@@ -93,8 +93,8 @@ class TestApplyNamedBackref:
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
-        sections = [val for kind, val in entries if kind == 'section']
-        hosts = [val for kind, val in entries if kind == 'host']
+        sections = [title for kind, title, *_ in entries if kind == 'section']
+        hosts = [rest[0] for kind, *rest in entries if kind == 'host']
 
         assert sections == ['Environment: prod', 'Environment: stage', 'Environment: dev']
         assert hosts == ['server-prod-1', 'server-stage-1', 'server-dev-1']
