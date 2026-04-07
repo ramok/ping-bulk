@@ -2464,27 +2464,26 @@ class Application:
             if col >= width - 1:
                 break
 
-            # Render each character; highlight hotkey (inside [...]) in white
+            # Render each character; highlight hotkey (inside [...]) in white.
+            # Single-char hotkeys are shown without brackets; multi-char with brackets.
             i = 0
             while i < len(label) and col < width - 1:
                 ch = label[i]
                 if ch == '[':
                     i += 1
-                    # Collect everything up to the closing ']'
                     token = []
                     while i < len(label) and label[i] != ']':
                         token.append(label[i])
                         i += 1
                     if i < len(label):
                         i += 1  # skip ']'
-
                     if len(token) == 1:
-                        # Single-char hotkey: highlight without brackets (standard look)
+                        # Single-char hotkey: no brackets
                         if col < width - 1:
                             stdscr.addstr(0, col, token[0], curses.color_pair(4) | curses.A_BOLD)
                             col += 1
                     else:
-                        # Multi-char hotkey (e.g. "Space"): show '[…]' with all chars highlighted
+                        # Multi-char hotkey: keep brackets, highlight content
                         if col < width - 1:
                             stdscr.addstr(0, col, '[')
                             col += 1
@@ -2505,6 +2504,73 @@ class Application:
             if col + len(sep) < width:
                 stdscr.addstr(0, col, sep)
                 col += len(sep)
+
+    @staticmethod
+    def _draw_hint_text(stdscr, row, col, text, width):
+        """Render *text* onto *stdscr* at (*row*, *col*) with hotkey colouring.
+
+        Tokens of the form ``[key desc]`` are parsed:
+          - The outer ``[`` and ``]`` are drawn in the default colour.
+          - The *key* part (everything before the first space inside the token)
+            is drawn in white/bold (``color_pair(4) | A_BOLD``).
+          - The *desc* part (from the first space to ``]``) is drawn in the
+            default colour.
+          - ``\\[`` and ``\\]`` inside a token represent literal bracket
+            characters that are part of the key (e.g. ``\\[`` → ``[``).
+        Plain text outside tokens is drawn in the default colour.
+
+        Returns the column position after the last character drawn.
+        """
+        i = 0
+        while i < len(text) and col < width - 1:
+            ch = text[i]
+            if ch == '[':
+                stdscr.addstr(row, col, ch)
+                col += 1
+                i += 1
+                # Collect token content; \[ and \] are escaped literal brackets
+                token = []
+                while i < len(text) and text[i] != ']':
+                    if text[i] == '\\' and i + 1 < len(text) and text[i + 1] in '[]':
+                        token.append(text[i + 1])
+                        i += 2
+                    else:
+                        token.append(text[i])
+                        i += 1
+                content = ''.join(token)
+                space_pos = content.find(' ')
+                if space_pos == -1:
+                    key_part, desc_part = content, ''
+                else:
+                    key_part, desc_part = content[:space_pos], content[space_pos:]
+                for tc in key_part:
+                    if col < width - 1:
+                        stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                        col += 1
+                for tc in desc_part:
+                    if col < width - 1:
+                        stdscr.addstr(row, col, tc)
+                        col += 1
+                if i < len(text):  # closing ']'
+                    if col < width - 1:
+                        stdscr.addstr(row, col, ']')
+                        col += 1
+                    i += 1
+            else:
+                stdscr.addstr(row, col, ch)
+                col += 1
+                i += 1
+        return col
+
+    def _draw_column_header(self, stdscr, row, col, title, suffix, width):
+        """Draw a column header: *title* in white/bold then *suffix* via _draw_hint_text.
+
+        Returns the column position after the last character drawn.
+        """
+        if col < width - 1:
+            stdscr.addstr(row, col, title, curses.color_pair(4) | curses.A_BOLD)
+            col += len(title)
+        return self._draw_hint_text(stdscr, row, col, suffix, width)
 
     def _rtt_cell_width(self):
         """Compute the cell width needed for rtt mode based on max RTT across all monitors.
@@ -2592,51 +2658,9 @@ class Application:
             if self.history_offset > 0:
                 hist_suffix += f" [←{self.history_offset}  →live]"
 
-            # Draw title in white/bold, then suffix char-by-char.
-            # Format: [key desc] — key (before first space) rendered in white/bold;
-            # brackets and descriptions in default colour.
-            # Inside a token, \[ and \] are escaped literals (e.g. [ or ] as hotkey).
-            stdscr.addstr(start_row, hist_col_effective, hist_title, curses.color_pair(4) | curses.A_BOLD)
-            col = hist_col_effective + len(hist_title)
-            i = 0
-            while i < len(hist_suffix) and col < width - 1:
-                ch = hist_suffix[i]
-                if ch == '[':
-                    stdscr.addstr(start_row, col, ch)
-                    col += 1
-                    i += 1
-                    # Collect bracket content; \[ and \] are escaped literal brackets
-                    token = []
-                    while i < len(hist_suffix) and hist_suffix[i] != ']':
-                        if hist_suffix[i] == '\\' and i + 1 < len(hist_suffix) and hist_suffix[i + 1] in '[]':
-                            token.append(hist_suffix[i + 1])
-                            i += 2
-                        else:
-                            token.append(hist_suffix[i])
-                            i += 1
-                    content = ''.join(token)
-                    space_pos = content.find(' ')
-                    if space_pos == -1:
-                        key_part, desc_part = content, ''
-                    else:
-                        key_part, desc_part = content[:space_pos], content[space_pos:]
-                    for tc in key_part:
-                        if col < width - 1:
-                            stdscr.addstr(start_row, col, tc, curses.color_pair(4) | curses.A_BOLD)
-                            col += 1
-                    for tc in desc_part:
-                        if col < width - 1:
-                            stdscr.addstr(start_row, col, tc)
-                            col += 1
-                    if i < len(hist_suffix):  # closing ']'
-                        if col < width - 1:
-                            stdscr.addstr(start_row, col, ']')
-                            col += 1
-                        i += 1
-                else:
-                    stdscr.addstr(start_row, col, ch)
-                    col += 1
-                    i += 1
+            # Draw title in white/bold, then hints with [key desc] colouring.
+            self._draw_column_header(stdscr, start_row, hist_col_effective,
+                                     hist_title, hist_suffix, width)
 
             if show_all and all_stats_col < width:
                 all_header = (f"{'ms':>6}  {'Up/Down':>{updown_col_w}}  "
@@ -3070,46 +3094,7 @@ class Application:
             header_suffix += f" → {self.log_file}"
 
         # Render title in white/bold; [key desc] tokens have key in white, desc default.
-        stdscr.addstr(start_row, 0, header_title, curses.color_pair(4) | curses.A_BOLD)
-        col = len(header_title)
-        i = 0
-        while i < len(header_suffix) and col < width - 1:
-            ch = header_suffix[i]
-            if ch == '[':
-                stdscr.addstr(start_row, col, ch)
-                col += 1
-                i += 1
-                token = []
-                while i < len(header_suffix) and header_suffix[i] != ']':
-                    if header_suffix[i] == '\\' and i + 1 < len(header_suffix) and header_suffix[i + 1] in '[]':
-                        token.append(header_suffix[i + 1])
-                        i += 2
-                    else:
-                        token.append(header_suffix[i])
-                        i += 1
-                content = ''.join(token)
-                space_pos = content.find(' ')
-                if space_pos == -1:
-                    key_part, desc_part = content, ''
-                else:
-                    key_part, desc_part = content[:space_pos], content[space_pos:]
-                for tc in key_part:
-                    if col < width - 1:
-                        stdscr.addstr(start_row, col, tc, curses.color_pair(4) | curses.A_BOLD)
-                        col += 1
-                for tc in desc_part:
-                    if col < width - 1:
-                        stdscr.addstr(start_row, col, tc)
-                        col += 1
-                if i < len(header_suffix):  # closing ']'
-                    if col < width - 1:
-                        stdscr.addstr(start_row, col, ']')
-                        col += 1
-                    i += 1
-            else:
-                stdscr.addstr(start_row, col, ch)
-                col += 1
-                i += 1
+        self._draw_column_header(stdscr, start_row, 0, header_title, header_suffix, width)
 
         row = start_row + 1
         for event in visible:
