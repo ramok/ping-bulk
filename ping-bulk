@@ -67,6 +67,8 @@ SET_PARAMS = [
              'event log max lines (default 10000)'),
     SetParam('history-size', '_cmd_history_size', ['1000', '10000', '86400', '604800'],
              'per-host ping history depth (default 86400)'),
+    SetParam('sync-history', '_cmd_sync_history', ['on', 'off'],
+             'align history bars to wall-clock time (default on)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -664,6 +666,7 @@ class Monitor(ABC):
         self.alive = None
         self.latency = None
         self.history = deque(maxlen=100)
+        self.history_times = deque(maxlen=100)  # parallel wall-clock timestamps
         self.latencies = []    # all recorded latency values (successful pings)
         self.rx_count = 0      # total successful pings (RX)
         self.xx_count = 0      # total failed pings (XX)
@@ -700,8 +703,43 @@ class Monitor(ABC):
             return self.resolved_ip or self.host
         return self.host
 
-    def get_history_string(self, length=50, offset=0, mode="success", cell_width=1):
-        """Get history as a string of given length ending offset steps from the newest sample."""
+    def get_history_string(self, length=50, offset=0, mode="success", cell_width=1,
+                           sync=False, end_time=None):
+        """Get history as a string of given length ending offset steps from the newest sample.
+
+        sync=True uses wall-clock time buckets (1 bucket = 1 second) so all monitors
+        share the same time axis, with spaces for seconds where no ping arrived.
+        end_time is the right-edge wall-clock time; offset is in seconds in sync mode.
+        """
+        if sync and end_time is not None:
+            with self.lock:
+                history_list = list(self.history)
+                times_list   = list(self.history_times)
+            t_end = end_time - offset
+            # One pass: map each (timestamp, value) to a bucket index.
+            # Bucket 0 = most recent 1s window ending at t_end; bucket i ends at t_end-i.
+            # Newer entries overwrite older ones in the same bucket (scan oldest→newest).
+            if cell_width > 1:
+                result = [' ' * cell_width] * length
+            else:
+                result = [' '] * length
+            for ts, val in zip(times_list, history_list):
+                bucket = int(t_end - ts)
+                if 0 <= bucket < length:
+                    if cell_width > 1:
+                        num_w = cell_width - 1
+                        if val is None:
+                            cell = "X" * num_w + " "
+                        elif val == "ERR":
+                            cell = "?" * num_w + " "
+                        else:
+                            capped = min(int(round(val)), 10 ** num_w - 1)
+                            cell = f"{capped:>{num_w}} "
+                    else:
+                        cell = _history_char(val, mode)
+                    result[bucket] = cell
+            return "".join(result)  # result[0]=newest, result[length-1]=oldest (no reversal)
+
         with self.lock:
             history_list = list(self.history)
             total = len(history_list)
@@ -794,11 +832,19 @@ class PingMonitor(Monitor):
 
                 line = raw_line.rstrip()
 
-                # Strip the '-D' Unix-timestamp prefix: '[1234567890.123] rest'
+                # Strip the '-D' Unix-timestamp prefix: '[1234567890.123] rest';
+                # capture the timestamp for wall-clock-aligned history.
+                ping_ts = None
                 if line.startswith('['):
                     close = line.find(']')
                     if close != -1:
+                        try:
+                            ping_ts = float(line[1:close])
+                        except ValueError:
+                            pass
                         line = line[close + 2:]  # skip past '] '
+                if ping_ts is None:
+                    ping_ts = time.time()
 
                 if 'time=' in line:
                     # Successful reply — extract RTT
@@ -810,6 +856,7 @@ class PingMonitor(Monitor):
                         self.latency = latency
                         self.alive = True
                         self.history.append(latency)
+                        self.history_times.append(ping_ts)
                         self.rx_count += 1
                         self.latencies.append(latency)
                     self.ping_count += 1
@@ -821,6 +868,7 @@ class PingMonitor(Monitor):
                         self.alive = False
                         self.latency = None
                         self.history.append(None)
+                        self.history_times.append(ping_ts)
                         self.xx_count += 1
                     self.ping_count += 1
                     got_output = True
@@ -956,6 +1004,7 @@ class PortMonitor(Monitor):
             )
 
             start_time = time.monotonic()
+            wall_time  = time.time()
             success = False
 
             try:
@@ -969,6 +1018,7 @@ class PortMonitor(Monitor):
                 self.error = str(exc)
                 with self.lock:
                     self.history.append("ERR")
+                    self.history_times.append(wall_time)
                 break
 
             latency_ms = (time.monotonic() - start_time) * 1000.0
@@ -978,6 +1028,7 @@ class PortMonitor(Monitor):
                     self.latency = latency_ms
                     self.alive = True
                     self.history.append(latency_ms)
+                    self.history_times.append(wall_time)
                     self.rx_count += 1
                     self.latencies.append(latency_ms)
             else:
@@ -985,6 +1036,7 @@ class PortMonitor(Monitor):
                     self.alive = False
                     self.latency = None
                     self.history.append(None)
+                    self.history_times.append(wall_time)
                     self.xx_count += 1
 
             self.ping_count += 1
@@ -1250,10 +1302,17 @@ class SshPingMonitor(Monitor):
 
                 line = raw_line.rstrip()
 
+                ping_ts = None
                 if line.startswith("["):
                     close = line.find("]")
                     if close != -1:
-                        line = line[close + 2 :]
+                        try:
+                            ping_ts = float(line[1:close])
+                        except ValueError:
+                            pass
+                        line = line[close + 2:]
+                if ping_ts is None:
+                    ping_ts = time.time()
 
                 if "time=" in line:
                     try:
@@ -1264,6 +1323,7 @@ class SshPingMonitor(Monitor):
                         self.latency = latency
                         self.alive = True
                         self.history.append(latency)
+                        self.history_times.append(ping_ts)
                         self.rx_count += 1
                         self.latencies.append(latency)
                     self.ping_count += 1
@@ -1274,6 +1334,7 @@ class SshPingMonitor(Monitor):
                         self.alive = False
                         self.latency = None
                         self.history.append(None)
+                        self.history_times.append(ping_ts)
                         self.xx_count += 1
                     self.ping_count += 1
                     got_output = True
@@ -1775,6 +1836,11 @@ CMD_REGISTRY = [
            '',                    'fold (collapse) all sections  [alias: zM / []'),
     CmdDef(['unfold-all'],       '_cmd_unfold_all', None,
            '',                    'unfold (expand) all sections  [alias: zR / ]]'),
+    CmdDef(['sync-history'],     '_cmd_sync_history', ['on', 'off'],
+           '[on|off]',            'align history bars to wall-clock time (default on)',
+           cli_flags=('--sync-history',),
+           cli_kwargs={'choices': ['on', 'off'], 'default': None,
+                       'help': 'align history bars to wall-clock time (default: on)'}),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
 ]
@@ -1807,6 +1873,7 @@ class Application:
         self.hosts_map = {}  # static DNS overrides: ip→(ip, hostname) and hostname→(ip, hostname)
         self.port_map = {}   # static port overrides: port_num→service_name and service_name→port_num
         self.history_size = 86400  # per-host ping history deque size (default 24 h at 1 ping/s)
+        self.sync_history = True   # align history bars to wall-clock time
         self.log_size = 10000
         self.events = deque(maxlen=self.log_size)
         self.paused = False
@@ -1933,6 +2000,7 @@ class Application:
                 f.write(f":set ping-view {HISTORY_MODES[self.history_mode]}\n")
                 f.write(f":set log-size {self.log_size}\n")
                 f.write(f":set history-size {self.history_size}\n")
+                f.write(f":set sync-history {'on' if self.sync_history else 'off'}\n")
                 if self.log_file:
                     f.write(f":log {self.log_file}\n")
                 else:
@@ -2343,11 +2411,12 @@ class Application:
             return '.'
         return ' '
 
-    def _section_summary(self, monitors, length, offset):
-        """Compute ``(badge_str, history_str)`` for a list of monitors.
+    def _section_summary(self, monitors, length, offset, sync=False, end_time=None):
+        """Compute ``(badge_parts, history_str)`` for a list of monitors.
 
-        badge_str   — ``'N↑/N↓/N-'`` status count; zero-count groups omitted.
+        badge_parts — list of ``(text, color_pair_id)`` segments.
         history_str — worst-of-all-monitors per time slot, always in 'success' mode.
+        sync/end_time are forwarded to get_history_string for wall-clock alignment.
         """
         # Badge — list of (text, color_pair_id) so each segment is coloured individually.
         # Color ids: 1=green (up), 2=red (down), 3=yellow (unknown), 0=default (separator).
@@ -2373,7 +2442,8 @@ class Application:
             history = ' ' * length
         else:
             per_monitor = [
-                m.get_history_string(length=length, offset=offset, mode='success', cell_width=1)
+                m.get_history_string(length=length, offset=offset, mode='success',
+                                     cell_width=1, sync=sync, end_time=end_time)
                 for m in monitors
             ]
             history = ''.join(
@@ -2710,6 +2780,11 @@ class Application:
 
         max_ping_count = max((m.ping_count for m in self.monitors), default=0)
 
+        # Wall-clock reference time for sync-history mode; floored to whole second
+        # so bucket boundaries are stable — gaps only move once per second.
+        render_time = int(time.time())
+        sync = self.sync_history
+
         if self.history_offset > 0:
             # Scrolled view: always show the full available width
             display_count = ping_length
@@ -2758,7 +2833,8 @@ class Application:
                 # Compute badge parts and (if folded) history for all descendant monitors
                 sec_monitors = self._get_section_monitors(actual_entry_index)
                 badge_parts, sec_history = self._section_summary(
-                    sec_monitors, display_count, self.history_offset
+                    sec_monitors, display_count, self.history_offset,
+                    sync=sync, end_time=render_time
                 )
                 has_error = any(m.error is not None for m in sec_monitors)
 
@@ -2855,7 +2931,8 @@ class Application:
                         stdscr.addstr(row, stat_value_col, "     -", curses.color_pair(2) | row_attr)
 
             history = monitor.get_history_string(
-                display_count, self.history_offset, hist_mode, cell_width
+                display_count, self.history_offset, hist_mode, cell_width,
+                sync=sync, end_time=render_time
             )
 
             # Color code the history.
@@ -3820,9 +3897,23 @@ class Application:
         self.history_size = n
         for monitor in self.monitors:
             with monitor.lock:
-                monitor.history = deque(monitor.history, maxlen=n)
+                monitor.history       = deque(monitor.history,       maxlen=n)
+                monitor.history_times = deque(monitor.history_times, maxlen=n)
         if self._monitoring_started:
             self.add_event("history-size", f"per-host ping history size set to {n}")
+
+    def _cmd_sync_history(self, args=''):
+        """Toggle or set sync-history mode (on/off)."""
+        val = args.strip().lower()
+        if val == 'on':
+            self.sync_history = True
+        elif val == 'off':
+            self.sync_history = False
+        else:
+            self.sync_history = not self.sync_history
+        state = 'on' if self.sync_history else 'off'
+        if self._monitoring_started:
+            self.add_event("sync-history", f"wall-clock history alignment {state}")
 
     def _cmd_saveconfig(self, args=''):
         """Save current settings to config file."""
@@ -4764,6 +4855,8 @@ def main(stdscr, args):
         app._dispatch_cmd(f':set sort {args.sort}')
     if args.ping_view:
         app._dispatch_cmd(f':set ping-view {args.ping_view}')
+    if args.sync_history:
+        app._dispatch_cmd(f':set sync-history {args.sync_history}')
 
     app.run(stdscr)
 
