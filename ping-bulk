@@ -2278,28 +2278,28 @@ class Application:
         self.log_offset = max(0, min(max_offset, self.log_offset + delta))
 
     def clamp_host_scroll(self, visible_rows: int) -> None:
-        """Adjust host_scroll so that highlighted_index is visible.
+        """Adjust host_scroll so that:
+        - it never exceeds the last scrollable position (always applied), and
+        - the highlighted entry is within the visible window (when selection is active).
 
         visible_rows — number of rows available for the host list (max_rows).
-        Only adjusts scroll if highlighted_index is set.
         """
-        if self.highlighted_index is None:
-            return
         visible_indices = self._get_visible_entry_indices()
-        if not visible_indices:
+        # Always bound host_scroll to the valid range regardless of selection state.
+        max_scroll = max(0, len(visible_indices) - visible_rows)
+        self.host_scroll = max(0, min(max_scroll, self.host_scroll))
+
+        if self.highlighted_index is None or not visible_indices:
             return
         try:
             pos = visible_indices.index(self.highlighted_index)
         except ValueError:
             return
-        # Clamp so that pos is within [host_scroll, host_scroll + visible_rows - 1]
+        # Scroll so that pos is within [host_scroll, host_scroll + visible_rows - 1]
         if pos < self.host_scroll:
             self.host_scroll = pos
         elif pos >= self.host_scroll + visible_rows:
             self.host_scroll = pos - visible_rows + 1
-        # Also keep host_scroll bounded
-        max_scroll = max(0, len(visible_indices) - visible_rows)
-        self.host_scroll = max(0, min(max_scroll, self.host_scroll))
 
     def mark_seen(self):
         """Append a visual 'seen' separator line to the event log (and log file if set).
