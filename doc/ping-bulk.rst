@@ -98,12 +98,12 @@ Navigation
 Display
 -------
 
-``d`` / ``D``
-    Cycle the DNS display mode forward / backward.
+``D``
+    Cycle the DNS display mode forward.
     Modes: ``off`` → ``hostname`` → ``ip``.
 
-``s`` / ``S``
-    Cycle the stats column forward / backward.
+``s``
+    Cycle the stats column forward.
     Modes: ``off`` → ``Down`` → ``Loss%`` → ``Avg`` → ``Min`` → ``Max`` →
     ``StDev`` → ``RX`` → ``TX`` → ``XX`` → ``All``.
 
@@ -111,9 +111,14 @@ Display
     Cycle the sort order forward / backward.
     Orders: ``none`` → ``name`` → ``status`` → ``latency``.
 
-``h`` / ``H``
-    Cycle the ping-history display mode forward / backward.
+``H``
+    Cycle the ping-history display mode forward.
     Modes: ``success`` → ``rtt`` → ``scaled``.
+
+``S``
+    Toggle sync-history mode (wall-clock-aligned history bars).
+    In sync mode all hosts share the same time axis; a host that started
+    late shows a leading gap instead of appearing shifted.
 
 ``p`` / ``P``
     Toggle pause (freeze the display without stopping pings).

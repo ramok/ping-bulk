@@ -80,10 +80,11 @@ _FULL_HELP = [
     "-DIVIDER-",
     "  Hotkeys",
     "  q / Q         quit",
-    "  d / D         cycle DNS mode forward / backward",
-    "  s / S         cycle stats column forward / backward",
+    "  D             cycle DNS display mode",
+    "  s             cycle stats column",
     "  o / O         cycle sort order forward / backward",
-    "  h / H         cycle history mode forward / backward",
+    "  H             cycle ping-history display mode",
+    "  S             toggle sync-history (wall-clock alignment)",
     "  p / P         toggle pause",
     "  ↑ / ↓          navigate host list",
     "  Enter          show detailed stats for highlighted host",
@@ -1883,7 +1884,7 @@ class Application:
         self.hosts_map = {}  # static DNS overrides: ip→(ip, hostname) and hostname→(ip, hostname)
         self.port_map = {}   # static port overrides: port_num→service_name and service_name→port_num
         self.history_size = 86400  # per-host ping history deque size (default 24 h at 1 ping/s)
-        self.sync_history = True   # align history bars to wall-clock time
+        self.sync_history = False  # align history bars to wall-clock time (off by default)
         self.log_size = 10000
         self.events = deque(maxlen=self.log_size)
         self.paused = False
@@ -2544,7 +2545,8 @@ class Application:
             (f"[D]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
             (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
             (f"[o]rder by:{self.sort_by}", False),
-            (f"[h]istory:{HISTORY_MODES[self.history_mode]}", False),
+            (f"[H]istory:{HISTORY_MODES[self.history_mode]}", False),
+            (f"[S]ync:{'on' if self.sync_history else 'off'}", self.sync_history),
             (f"[p]ause:{'on' if self.paused else 'off'}", self.paused),
         ]
         menu_items.extend([
@@ -4659,24 +4661,20 @@ class Application:
                     self.prompt = {'type': 'quit_confirm', 'chars': []}
                 elif key == 27:  # Escape — clear host selection
                     self.highlighted_index = None
-                elif key == ord('d'):
-                    self.cycle_dns(1)
                 elif key == ord('D'):
-                    self.cycle_dns(-1)
+                    self.cycle_dns(1)
                 elif key == ord('s'):
                     self.cycle_stats(1)
                 elif key == ord('S'):
-                    self.cycle_stats(-1)
+                    self._cmd_sync_history()
                 elif key == ord('o'):
                     self.cycle_sort(1)
                 elif key == ord('O'):
                     self.cycle_sort(-1)
                 elif key == ord('p') or key == ord('P'):
                     self.paused = not self.paused
-                elif key == ord('h'):
-                    self.cycle_history_mode(1)
                 elif key == ord('H'):
-                    self.cycle_history_mode(-1)
+                    self.cycle_history_mode(1)
                 elif key == ord(' '):
                     # If a section header is highlighted, toggle its folded state (= za).
                     # If a PingMonitor is highlighted, Space does nothing.
