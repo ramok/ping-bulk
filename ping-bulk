@@ -2606,7 +2606,7 @@ class Application:
         )
         # Each section header occupies: (level-1) indent + "── [-] " (7) + title length
         max_section_len = max(
-            ((e.level - 1) + 7 + len(e.title)
+            ((e.level - 1) * 2 + 7 + len(e.title)
              for e in self.entries if isinstance(e, SectionLabel)),
             default=0
         )
@@ -2755,7 +2755,7 @@ class Application:
 
                 # Show fold indicator: [+] if folded, [-] if expanded
                 fold_indicator = "[+]" if item.folded else "[-]"
-                sec_indent = ' ' * (item.level - 1)
+                sec_indent = ' ' * ((item.level - 1) * 2)
                 prefix = f"{sec_indent}── {fold_indicator} "
                 # Truncate title so badge and history have room
                 title_max = stat_col - len(prefix) - 1

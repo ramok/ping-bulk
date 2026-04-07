@@ -406,13 +406,13 @@ class TestHierarchicalTitlesUI:
             f"Level-1 section should start at column 0, got: {top_line!r}")
 
     def test_level2_section_indented(self):
-        """Level-2 section header is indented by 1 space."""
+        """Level-2 section header is indented by 2 spaces."""
         screen = self.sess.capture_pane()
         lines = screen.splitlines()
         sub_line = next((l for l in lines if 'Sub' in l and '──' in l), None)
         assert sub_line is not None, f"No Sub section line found in:\n{screen}"
-        assert sub_line.startswith(' ──'), (
-            f"Level-2 section should be indented 1 space, got: {sub_line!r}")
+        assert sub_line.startswith('  ──'), (
+            f"Level-2 section should be indented 2 spaces, got: {sub_line!r}")
 
     def test_zM_folds_all(self):
         """zM folds all sections ([+] indicator appears)."""
