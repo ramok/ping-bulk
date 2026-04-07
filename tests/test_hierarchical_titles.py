@@ -322,7 +322,8 @@ class TestSectionSummaryHelpers:
         app = self._make_app(pb)
         for m in app.monitors:
             m.alive = True
-        badge, _ = app._section_summary(app.monitors, length=5, offset=0)
+        badge_parts, _ = app._section_summary(app.monitors, length=5, offset=0)
+        badge = ''.join(text for text, _ in badge_parts)
         assert '↑' in badge
         assert '↓' not in badge
         assert '-' not in badge
@@ -335,7 +336,8 @@ class TestSectionSummaryHelpers:
         monitors[0].alive = True
         monitors[1].alive = False
         monitors[2].alive = None
-        badge, _ = app._section_summary(monitors, length=5, offset=0)
+        badge_parts, _ = app._section_summary(monitors, length=5, offset=0)
+        badge = ''.join(text for text, _ in badge_parts)
         assert '1↑' in badge
         assert '1↓' in badge
         assert '1-' in badge
@@ -346,7 +348,8 @@ class TestSectionSummaryHelpers:
         app = self._make_app(pb)
         for m in app.monitors:
             m.alive = True
-        badge, _ = app._section_summary(app.monitors, length=5, offset=0)
+        badge_parts, _ = app._section_summary(app.monitors, length=5, offset=0)
+        badge = ''.join(text for text, _ in badge_parts)
         assert '-' not in badge
         assert '↓' not in badge
         for m in app.monitors: m.stop()

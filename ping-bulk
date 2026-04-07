@@ -2349,15 +2349,24 @@ class Application:
         badge_str   — ``'N↑/N↓/N-'`` status count; zero-count groups omitted.
         history_str — worst-of-all-monitors per time slot, always in 'success' mode.
         """
-        # Badge
-        up = sum(1 for m in monitors if m.alive is True)
-        down = sum(1 for m in monitors if m.alive is False)
+        # Badge — list of (text, color_pair_id) so each segment is coloured individually.
+        # Color ids: 1=green (up), 2=red (down), 3=yellow (unknown), 0=default (separator).
+        up      = sum(1 for m in monitors if m.alive is True)
+        down    = sum(1 for m in monitors if m.alive is False)
         unknown = sum(1 for m in monitors if m.alive is None)
-        parts = []
-        if up:      parts.append(f"{up}↑")
-        if down:    parts.append(f"{down}↓")
-        if unknown: parts.append(f"{unknown}-")
-        badge = '/'.join(parts) if parts else '-'
+        has_error = any(m.error is not None for m in monitors)
+        segs = []
+        if up:      segs.append((f"{up}↑",    1))
+        if down:    segs.append((f"{down}↓",  2))
+        if unknown: segs.append((f"{unknown}-", 3))
+        # Build interleaved list with '/' separators between segments
+        badge_parts: list = []
+        for i, seg in enumerate(segs):
+            if i:
+                badge_parts.append(('/', 0))
+            badge_parts.append(seg)
+        if not badge_parts:
+            badge_parts = [('-', 0)]
 
         # History — worst char per slot across all monitors
         if not monitors:
@@ -2372,7 +2381,7 @@ class Application:
                 for i in range(length)
             )
 
-        return badge, history
+        return badge_parts, history
 
     def _get_visible_entry_indices(self):
         """Return a list of self.entries indices that are currently visible.
@@ -2662,25 +2671,12 @@ class Application:
                     section_stack.pop()
                 section_stack.append(item)
 
-                # Compute badge and (if folded) history for all descendant monitors
+                # Compute badge parts and (if folded) history for all descendant monitors
                 sec_monitors = self._get_section_monitors(actual_entry_index)
-                badge, sec_history = self._section_summary(
+                badge_parts, sec_history = self._section_summary(
                     sec_monitors, display_count, self.history_offset
                 )
-
-                # Badge color: any error → bright red, any down → red,
-                #              any unknown → yellow, all up → green
-                has_error   = any(m.error is not None for m in sec_monitors)
-                has_down    = any(m.alive is False for m in sec_monitors)
-                has_unknown = any(m.alive is None for m in sec_monitors)
-                if has_error:
-                    badge_color = curses.color_pair(2) | curses.A_BOLD
-                elif has_down:
-                    badge_color = curses.color_pair(2)
-                elif has_unknown:
-                    badge_color = curses.color_pair(3)
-                else:
-                    badge_color = curses.color_pair(1)
+                has_error = any(m.error is not None for m in sec_monitors)
 
                 # Show fold indicator: [+] if folded, [-] if expanded
                 fold_indicator = "[+]" if item.folded else "[-]"
@@ -2694,10 +2690,23 @@ class Application:
                 section_attr = curses.A_BOLD | row_attr
                 stdscr.addstr(row, 0, section_text, section_attr)
 
-                # Badge at stat_col
-                badge_display = f"{badge:<6}"[:6]
+                # Badge at stat_col — each part (N↑, N↓, N-) gets its own colour
                 if stat_col < width:
-                    stdscr.addstr(row, stat_col, badge_display, badge_color | row_attr)
+                    col = stat_col
+                    for text, pair_id in badge_parts:
+                        if col >= width:
+                            break
+                        if pair_id == 0:
+                            attr = row_attr
+                        else:
+                            attr = curses.color_pair(pair_id) | row_attr
+                            if has_error and pair_id in (2, 3):
+                                attr |= curses.A_BOLD
+                        try:
+                            stdscr.addstr(row, col, text, attr)
+                        except curses.error:
+                            pass
+                        col += len(text)
 
                 # History bar — only when folded
                 if item.folded and hist_col_effective < width:
