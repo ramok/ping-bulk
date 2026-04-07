@@ -69,6 +69,8 @@ SET_PARAMS = [
              'per-host ping history depth (default 86400)'),
     SetParam('sync-history', '_cmd_sync_history', ['on', 'off'],
              'align history bars to wall-clock time (default on)'),
+    SetParam('pause', '_cmd_pause', ['on', 'off'],
+             'pause all monitors (stop sending pings)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -85,7 +87,8 @@ _FULL_HELP = [
     "  o / O         cycle sort order forward / backward",
     "  H             cycle ping-history display mode",
     "  S             toggle sync-history (wall-clock alignment)",
-    "  p / P         toggle pause",
+    "  p             pause/unpause selected host or section (no-op if nothing selected)",
+    "  P             toggle global pause (all monitors)",
     "  ↑ / ↓          navigate host list",
     "  Enter          show detailed stats for highlighted host",
     "  Space          insert 'seen' marker (or toggle section fold = za)",
@@ -118,7 +121,7 @@ _FULL_HELP = [
     f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
     "                            set display modes; omit value to cycle/show",
     "                            log-size / history-size: numeric value only",
-    "  :pause                    toggle pause on/off",
+    "  :pause [on|off]            toggle/set global pause (stop all pings)",
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
     "  :log [file|off]           show active log file, set/save log to file, or disable logging",
@@ -670,6 +673,9 @@ class Monitor(ABC):
         self.up_since = None    # monotonic timestamp of when the host came up
         self.ping_count = 0     # total pings ever sent (never capped, unlike history deque)
         self.running = True
+        self.paused = False
+        self._pause_event = threading.Event()
+        self._pause_event.set()    # set = running; clear = paused
         self.lock = threading.Lock()
         self.error = None          # str when a fatal process-level error occurred, else None
         self.error_logged = False  # True once the error has been added to the event log
@@ -771,11 +777,27 @@ class Monitor(ABC):
     def stop(self):
         """Stop the ping loop and terminate the subprocess cleanly."""
         self.running = False
+        self._pause_event.set()   # unblock thread if waiting so it can exit
         if self._proc is not None:
             try:
                 self._proc.terminate()
             except Exception:
                 pass
+
+    def pause(self):
+        """Pause monitoring: block the ping thread and kill the active subprocess."""
+        self.paused = True
+        self._pause_event.clear()
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
+
+    def unpause(self):
+        """Resume monitoring: wake the ping thread so it starts a fresh subprocess."""
+        self.paused = False
+        self._pause_event.set()
 
     @abstractmethod
     def ping(self):
@@ -812,6 +834,9 @@ class PingMonitor(Monitor):
         backoff = 1  # seconds; doubles on each unexpected exit, capped at 30
 
         while self.running:
+            self._pause_event.wait()
+            if not self.running:
+                break
             try:
                 self._proc = subprocess.Popen(
                     self._build_ping_cmd(),
@@ -904,15 +929,6 @@ class PingMonitor(Monitor):
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
-    def stop(self):
-        """Stop the ping loop and terminate the subprocess cleanly."""
-        self.running = False
-        if self._proc is not None:
-            try:
-                self._proc.terminate()
-            except Exception:
-                pass
-
     @staticmethod
     def _is_fatal_error(stderr_text):
         """Return True if stderr_text contains a known non-retryable error pattern."""
@@ -1002,6 +1018,9 @@ class PortMonitor(Monitor):
             return
 
         while self.running:
+            self._pause_event.wait()
+            if not self.running:
+                break
             target = (
                 self.resolved_ip
                 if (self.resolv_static and self.resolved_ip)
@@ -1284,6 +1303,9 @@ class SshPingMonitor(Monitor):
         backoff = 1  # seconds; doubles on each unexpected exit, capped at 30
 
         while self.running:
+            self._pause_event.wait()
+            if not self.running:
+                break
             try:
                 self._proc = subprocess.Popen(
                     self._build_ping_cmd(),
@@ -1887,7 +1909,6 @@ class Application:
         self.sync_history = False  # align history bars to wall-clock time (off by default)
         self.log_size = 10000
         self.events = deque(maxlen=self.log_size)
-        self.paused = False
         self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
         self.stats_mode = 0    # index into STATS_MODES; 0 = off
         self.sort_by = 'none'  # none, name, status, latency
@@ -2301,6 +2322,29 @@ class Application:
         elif pos >= self.host_scroll + visible_rows:
             self.host_scroll = pos - visible_rows + 1
 
+    def _get_pause_targets(self):
+        """Return the list of monitors that `p` should toggle pause on.
+
+        - Section selected → all monitors under that section (recursive).
+        - Host selected    → just that monitor.
+        - Nothing selected → empty list (p is a no-op; P handles global).
+        """
+        if self.highlighted_index is None:
+            return []
+        entry = self.entries[self.highlighted_index]
+        if isinstance(entry, SectionLabel):
+            return self._get_section_monitors(self.highlighted_index)
+        # entry is a Monitor
+        return [entry]
+
+    def _apply_pause_toggle(self, targets):
+        """Pause or unpause *targets*.  If all are paused already, unpause; otherwise pause."""
+        if not targets:
+            return
+        all_paused = all(m.paused for m in targets)
+        for m in targets:
+            m.unpause() if all_paused else m.pause()
+
     def mark_seen(self):
         """Append a visual 'seen' separator line to the event log (and log file if set).
 
@@ -2472,15 +2516,18 @@ class Application:
         sync/end_time are forwarded to get_history_string for wall-clock alignment.
         """
         # Badge — list of (text, color_pair_id) so each segment is coloured individually.
-        # Color ids: 1=green (up), 2=red (down), 3=yellow (unknown), 0=default (separator).
-        up      = sum(1 for m in monitors if m.alive is True)
-        down    = sum(1 for m in monitors if m.alive is False)
-        unknown = sum(1 for m in monitors if m.alive is None)
+        # Color ids: 1=green (up), 2=red (down), 3=yellow (unknown), 6=cyan (paused), 0=default.
+        paused  = sum(1 for m in monitors if m.paused)
+        active  = [m for m in monitors if not m.paused]
+        up      = sum(1 for m in active if m.alive is True)
+        down    = sum(1 for m in active if m.alive is False)
+        unknown = sum(1 for m in active if m.alive is None)
         has_error = any(m.error is not None for m in monitors)
         segs = []
         if up:      segs.append((f"{up}↑",    1))
         if down:    segs.append((f"{down}↓",  2))
         if unknown: segs.append((f"{unknown}-", 3))
+        if paused:  segs.append((f"{paused}⏸", 6))
         # Build interleaved list with '/' separators between segments
         badge_parts: list = []
         for i, seg in enumerate(segs):
@@ -2566,13 +2613,20 @@ class Application:
         Labels use [x] notation to mark the hotkey character, e.g. '[q]uit'.
         The character inside brackets is rendered with bold+underline to stand out.
         """
+        paused_count = sum(1 for m in self.monitors if m.paused)
+        if paused_count == 0:
+            pause_label = "[p]ause"
+        elif paused_count == len(self.monitors):
+            pause_label = "[p]ause:all"
+        else:
+            pause_label = f"[p]ause:{paused_count}"
         menu_items = [
             (f"[D]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
             (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
             (f"[o]rder by:{self.sort_by}", False),
             (f"[H]istory:{HISTORY_MODES[self.history_mode]}", False),
             (f"[S]ync:{'on' if self.sync_history else 'off'}", self.sync_history),
-            (f"[p]ause:{'on' if self.paused else 'off'}", self.paused),
+            (pause_label, paused_count > 0),
         ]
         menu_items.extend([
             ("[C]lear log", False),
@@ -2998,7 +3052,11 @@ class Application:
             # Stat col: Last latency (off) or single stat value; hidden in All mode
             if not show_all:
                 stat_value_col = stat_col + (stat_field_w - 6)
-                if show_single:
+                if monitor.paused:
+                    # Paused: show ⏸ in cyan regardless of stats mode
+                    # Right-align in the stat field (5 spaces + symbol = 6 display cols)
+                    stdscr.addstr(row, stat_value_col, "     ⏸", curses.color_pair(6) | row_attr)
+                elif show_single:
                     stat_str = self._compute_stat(monitor, mode_name)
                     # _compute_stat() returns '    ??' when monitor.error is set
                     if monitor.error is not None:
@@ -3916,8 +3974,17 @@ class Application:
             getattr(self, param.action)(subargs)
 
     def _cmd_pause(self, args=''):
-        """Toggle pause on/off."""
-        self.paused = not self.paused
+        """Toggle or set global pause (all monitors). Args: on | off | (empty = toggle)."""
+        val = args.strip().lower()
+        all_paused = all(m.paused for m in self.monitors)
+        if val == 'on':
+            want_pause = True
+        elif val == 'off':
+            want_pause = False
+        else:
+            want_pause = not all_paused
+        for m in self.monitors:
+            m.pause() if want_pause else m.unpause()
 
     def _cmd_seen(self, args=''):
         """Insert a 'seen' marker in the event log."""
@@ -4581,6 +4648,7 @@ class Application:
         curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)   # Warning (slow)
         curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)    # Hotkey
         curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK)  # Very slow (>100 ms)
+        curses.init_pair(6, curses.COLOR_CYAN, curses.COLOR_BLACK)     # Paused
 
         self.start_monitoring()
 
@@ -4717,8 +4785,13 @@ class Application:
                     self.cycle_sort(1)
                 elif key == ord('O'):
                     self.cycle_sort(-1)
-                elif key == ord('p') or key == ord('P'):
-                    self.paused = not self.paused
+                elif key == ord('p'):
+                    # Per-host/section pause: toggle pause on the selected entry.
+                    # If nothing is selected, p is a no-op (use P for global).
+                    self._apply_pause_toggle(self._get_pause_targets())
+                elif key == ord('P'):
+                    # Global pause: toggle pause on all monitors.
+                    self._apply_pause_toggle(self.monitors)
                 elif key == ord('H'):
                     self.cycle_history_mode(1)
                 elif key == ord(' '):

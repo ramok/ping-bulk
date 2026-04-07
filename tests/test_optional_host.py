@@ -97,7 +97,6 @@ class TestOptionalHostApplication:
         app.history_size   = 100
         app.sync_history   = True
         app.log_size       = 1000
-        app.paused         = False
         app.dns_mode       = 0
         app.stats_mode     = 0
         app.sort_by        = 'none'
