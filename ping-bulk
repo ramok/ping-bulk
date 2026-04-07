@@ -2612,14 +2612,19 @@ class Application:
         )
         name_col_width = max(len("Hostname"), max_name_len, max_section_len)
         stat_col = name_col_width + 1   # stat value starts 1 col after hostname
-        hist_col = stat_col + 7         # history starts 7 cols after stat (6-char value + 1 gap)
+        # Badge width: worst case is all monitors in one section → "N↑/N↓/N-"
+        n = len(self.monitors)
+        has_sections = any(isinstance(e, SectionLabel) for e in self.entries)
+        max_badge_w = len(f"{n}↑/{n}↓/{n}-") if has_sections else 0
+        stat_field_w = max(6, max_badge_w)
+        hist_col = stat_col + stat_field_w + 1  # history starts after stat field + 1 gap
 
         # In 'All' mode the stats block sits flush-left immediately after the hostname;
         # the ping history bar then fills the remaining screen width to the right.
         # Layout: ms(6) + 2 + Up/Down(var) + 2 + tail(8×6 + 7×2 = 62) = dynamic width.
         updown_col_w = self._updown_col_width()
         ALL_STATS_WIDTH = 8 + updown_col_w + 2 + 62
-        all_stats_col = stat_col
+        all_stats_col = stat_col + (stat_field_w - 6)
         ms_col = all_stats_col
         updown_col = ms_col + 8
         tail_col = updown_col + updown_col_w + 2
@@ -2632,7 +2637,7 @@ class Application:
                 # stat_col header: mode label when a single stat is active, "ms" otherwise
                 # Left-justify within the 6-char stat field to align with data rows
                 col25_label = mode_name if show_single else "ms"
-                stdscr.addstr(start_row, stat_col, f"{col25_label:>6}", curses.A_BOLD)
+                stdscr.addstr(start_row, stat_col, f"{col25_label:>{stat_field_w}}", curses.A_BOLD)
 
             # Title includes elapsed time when running; rendered in white/bold.
             if self._start_time is not None:
@@ -2760,11 +2765,11 @@ class Application:
                 section_attr = curses.A_BOLD | row_attr
                 stdscr.addstr(row, 0, section_text, section_attr)
 
-                # Badge at stat_col — right-aligned in the 6-char stat field,
+                # Badge at stat_col — right-aligned in the stat field,
                 # each part (N↑, N↓, N-) gets its own colour.
                 if stat_col < width:
                     badge_total_len = sum(len(text) for text, _ in badge_parts)
-                    col = stat_col + max(0, 6 - badge_total_len)
+                    col = stat_col + max(0, stat_field_w - badge_total_len)
                     for text, pair_id in badge_parts:
                         if col >= width:
                             break
@@ -2820,6 +2825,7 @@ class Application:
 
             # Stat col: Last latency (off) or single stat value; hidden in All mode
             if not show_all:
+                stat_value_col = stat_col + (stat_field_w - 6)
                 if show_single:
                     stat_str = self._compute_stat(monitor, mode_name)
                     # _compute_stat() returns '    ??' when monitor.error is set
@@ -2828,16 +2834,16 @@ class Application:
                         stat_color = curses.color_pair(2) if is_down else 0
                     else:
                         stat_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
-                    stdscr.addstr(row, stat_col, stat_str, stat_color | row_attr)
+                    stdscr.addstr(row, stat_value_col, stat_str, stat_color | row_attr)
                 else:
                     # off mode — show Last latency with color; '    ??' in bright red on error
                     if monitor.error is not None:
-                        stdscr.addstr(row, stat_col, "    ??", curses.color_pair(2) | curses.A_BOLD | row_attr)
+                        stdscr.addstr(row, stat_value_col, "    ??", curses.color_pair(2) | curses.A_BOLD | row_attr)
                     elif monitor.latency is not None:
                         color = curses.color_pair(1) if monitor.latency < 50 else curses.color_pair(3)
-                        stdscr.addstr(row, stat_col, f"{monitor.latency:6.1f}", color | row_attr)
+                        stdscr.addstr(row, stat_value_col, f"{monitor.latency:6.1f}", color | row_attr)
                     else:
-                        stdscr.addstr(row, stat_col, "     -", curses.color_pair(2) | row_attr)
+                        stdscr.addstr(row, stat_value_col, "     -", curses.color_pair(2) | row_attr)
 
             history = monitor.get_history_string(
                 display_count, self.history_offset, hist_mode, cell_width
