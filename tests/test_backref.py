@@ -311,9 +311,9 @@ class TestBackrefIntegration:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Cluster A', 1),
+            ('section', 'Cluster A', 1, False),
             ('host', 'node-A.example.com'),
-            ('section', 'Cluster B', 1),
+            ('section', 'Cluster B', 1, False),
             ('host', 'node-B.example.com'),
         ], f"Unexpected entries: {entries!r}"
 

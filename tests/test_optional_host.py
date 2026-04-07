@@ -148,7 +148,8 @@ class TestOptionalHostApplication:
                 app.entries.append(m)
             elif kind == 'section':
                 level = rest[1] if len(rest) > 1 else 1
-                app.entries.append(pb.SectionLabel(value, level))
+                folded_default = rest[2] if len(rest) > 2 else False
+                app.entries.append(pb.SectionLabel(value, level, folded_default))
         return app
 
     def test_optional_host_skipped_without_resolv(self, pb, tmp_path):

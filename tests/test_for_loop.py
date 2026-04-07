@@ -155,9 +155,9 @@ class TestForLoopSectionHeaders:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Data Centre 1', 1),
+            ('section', 'Data Centre 1', 1, False),
             ('host',    'dc1-router'),
-            ('section', 'Data Centre 2', 1),
+            ('section', 'Data Centre 2', 1, False),
             ('host',    'dc2-router'),
         ], f"Unexpected entries: {entries!r}"
 
@@ -171,9 +171,9 @@ class TestForLoopSectionHeaders:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Pod a', 1),
+            ('section', 'Pod a', 1, False),
             ('host',    'poda-host'),
-            ('section', 'Pod b', 1),
+            ('section', 'Pod b', 1, False),
             ('host',    'podb-host'),
         ], f"Unexpected entries: {entries!r}"
 
@@ -189,9 +189,9 @@ class TestForLoopSectionHeaders:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         # Section emitted twice; no 'warn' tuples expected
         assert entries == [
-            ('section', 'Servers', 1),
+            ('section', 'Servers', 1, False),
             ('host',    'node1'),
-            ('section', 'Servers', 1),
+            ('section', 'Servers', 1, False),
             ('host',    'node2'),
         ], f"Unexpected entries: {entries!r}"
 
@@ -205,9 +205,9 @@ class TestForLoopSectionHeaders:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Static Section', 1),
+            ('section', 'Static Section', 1, False),
             ('host',    'sp1'),
-            ('section', 'Static Section', 1),
+            ('section', 'Static Section', 1, False),
             ('host',    'sp2'),
         ], f"Unexpected entries: {entries!r}"
 
@@ -663,7 +663,7 @@ class TestForLoopMixed:
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
-        assert entries[0] == ('section', 'My Group', 1), (
+        assert entries[0] == ('section', 'My Group', 1, False), (
             f"First entry should be section header; got {entries[0]!r}"
         )
         host_entries = [rest[0] for k, *rest in entries if k == 'host']

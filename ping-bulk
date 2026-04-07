@@ -141,6 +141,7 @@ _FULL_HELP = [
     "  ## Title        level-1 header  (also :title Title)",
     "  ### Title       level-2 header  (also :title2 Title) — indented 2 spaces",
     "  #### Title      level-3 header  (also :title3 Title) — indented 4 spaces",
+    "  ##- Title       starts folded (also :title- / :title2- / :title3-)",
     "  host ## label   inline label after hostname (## / ### / #### …)",
     "  ?host           optional host — added only when a :resolv mapping exists",
     "                  (useful in :for loops when some iterations lack a device)",
@@ -1388,10 +1389,10 @@ class SshPingMonitor(Monitor):
 
 class SectionLabel:
     """A non-pingable display row for section headers (## / :title)."""
-    def __init__(self, title, level=1):
+    def __init__(self, title, level=1, folded_default=False):
         self.title = title
         self.level = max(1, int(level))  # 1 = top-level, 2 = sub-section, …
-        self.folded = False  # True when section is collapsed
+        self.folded = bool(folded_default)  # True = starts collapsed
 
 
 def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_names=None):
@@ -1446,19 +1447,24 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
             if line.startswith('##'):
                 # Section header — apply back-references and emit every iteration.
                 n_hashes = len(line) - len(line.lstrip('#'))
-                title_tmpl = line[n_hashes:].strip()
+                rest = line[n_hashes:]
+                folded_default = rest.startswith('-')
+                if folded_default:
+                    rest = rest[1:]
+                title_tmpl = rest.strip()
                 title = _apply_backref(title_tmpl, captures, full_str)
-                entries.append(('section', title, n_hashes - 1))
+                entries.append(('section', title, n_hashes - 1, folded_default))
 
             elif line.startswith(':'):
                 parts = line.split(None, 1)
                 cmd_word = parts[0][1:].lower()
-                m_title = re.match(r'^title(\d*)$', cmd_word)
+                m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
                 if m_title:
                     level = int(m_title.group(1)) if m_title.group(1) else 1
+                    folded_default = m_title.group(2) == '-'
                     title_tmpl = parts[1].strip() if len(parts) > 1 else ''
                     title = _apply_backref(title_tmpl, captures, full_str)
-                    entries.append(('section', title, level))
+                    entries.append(('section', title, level, folded_default))
                 elif cmd_word == 'ssh-begin':
                     # Open local SSH block — captures args with back-reference expansion
                     ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
@@ -1653,18 +1659,23 @@ def parse_hosts_file(filename):
             # ── Normal line processing (outside a :for loop) ───────────────
             if line.startswith('##'):
                 n_hashes = len(line) - len(line.lstrip('#'))
-                title = line[n_hashes:].strip()
-                entries.append(('section', title, n_hashes - 1))
+                rest = line[n_hashes:]
+                folded_default = rest.startswith('-')
+                if folded_default:
+                    rest = rest[1:]
+                title = rest.strip()
+                entries.append(('section', title, n_hashes - 1, folded_default))
             elif line.startswith('#'):
                 continue  # comment — skip
             elif line.startswith(':'):
                 parts = line.split(None, 1)
                 cmd_word = parts[0][1:].lower()  # strip leading ':'
-                m_title = re.match(r'^title(\d*)$', cmd_word)
+                m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
                 if m_title:
                     level = int(m_title.group(1)) if m_title.group(1) else 1
+                    folded_default = m_title.group(2) == '-'
                     title = parts[1].strip() if len(parts) > 1 else ''
-                    entries.append(('section', title, level))
+                    entries.append(('section', title, level, folded_default))
                 elif cmd_word == 'ssh-begin':
                     # Start SSH block — remainder of line is the SSH args (opts + dest)
                     ssh_block_args = parts[1].strip() if len(parts) > 1 else ''
@@ -1975,7 +1986,8 @@ class Application:
                 self.entries.append(m)
             elif kind == 'section':
                 level = rest[1] if len(rest) > 1 else 1
-                self.entries.append(SectionLabel(value, level))
+                folded_default = rest[2] if len(rest) > 2 else False
+                self.entries.append(SectionLabel(value, level, folded_default))
             elif kind == 'cmd':
                 self._dispatch_cmd(value)
             elif kind == 'warn':
@@ -3882,7 +3894,8 @@ class Application:
                             self.threads.append(thread)
                 elif kind == 'section':
                     level = rest[1] if len(rest) > 1 else 1
-                    self.entries.append(SectionLabel(value, level))
+                    folded_default = rest[2] if len(rest) > 2 else False
+                    self.entries.append(SectionLabel(value, level, folded_default))
                 elif kind == 'cmd':
                     self._dispatch_cmd(value)
                 elif kind == 'warn':
