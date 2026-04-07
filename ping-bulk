@@ -2793,6 +2793,11 @@ class Application:
         # so bucket boundaries are stable — gaps only move once per second.
         render_time = int(time.time())
         sync = self.sync_history
+        if sync:
+            # Shift t_end back by 1s: position 0 = previous (already-received) second,
+            # so the display is stable — no transient empty at position 0 while waiting
+            # for the current second's ping to arrive.
+            render_time -= 1
 
         if sync or self.history_offset > 0:
             # Sync mode: always show the full width — new pings land at bucket 0
