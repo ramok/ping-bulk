@@ -97,7 +97,7 @@ class TestOpenClose:
         tmux_app_40.wait_for(OVERLAY_MARKER)
         tmux_app_40.send_keys('q')
         tmux_app_40.wait_for_absence(OVERLAY_MARKER)
-        tmux_app_40.wait_for('ping-bulk:')
+        tmux_app_40.wait_for('DNS:')
 
 
 # ===========================================================================

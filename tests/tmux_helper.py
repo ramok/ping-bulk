@@ -174,7 +174,7 @@ class TmuxSession:
         self.send_literal(f"python3 {os.path.abspath('ping-bulk')} {' '.join(args)}")
         self.send_keys("Enter")
         # Wait for the app to initialize
-        self.wait_for('ping-bulk:', timeout=10)
+        self.wait_for('DNS:', timeout=10)
 
     def kill(self) -> None:
         """Kill the tmux session.  Safe to call even if already dead."""

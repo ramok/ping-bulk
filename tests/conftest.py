@@ -172,7 +172,7 @@ def _make_app_session(name: str, app_path: str, width: int, height: int) -> Tmux
         sess.send_literal(f'python3 {app_path} 127.0.0.1')
         sess.send_keys('Enter')
         # Wait until the menu bar appears — confirms curses has initialised.
-        sess.wait_for('ping-bulk:', timeout=10)
+        sess.wait_for('DNS:', timeout=10)
     except Exception:
         sess.kill()
         raise
@@ -239,7 +239,7 @@ def tmux_app_with_section(app_path: str, check_integration_deps, tmp_path):
     try:
         sess.send_literal(f'python3 {app_path} -f {config_file}')
         sess.send_keys('Enter')
-        sess.wait_for('ping-bulk:', timeout=10)
+        sess.wait_for('DNS:', timeout=10)
     except Exception:
         sess.kill()
         raise

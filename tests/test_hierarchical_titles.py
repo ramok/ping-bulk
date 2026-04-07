@@ -443,7 +443,7 @@ class TestHierarchicalTitlesUI:
         try:
             sess.send_literal(f'python3 {app_path} -f {hosts_file}')
             sess.send_keys('Enter')
-            sess.wait_for('ping-bulk:', timeout=10)
+            sess.wait_for('DNS:', timeout=10)
         except Exception:
             sess.kill()
             raise

@@ -9,14 +9,14 @@ any prompt       — cancels the prompt (same as Esc)
 
 quit_confirm prompt
 -------------------
-y / Y  → set running=False (app exits; "ping-bulk:" disappears from pane)
+y / Y  → set running=False (app exits; "DNS:" disappears from pane (app exited))
 any other key (n, Esc, Enter, Ctrl+C) → dismiss without quitting
 """
 
 import pytest
 
 # Substrings used as wait targets / absence markers.
-MENU_BAR       = 'ping-bulk:'
+MENU_BAR       = 'DNS:'
 QUIT_PROMPT    = 'Quit? [y/N]:'
 HELP_MARKER    = '[q / Esc] close'
 CLEAR_PROMPT   = 'Clear event log? [y/N]:'

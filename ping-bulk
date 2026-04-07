@@ -2619,12 +2619,13 @@ class Application:
             ))
         return self.entries  # 'none': preserve original order with section labels
 
-    def draw_menu_bar(self, stdscr, width):
-        """Draw the top menu bar with highlighted hotkeys.
+    def draw_menu_bar(self, stdscr, height, width):
+        """Draw the bottom menu bar with highlighted hotkeys.
 
         Labels use [x] notation to mark the hotkey character, e.g. '[q]uit'.
         The character inside brackets is rendered with bold+underline to stand out.
         """
+        row = height - 1
         paused_count = sum(1 for m in self.monitors if m.paused)
         if paused_count == 0:
             pause_label = "[p]ause"
@@ -2635,7 +2636,7 @@ class Application:
         menu_items = [
             (f"[D]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
             (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
-            (f"[o]rder by:{self.sort_by}", False),
+            (f"[o]rder:{self.sort_by}", False),
             (f"[H]istory:{HISTORY_MODES[self.history_mode]}", False),
             (f"[S]ync:{'on' if self.sync_history else 'off'}", self.sync_history),
             (pause_label, paused_count > 0),
@@ -2646,9 +2647,7 @@ class Application:
             ("[q]uit", False),
         ])
 
-        prefix = "ping-bulk: "
-        stdscr.addstr(0, 0, prefix)
-        col = len(prefix)
+        col = 0
 
         for idx, (label, active) in enumerate(menu_items):
             if col >= width - 1:
@@ -2670,29 +2669,32 @@ class Application:
                     if len(token) == 1:
                         # Single-char hotkey: no brackets
                         if col < width - 1:
-                            stdscr.addstr(0, col, token[0], curses.color_pair(4) | curses.A_BOLD)
+                            stdscr.addstr(row, col, token[0], curses.color_pair(4) | curses.A_BOLD)
                             col += 1
                     else:
                         # Multi-char hotkey: keep brackets, highlight content
                         if col < width - 1:
-                            stdscr.addstr(0, col, '[')
+                            stdscr.addstr(row, col, '[')
                             col += 1
                         for tc in token:
                             if col < width - 1:
-                                stdscr.addstr(0, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                                stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
                                 col += 1
                         if col < width - 1:
-                            stdscr.addstr(0, col, ']')
+                            stdscr.addstr(row, col, ']')
                             col += 1
                 else:
-                    stdscr.addstr(0, col, ch)
+                    if active:
+                        stdscr.addstr(row, col, ch, curses.color_pair(4) | curses.A_BOLD)
+                    else:
+                        stdscr.addstr(row, col, ch)
                     col += 1
                     i += 1
 
             # Separator
             sep = " | " if idx < len(menu_items) - 1 else ""
             if col + len(sep) < width:
-                stdscr.addstr(0, col, sep)
+                stdscr.addstr(row, col, sep)
                 col += len(sep)
 
     @staticmethod
@@ -4670,34 +4672,30 @@ class Application:
                 stdscr.erase()
                 height, width = stdscr.getmaxyx()
 
-                # Adaptive layout: prioritise host rows, then header, then menu, then events
+                # Adaptive layout: menu at bottom (height-1), hosts fill from top
                 num_hosts = len(self.entries)
 
-                # Show menu bar only if there is room for menu(1)+blank(1)+header(1)+all hosts
-                show_menu = height >= num_hosts + 3
-                hosts_start = 2 if show_menu else 0
+                # Column header at row 0 if there is room for at least one host row too
+                show_header = height >= 3  # header(1) + host(1) + menu(1)
+                hosts_start = 1 if show_header else 0
 
-                # Show column header only if there is room for it above all host rows
-                show_header = height >= hosts_start + num_hosts + 1
+                # Host rows fill from hosts_start up to (but not including) the menu row
+                available = max(0, height - hosts_start - 1)  # -1 for bottom menu row
+                visible_hosts = min(num_hosts, available)
 
-                # How many host data rows actually fit
-                available = height - hosts_start - (1 if show_header else 0)
-                visible_hosts = min(num_hosts, max(0, available))
-
-                # Events get whatever space remains (need at least header + 1 line)
+                # Events get whatever space remains between hosts and the menu row
                 section_end = hosts_start + (1 if show_header else 0) + visible_hosts
                 events_start = section_end + 1
-                show_events = events_start + 2 <= height
+                show_events = events_start + 2 <= height - 1  # must fit before menu row
 
-                # Draw sections
-                if show_menu:
-                    self.draw_menu_bar(stdscr, width)
+                # Draw host list
                 self.clamp_host_scroll(visible_hosts)
                 self.draw_hosts(stdscr, hosts_start, visible_hosts, width, height,
                                 show_header=show_header)
                 if show_events:
-                    self.draw_events(stdscr, events_start, height, width)
+                    self.draw_events(stdscr, events_start, height - 1, width)
 
+                # Bottom row: menu OR command OR prompt (mutually exclusive)
                 if self.cmd is not None:
                     self._draw_cmd(stdscr, height, width)
                     curses.curs_set(1)
@@ -4705,6 +4703,7 @@ class Application:
                     self._draw_prompt(stdscr, height, width)
                     curses.curs_set(1)
                 else:
+                    self.draw_menu_bar(stdscr, height, width)
                     curses.curs_set(0)
 
                 # Help overlay drawn last so it floats above everything else
@@ -4907,11 +4906,11 @@ class Application:
                                 self.highlighted_index = visible_indices[0]
                 # PgUp/PgDn: scroll event log only
                 elif key == curses.KEY_PPAGE:   # Page Up — scroll log back
-                    log_page_size = max(1, height - events_start - 2)
+                    log_page_size = max(1, height - 1 - events_start - 2)
                     if len(self.events) > log_page_size:
                         self.scroll_log(log_page_size)
                 elif key == curses.KEY_NPAGE:   # Page Down — scroll log forward
-                    log_page_size = max(1, height - events_start - 2)
+                    log_page_size = max(1, height - 1 - events_start - 2)
                     if len(self.events) > log_page_size:
                         self.scroll_log(-log_page_size)
 
