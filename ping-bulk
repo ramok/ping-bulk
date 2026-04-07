@@ -711,6 +711,12 @@ class Monitor(ABC):
         share the same time axis, with spaces for seconds where no ping arrived.
         end_time is the right-edge wall-clock time; offset is in seconds in sync mode.
         """
+        # Fatal-error hosts show '??' in the stat column; history bar is suppressed.
+        with self.lock:
+            is_fatal = self.error is not None
+        if is_fatal:
+            return (' ' * cell_width) * length if cell_width > 1 else ' ' * length
+
         if sync and end_time is not None:
             with self.lock:
                 history_list = list(self.history)
@@ -826,6 +832,8 @@ class PingMonitor(Monitor):
                     self.history.append('ERR')
                     self.history_times.append(time.time())
                 break
+
+            got_output = False
 
             for raw_line in self._proc.stdout:
                 if not self.running:
@@ -2770,7 +2778,8 @@ class Application:
         for m in self.monitors:
             with m.lock:
                 if m.history.maxlen != normal_history_length:
-                    m.history = deque(m.history, maxlen=normal_history_length)
+                    m.history       = deque(m.history,       maxlen=normal_history_length)
+                    m.history_times = deque(m.history_times, maxlen=normal_history_length)
 
         # Compute layout constants once — they are the same for every monitor row.
         col_length = max(0, width - hist_col_effective)
@@ -2916,11 +2925,13 @@ class Application:
                 if show_single:
                     stat_str = self._compute_stat(monitor, mode_name)
                     # _compute_stat() returns '    ??' when monitor.error is set
-                    if mode_name == 'Down':
+                    if monitor.error is not None:
+                        stat_color = curses.color_pair(2) | curses.A_BOLD
+                    elif mode_name == 'Down':
                         _, is_down = Application._compute_updown(monitor)
                         stat_color = curses.color_pair(2) if is_down else 0
                     else:
-                        stat_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
+                        stat_color = 0
                     stdscr.addstr(row, stat_value_col, stat_str, stat_color | row_attr)
                 else:
                     # off mode — show Last latency with color; '    ??' in bright red on error
