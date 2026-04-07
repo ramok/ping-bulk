@@ -2568,29 +2568,75 @@ class Application:
                 col25_label = mode_name if show_single else "ms"
                 stdscr.addstr(start_row, stat_col, f"{col25_label:>6}", curses.A_BOLD)
 
-            # Always show track mode; append scroll indicator when not in live view
-            mode_label = HISTORY_MODES[self.history_mode]
-            display_label = 'scaled/100ms' if mode_label == 'scaled' else mode_label
-            history_header = f"Ping history [{display_label}]"
+            # Title includes elapsed time when running; rendered in white/bold.
+            if self._start_time is not None:
+                elapsed = time.monotonic() - self._start_time
+                hist_title = f"Ping history: {_format_updown_time(elapsed)}"
+            else:
+                hist_title = "Ping history"
+            hist_suffix = ""
 
             if not self.help_open and not self.details_open and self.cmd is None and self.prompt is None:
                 if self.highlighted_index is None:
-                    history_header += " [↑/↓ select]"
+                    hist_suffix += " [↑/↓ select host]"
                 else:
                     entry = self.entries[self.highlighted_index] if 0 <= self.highlighted_index < len(self.entries) else None
                     if isinstance(entry, SectionLabel):
-                        history_header += " [↑/↓ navigate, SPACE hide/show, ESC clear]"
+                        hist_suffix += " [↑/↓ navigate] [SPACE hide/show] [ESC clear]"
                     else:
-                        history_header += " [↑/↓ navigate, ENTER details, ESC clear]"
-
-            if self._start_time is not None:
-                elapsed = time.monotonic() - self._start_time
-                history_header += f" [{_format_updown_time(elapsed)}]"
+                        hist_suffix += " [↑/↓ navigate] [ENTER details] [ESC clear]"
+                if any(isinstance(e, SectionLabel) for e in self.entries):
+                    # \[ and \] inside [..] are escaped bracket literals used as hotkey chars
+                    hist_suffix += r"  [\[ fold-all]  [\] unfold-all]"
 
             if self.history_offset > 0:
-                history_header += f" [←{self.history_offset}  →live]"
+                hist_suffix += f" [←{self.history_offset}  →live]"
 
-            stdscr.addstr(start_row, hist_col_effective, history_header, curses.A_BOLD)
+            # Draw title in white/bold, then suffix char-by-char.
+            # Format: [key desc] — key (before first space) rendered in white/bold;
+            # brackets and descriptions in default colour.
+            # Inside a token, \[ and \] are escaped literals (e.g. [ or ] as hotkey).
+            stdscr.addstr(start_row, hist_col_effective, hist_title, curses.color_pair(4) | curses.A_BOLD)
+            col = hist_col_effective + len(hist_title)
+            i = 0
+            while i < len(hist_suffix) and col < width - 1:
+                ch = hist_suffix[i]
+                if ch == '[':
+                    stdscr.addstr(start_row, col, ch)
+                    col += 1
+                    i += 1
+                    # Collect bracket content; \[ and \] are escaped literal brackets
+                    token = []
+                    while i < len(hist_suffix) and hist_suffix[i] != ']':
+                        if hist_suffix[i] == '\\' and i + 1 < len(hist_suffix) and hist_suffix[i + 1] in '[]':
+                            token.append(hist_suffix[i + 1])
+                            i += 2
+                        else:
+                            token.append(hist_suffix[i])
+                            i += 1
+                    content = ''.join(token)
+                    space_pos = content.find(' ')
+                    if space_pos == -1:
+                        key_part, desc_part = content, ''
+                    else:
+                        key_part, desc_part = content[:space_pos], content[space_pos:]
+                    for tc in key_part:
+                        if col < width - 1:
+                            stdscr.addstr(start_row, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                            col += 1
+                    for tc in desc_part:
+                        if col < width - 1:
+                            stdscr.addstr(start_row, col, tc)
+                            col += 1
+                    if i < len(hist_suffix):  # closing ']'
+                        if col < width - 1:
+                            stdscr.addstr(start_row, col, ']')
+                            col += 1
+                        i += 1
+                else:
+                    stdscr.addstr(start_row, col, ch)
+                    col += 1
+                    i += 1
 
             if show_all and all_stats_col < width:
                 all_header = (f"{'ms':>6}  {'Up/Down':>{updown_col_w}}  "
@@ -2690,9 +2736,11 @@ class Application:
                 section_attr = curses.A_BOLD | row_attr
                 stdscr.addstr(row, 0, section_text, section_attr)
 
-                # Badge at stat_col — each part (N↑, N↓, N-) gets its own colour
+                # Badge at stat_col — right-aligned in the 6-char stat field,
+                # each part (N↑, N↓, N-) gets its own colour.
                 if stat_col < width:
-                    col = stat_col
+                    badge_total_len = sum(len(text) for text, _ in badge_parts)
+                    col = stat_col + max(0, 6 - badge_total_len)
                     for text, pair_id in badge_parts:
                         if col >= width:
                             break
@@ -3005,21 +3053,63 @@ class Application:
         if self.log_offset == 0:
             # Live tail mode
             visible = event_list[-page_size:]
-            header = 'Events [SPACE to set "seen" mark]'
+            header_title = 'Events'
+            header_suffix = ' [SPACE to set "seen" mark]'
             if overflows:
-                header += " [↑/PgUp to scroll]"
+                header_suffix += " [PgUp to scroll]"
         else:
             end = total - self.log_offset
             start = max(0, end - page_size)
             visible = event_list[start:end]
             line_start = start + 1
             line_end = end
-            header = f"Events [lines {line_start}-{line_end}/{total}  ↓/PgDn to resume]"
+            header_title = 'Events'
+            header_suffix = f" lines {line_start}-{line_end}/{total} [PgDn to resume]"
 
         if self.log_file:
-            header += f" → {self.log_file}"
+            header_suffix += f" → {self.log_file}"
 
-        stdscr.addstr(start_row, 0, header[:width - 1], curses.A_BOLD)
+        # Render title in white/bold; [key desc] tokens have key in white, desc default.
+        stdscr.addstr(start_row, 0, header_title, curses.color_pair(4) | curses.A_BOLD)
+        col = len(header_title)
+        i = 0
+        while i < len(header_suffix) and col < width - 1:
+            ch = header_suffix[i]
+            if ch == '[':
+                stdscr.addstr(start_row, col, ch)
+                col += 1
+                i += 1
+                token = []
+                while i < len(header_suffix) and header_suffix[i] != ']':
+                    if header_suffix[i] == '\\' and i + 1 < len(header_suffix) and header_suffix[i + 1] in '[]':
+                        token.append(header_suffix[i + 1])
+                        i += 2
+                    else:
+                        token.append(header_suffix[i])
+                        i += 1
+                content = ''.join(token)
+                space_pos = content.find(' ')
+                if space_pos == -1:
+                    key_part, desc_part = content, ''
+                else:
+                    key_part, desc_part = content[:space_pos], content[space_pos:]
+                for tc in key_part:
+                    if col < width - 1:
+                        stdscr.addstr(start_row, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                        col += 1
+                for tc in desc_part:
+                    if col < width - 1:
+                        stdscr.addstr(start_row, col, tc)
+                        col += 1
+                if i < len(header_suffix):  # closing ']'
+                    if col < width - 1:
+                        stdscr.addstr(start_row, col, ']')
+                        col += 1
+                    i += 1
+            else:
+                stdscr.addstr(start_row, col, ch)
+                col += 1
+                i += 1
 
         row = start_row + 1
         for event in visible:
