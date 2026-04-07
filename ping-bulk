@@ -2599,12 +2599,21 @@ class Application:
         show_all = (mode_name == 'All')
         show_single = (self.stats_mode > 0 and not show_all)
 
-        # Adaptive hostname column: wide enough for all display names, the header
-        # label, and all section title prefixes (so section titles are never truncated).
-        max_name_len = max(
-            (len(m.get_display_name(DNS_MODES[self.dns_mode])) for m in self.monitors), default=8
-        )
-        # Each section header occupies: (level-1) indent + "── [-] " (7) + title length
+        # Adaptive hostname column: wide enough for all display names (including
+        # their per-level indentation), the header label, and section title prefixes.
+        dns_mode_str = DNS_MODES[self.dns_mode]
+        # Walk entries tracking current section level to compute indented name width.
+        max_name_len = len("Hostname")
+        _sec_stack: list[SectionLabel] = []
+        for e in self.entries:
+            if isinstance(e, SectionLabel):
+                while _sec_stack and _sec_stack[-1].level >= e.level:
+                    _sec_stack.pop()
+                _sec_stack.append(e)
+            elif isinstance(e, Monitor):
+                indent = _sec_stack[-1].level * 2 if _sec_stack else 0
+                max_name_len = max(max_name_len, indent + len(e.get_display_name(dns_mode_str)))
+        # Each section header: (level-1)*2 spaces + "── [-] " (7) + title
         max_section_len = max(
             ((e.level - 1) * 2 + 7 + len(e.title)
              for e in self.entries if isinstance(e, SectionLabel)),
