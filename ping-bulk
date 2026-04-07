@@ -4128,8 +4128,10 @@ class Application:
 
         dns_mode = DNS_MODES[self.dns_mode]
         display_name = monitor.get_display_name(dns_mode)
-        cmd_list = monitor._build_ping_cmd()
-        raw_cmd_str = shlex.join(cmd_list)
+        if hasattr(monitor, '_build_ping_cmd'):
+            raw_cmd_str = shlex.join(monitor._build_ping_cmd())
+        else:
+            raw_cmd_str = ""
         raw_error_str = error if error is not None else ""
 
         # Calculate dynamic width
@@ -4568,7 +4570,7 @@ class Application:
                     if (self.highlighted_index is not None and
                             0 <= self.highlighted_index < len(self.entries)):
                         entry = self.entries[self.highlighted_index]
-                        if isinstance(entry, PingMonitor):
+                        if isinstance(entry, Monitor):
                             self.details_open = True
                             self.details_monitor = entry
                 elif key == ord('C'):
