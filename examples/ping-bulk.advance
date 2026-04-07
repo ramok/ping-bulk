@@ -47,6 +47,23 @@
 ### Servers
 10.0.2.{1..8}
 
+# ── Optional hosts with '?' prefix ────────────────────────────────────────
+# A '?' prefix on a host line makes it conditional on a :resolv mapping.
+# The host is added only if its expanded name has a :resolv entry; otherwise
+# it is silently skipped.  This is most useful inside :for loops where some
+# iterations lack a particular device.
+#
+# Here hubs 1,2,4 have a camera but hub 3 does not:
+:resolv 10.0.{1,2,4}.50  sw$1-cam
+
+## Sensor hubs
+:for hub-{1..4}
+    ### $0
+    10.0.$1.1  ## sw$1-router
+    10.0.$1.2  ## sw$1-uplink
+    ?sw$1-cam
+:done
+
 ## TCP Port Monitoring
 # TCP connection check instead of ICMP ping.
 # Optionally override the resolved port name via :resolv-port.

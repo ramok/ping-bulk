@@ -1480,10 +1480,13 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
                     entries.append(('cmd', expanded_cmd))
 
             else:
-                # Host line.
-                if _has_backref(line):
+                # Host line.  A leading '?' marks it as optional: silently skip if the
+                # expanded name has no :resolv mapping at Application init time.
+                optional = line.startswith('?')
+                host_line = line[1:] if optional else line
+                if _has_backref(host_line):
                     # Substitute back-references then expand remaining brace groups.
-                    expanded_tmpl = _apply_backref(line, captures, full_str)
+                    expanded_tmpl = _apply_backref(host_line, captures, full_str)
                     try:
                         expanded_hosts = _expand_host(expanded_tmpl)
                     except ValueError as e:
@@ -1497,17 +1500,18 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
                         else:
                             seen_hosts.add(key)
                             if effective_ssh_args is not None:
+                                # '?' not supported for SSH hosts inside :for — add normally.
                                 entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
                             else:
-                                entries.append(('host', host))
+                                entries.append(('optional_host' if optional else 'host', host))
                 else:
                     # No back-reference — include only on first encounter, then warn.
-                    if line not in no_backref_emitted:
-                        no_backref_emitted.add(line)
+                    if host_line not in no_backref_emitted:
+                        no_backref_emitted.add(host_line)
                         entries.append(('warn',
-                            f"host {line!r} inside :for loop has no back-reference; added once"))
+                            f"host {host_line!r} inside :for loop has no back-reference; added once"))
                         try:
-                            expanded_hosts = _expand_host(line)
+                            expanded_hosts = _expand_host(host_line)
                         except ValueError as e:
                             entries.append(('error', str(e)))
                             continue
@@ -1521,7 +1525,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
                                 if effective_ssh_args is not None:
                                     entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
                                 else:
-                                    entries.append(('host', host))
+                                    entries.append(('optional_host' if optional else 'host', host))
 
     return entries
 
@@ -1693,11 +1697,15 @@ def parse_hosts_file(filename):
                                 entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
                 else:
                     # Plain host line — expand brace notation into individual entries.
+                    # A leading '?' marks the host as optional: silently skip at init
+                    # time if no :resolv mapping has been registered for the expanded name.
+                    optional = line.startswith('?')
+                    host_line = line[1:] if optional else line
                     # Use _expand_host_with_captures so that back-references in the
                     # inline ## comment (e.g. '10.0.0.{1..4} ## host$1') are resolved
                     # to the value each brace group contributed for that row.
                     try:
-                        expanded = _expand_host_with_captures(line)
+                        expanded = _expand_host_with_captures(host_line)
                     except ValueError as e:
                         entries.append(('error', str(e)))
                     else:
@@ -1712,7 +1720,7 @@ def parse_hosts_file(filename):
                                         inline_comment, captures, host
                                     )
                                     entries.append(('cmd', f':resolv {host} {resolved_comment}'))
-                                entries.append(('host', host))
+                                entries.append(('optional_host' if optional else 'host', host))
 
     # Warn if the file ended while still inside a :for loop.
     if for_loop_pattern is not None:
@@ -1929,6 +1937,23 @@ class Application:
                     m.resolved_ip = ip
                     m.resolved_hostname = hostname
                     m.resolv_static = True
+                self.monitors.append(m)
+                self.entries.append(m)
+            elif kind == 'optional_host':
+                # Only add the monitor when a :resolv mapping exists for this host.
+                # Used by '?host' lines (inside or outside :for loops) to skip hosts
+                # that are absent from the topology without raising an error.
+                host_str, port_str = parse_target(value)
+                if host_str not in self.hosts_map:
+                    continue  # no :resolv mapping → silently skip
+                ip, hostname = self.hosts_map[host_str]
+                if port_str:
+                    m = PortMonitor(host_str, port_str, port_map=self.port_map)
+                else:
+                    m = PingMonitor(host_str)
+                m.resolved_ip = ip
+                m.resolved_hostname = hostname
+                m.resolv_static = True
                 self.monitors.append(m)
                 self.entries.append(m)
             elif kind == 'section':

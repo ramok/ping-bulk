@@ -322,6 +322,23 @@ Format
 ``hostname-or-ip``
     A host or IP address to monitor.  Brace expansion is applied.
 
+``?hostname-or-ip``
+    An **optional** host.  Added to the monitor list only when a
+    ``:resolv`` mapping for the expanded name has been registered
+    earlier in the same file (or config).  If no mapping exists the
+    line is silently skipped.  Useful inside ``:for`` loops where some
+    iterations do not have a particular device:
+
+    .. code-block:: none
+
+        :resolv 10.0.{1,2,4}.10  hub$1-cam
+        # hub3 does not have a camera
+        :for hub-{1..4}
+            ### $0
+            hub$1-router
+            ?hub$1-cam
+        :done
+
 ``:for pattern``
     Open a loop.  Every body line between ``:for`` and ``:done`` is
     repeated once for each expansion of *pattern*.  Back-reference
