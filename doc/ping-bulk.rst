@@ -296,8 +296,21 @@ Format
     Ignored.
 
 ``## Title`` or ``:title Title``
-    Insert a section-header row in the display (display only; not
-    pinged).
+    Insert a level-1 section-header row in the display (display only;
+    not pinged).
+
+``### Title`` or ``:title2 Title``
+    Insert a level-2 section-header row, indented two spaces relative
+    to a level-1 section.  ``####`` / ``:title3`` etc. follow the same
+    pattern.  Hosts listed under a section are indented two spaces per
+    section level they belong to.
+
+``hostname ## inline-label``
+    A hostname followed by a ``##`` inline section marker.  The marker
+    and everything after it are stripped from the target name and treated
+    as if ``## inline-label`` appeared before the host line.  This is
+    equivalent to placing a ``## Title`` directive immediately before
+    the host.  ``###``, ``####``, … set the section level.
 
 ``ip-address ## label``
     An IP address followed by a ``##`` inline comment.  The label is
@@ -324,6 +337,71 @@ Format
 ``:cmd [args]``
     Any command listed under **COMMANDS** above; applied immediately
     when the file is loaded.
+
+Sections and folding
+--------------------
+
+Section headers (``##`` / ``:title``, ``###`` / ``:title2``, …) group
+hosts into collapsible blocks.  Sections can be nested up to any depth.
+
+**Display layout**
+
+A level-1 section header is not indented.  Each additional level adds
+two spaces of indentation.  Hosts are indented by ``level × 2`` spaces
+relative to the left edge.  Example::
+
+    ── [-] LAN                    5↑
+      router               0.3 ....
+      nas                  0.2 ....
+      ── [-] servers           3↑/1↓
+        web                0.4 ....
+        db                 0.3 ....
+
+**Section status badge**
+
+When a section is expanded the badge shows the aggregate status of all
+descendant hosts.  When folded it also shows the section's combined
+ping-history bar.
+
+The badge format is ``N↑/N↓/N-`` where each counter is only shown when
+non-zero:
+
+``N↑`` (green)
+    Hosts with at least one successful reply (``alive = True``).
+
+``N↓`` (red)
+    Hosts that last received a timeout or "no answer" reply
+    (``alive = False``).
+
+``N-`` (yellow)
+    Hosts that have not yet received any reply — either because they
+    are still starting up, waiting in backoff after an unexpected exit,
+    or connecting via SSH.
+
+When **any** host in the section has a fatal process error (e.g. SSH
+authentication failure, DNS resolution failure, or an unresolvable
+hostname), the ``↓`` and ``-`` counters are displayed in **bold**.
+This distinguishes "some monitors are still connecting" (``N-``,
+non-bold) from "some monitors hit an unrecoverable error" (``N-``,
+bold).  A fatal-error host always shows ``??`` in its own stat column.
+
+**Folding keys**
+
+``[`` / ``]``
+    Fold all / unfold all sections.
+
+``z`` + ``M``
+    Fold all sections (vim-style).
+
+``z`` + ``R``
+    Unfold all sections (vim-style).
+
+``z`` + ``c`` / ``z`` + ``o``
+    Fold / unfold the section under the cursor.
+
+``Space``
+    Toggle fold state of the section under the cursor (when a section
+    header is selected).
 
 Shebang support
 ---------------

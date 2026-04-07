@@ -21,30 +21,49 @@
 :set ping-view scaled
 :set dns hostname
 
-## Core
+# ── Hierarchical sections ──────────────────────────────────────────────────
+# ## (or :title) creates a level-1 section header.
+# ### (or :title2) creates a level-2 section, indented 2 spaces.
+# #### (or :title3) creates level-3, and so on.
+#
+# Each section header shows a status badge: N↑/N↓/N-
+#   N↑  green  — hosts with a successful reply
+#   N↓  red    — hosts that last timed out
+#   N-  yellow — hosts not yet reached (starting up / in backoff)
+# When any host has a fatal error (e.g. SSH auth failure, bad hostname)
+# the ↓ and - counters are shown in bold, distinguishing an unrecoverable
+# error from a transient "still connecting" state.
+#
+# Sections are collapsible: press [ to fold all, ] to unfold all,
+# or navigate to a section header and press Space / zc / zo.
+
+## Infrastructure
+### Core
 10.0.0.1
 
-## Distribution switches
+### Distribution switches
 10.0.1.{1..4}
 
-## Servers
+### Servers
 10.0.2.{1..8}
 
-## TCP Port Monitoring (TCP connection check)
-# Optionally, you can override the resolved port name via :resolv-port
+## TCP Port Monitoring
+# TCP connection check instead of ICMP ping.
+# Optionally override the resolved port name via :resolv-port.
 :resolv-port 8443 alt-https
 example.com:443
 1.1.1.1:53
 1.1.1.1:8443
 google.com:https
 
-## Public DNS (for connectivity check)
+## Public connectivity
 8.8.8.8
 1.1.1.1
 
 # ── Use :for loop with backreferences to assign names ──────────────────────
 # $0 expands to the full expanded host string for each iteration.
 # Numbered ($1) or named variables ($x) refer to brace groups.
+## Workstations
 :for x in 192.168.1.{2..5}
     :resolv $0 workstation$x
     $0
@@ -62,19 +81,21 @@ google.com:https
 # ── Remote monitoring over SSH ─────────────────────────────────────────────
 # Ping hosts on a remote network segment as seen from a remote server.
 # Requires passwordless SSH access (key or agent).
+# Nested sections work inside :ssh-begin blocks too.
 
-:title Remote site A (via ssh jump)
+## Remote sites
+### Remote site A (via ssh jump)
 :ssh-begin -J bastion.example.com ops@remote-a
     10.10.0.{1..4}
 :ssh-end
 
-:title Remote site B
+### Remote site B
 :ssh ops@remote-b 10.20.0.1
 :ssh ops@remote-b 10.20.0.{2..5}
 
 # ── Dynamic Additions ──────────────────────────────────────────────────────
-# You can also dynamically source other config files or add specific hosts directly
-# from within this script or interactively at runtime.
+# You can also dynamically source other config files or add specific hosts
+# directly from within this script or interactively at runtime.
 #
 :ping 1.0.0.1
 :source ./examples/ping-bulk.simple
