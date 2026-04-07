@@ -256,26 +256,35 @@ _FATAL_SSH_ERRORS = (
 
 
 def _strip_inline_comment(line):
-    """Strip an inline ``##``-style comment from *line* and return ``(main, comment)``.
+    """Strip an inline comment from *line* and return ``(main, comment)``.
 
-    Any run of two or more ``#`` characters surrounded by spaces is treated as
-    an inline comment delimiter (``##``, ``###``, ``####``, …).  A run at the
-    very start of the line is a section-header — not stripped.
+    Two forms are recognised:
+    - ``## ...`` (two or more ``#`` surrounded by spaces): the ``##`` inline
+      comment syntax used on host lines to register a static DNS label.
+    - `` # ...`` (single ``#`` preceded by a space): a plain shell-style
+      comment usable on any line including ``:resolv``, ``:for``, etc.
+
+    A run of ``##`` at the very start of the line is a section-header —
+    not stripped.
 
     Examples::
 
-        '10.0.0.1 ## router'   → ('10.0.0.1', 'router')
-        '10.0.0.1 ### router'  → ('10.0.0.1', 'router')
-        '## Section'           → ('## Section', '')
-        '### Sub'              → ('### Sub', '')
-        '10.0.0.1'             → ('10.0.0.1', '')
+        '10.0.0.1 ## router'                      → ('10.0.0.1', 'router')
+        ':resolv 10.0.1.1 host  # comment'        → (':resolv 10.0.1.1 host', 'comment')
+        '## Section'                               → ('## Section', '')
+        '10.0.0.1'                                 → ('10.0.0.1', '')
     """
     if line.startswith('##'):
         return line, ''
+    # ## (two or more hashes, space-delimited) — used for IP ## label syntax
     m = re.search(r' #{2,} ', line)
-    if m is None:
-        return line, ''
-    return line[:m.start()].rstrip(), line[m.end():].strip()
+    if m is not None:
+        return line[:m.start()].rstrip(), line[m.end():].strip()
+    # Single # preceded by a space — plain shell-style comment
+    m = re.search(r' #', line)
+    if m is not None:
+        return line[:m.start()].rstrip(), line[m.end() + 1:].strip()
+    return line, ''
 
 
 def _is_ip(s):
@@ -1596,7 +1605,7 @@ def parse_hosts_file(filename):
             if not line:
                 continue
 
-            # Strip inline ## comment (e.g. '10.0.0.1 ## router').
+            # Strip inline comments: '## label' on host lines, ' # comment' on any line.
             # Section-header lines (starting with '##') are left untouched.
             line, inline_comment = _strip_inline_comment(line)
             if not line:
