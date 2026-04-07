@@ -1895,6 +1895,7 @@ class Application:
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
         self._visible_ping_length = 50  # updated by draw_hosts(); used for scroll step
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
+        self.host_scroll = 0     # number of entries to skip from top of host list
         self.highlighted_index = None  # None = no selection; int = index in self.entries
         self.log_file = None        # path to append event log, or None
         self._monitoring_started = False  # set True once start_monitoring() is called
@@ -2275,6 +2276,30 @@ class Application:
         total = len(self.events)
         max_offset = max(0, total - 1)
         self.log_offset = max(0, min(max_offset, self.log_offset + delta))
+
+    def clamp_host_scroll(self, visible_rows: int) -> None:
+        """Adjust host_scroll so that highlighted_index is visible.
+
+        visible_rows — number of rows available for the host list (max_rows).
+        Only adjusts scroll if highlighted_index is set.
+        """
+        if self.highlighted_index is None:
+            return
+        visible_indices = self._get_visible_entry_indices()
+        if not visible_indices:
+            return
+        try:
+            pos = visible_indices.index(self.highlighted_index)
+        except ValueError:
+            return
+        # Clamp so that pos is within [host_scroll, host_scroll + visible_rows - 1]
+        if pos < self.host_scroll:
+            self.host_scroll = pos
+        elif pos >= self.host_scroll + visible_rows:
+            self.host_scroll = pos - visible_rows + 1
+        # Also keep host_scroll bounded
+        max_scroll = max(0, len(visible_indices) - visible_rows)
+        self.host_scroll = max(0, min(max_scroll, self.host_scroll))
 
     def mark_seen(self):
         """Append a visual 'seen' separator line to the event log (and log file if set).
@@ -2841,10 +2866,30 @@ class Application:
         # Section stack for hierarchical fold tracking (shallowest first)
         section_stack = []
         entry_index = 0  # index in self.entries (not sorted_monitors)
+        skipped = 0       # entries skipped due to host_scroll
 
         for item in sorted_monitors:
             if row >= data_start + max_rows or row >= height:
                 break
+
+            # Skip the first host_scroll visible entries (vertical scroll offset).
+            if skipped < self.host_scroll:
+                # Still need to track section_stack even for skipped entries so
+                # that section indent / fold state is correct for visible rows.
+                if isinstance(item, SectionLabel):
+                    while section_stack and section_stack[-1].level >= item.level:
+                        section_stack.pop()
+                    section_stack.append(item)
+                if self.sort_by == 'none':
+                    actual_entry_index = entry_index
+                else:
+                    try:
+                        actual_entry_index = self.entries.index(item)
+                    except ValueError:
+                        actual_entry_index = -1
+                entry_index += 1
+                skipped += 1
+                continue
 
             # Find the actual index of this item in self.entries for highlighting
             # (sorted_monitors may be in different order than self.entries)
@@ -4566,6 +4611,7 @@ class Application:
                 # Draw sections
                 if show_menu:
                     self.draw_menu_bar(stdscr, width)
+                self.clamp_host_scroll(visible_hosts)
                 self.draw_hosts(stdscr, hosts_start, visible_hosts, width, height,
                                 show_header=show_header)
                 if show_events:
