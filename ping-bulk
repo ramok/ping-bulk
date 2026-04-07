@@ -2665,7 +2665,7 @@ class Application:
                         max_rtt = val
         return max(3, len(str(int(max_rtt))) + 1)
 
-    def draw_hosts(self, stdscr, start_row, max_rows, width, show_header=True):
+    def draw_hosts(self, stdscr, start_row, max_rows, width, height, show_header=True):
         """Draw host list with ping history.
 
         Layout per stats mode:
@@ -2764,6 +2764,11 @@ class Application:
         row = data_start
         sorted_monitors = self.get_sorted_monitors()
 
+        # Cap usable column to width-1: curses raises an error when writing to
+        # the very last cell (height-1, width-1) because the cursor would advance
+        # off-screen. Using safe_width throughout avoids that corner-case.
+        safe_width = max(0, width - 1)
+
         # In rtt/scaled mode use multi-character cells; success mode uses 1 char per ping.
         hist_mode = HISTORY_MODES[self.history_mode]
         if hist_mode == 'rtt':
@@ -2817,7 +2822,7 @@ class Application:
         entry_index = 0  # index in self.entries (not sorted_monitors)
 
         for item in sorted_monitors:
-            if row >= data_start + max_rows:
+            if row >= data_start + max_rows or row >= height:
                 break
 
             # Find the actual index of this item in self.entries for highlighting
@@ -2868,11 +2873,11 @@ class Application:
 
                 # Badge at stat_col — right-aligned in the stat field,
                 # each part (N↑, N↓, N-) gets its own colour.
-                if stat_col < width:
+                if stat_col < safe_width:
                     badge_total_len = sum(len(text) for text, _ in badge_parts)
                     col = stat_col + max(0, stat_field_w - badge_total_len)
                     for text, pair_id in badge_parts:
-                        if col >= width:
+                        if col >= safe_width:
                             break
                         if pair_id == 0:
                             attr = row_attr
@@ -2887,10 +2892,10 @@ class Application:
                         col += len(text)
 
                 # History bar — only when folded
-                if item.folded and hist_col_effective < width:
+                if item.folded and hist_col_effective < safe_width:
                     col = hist_col_effective
                     for char in sec_history:
-                        if col >= width:
+                        if col >= safe_width:
                             break
                         if char == 'X':
                             attr = curses.color_pair(2) | row_attr
@@ -2959,7 +2964,7 @@ class Application:
                 # rtt mode: iterate cell_width characters at a time.
                 # Each cell is (cell_width-1) digit chars + 1 trailing space.
                 for i in range(0, len(history), cell_width):
-                    if col >= width:
+                    if col >= safe_width:
                         break
                     cell = history[i:i + cell_width]
                     content = cell[:cell_width - 1].lstrip()
@@ -2984,7 +2989,7 @@ class Application:
             else:
                 # success / scaled mode: one character per ping.
                 for char in history:
-                    if col >= width:
+                    if col >= safe_width:
                         break
                     if char == 'X':
                         stdscr.addstr(row, col, char, curses.color_pair(2) | row_attr)  # red
@@ -4540,7 +4545,7 @@ class Application:
                 # Draw sections
                 if show_menu:
                     self.draw_menu_bar(stdscr, width)
-                self.draw_hosts(stdscr, hosts_start, visible_hosts, width,
+                self.draw_hosts(stdscr, hosts_start, visible_hosts, width, height,
                                 show_header=show_header)
                 if show_events:
                     self.draw_events(stdscr, events_start, height, width)
