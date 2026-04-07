@@ -2628,11 +2628,11 @@ class Application:
         row = height - 1
         paused_count = sum(1 for m in self.monitors if m.paused)
         if paused_count == 0:
-            pause_label = "[p]ause"
+            pause_label = "[P]ause"
         elif paused_count == len(self.monitors):
-            pause_label = "[p]ause:all"
+            pause_label = "[P]ause:all"
         else:
-            pause_label = f"[p]ause:{paused_count}"
+            pause_label = f"[P]ause:{paused_count}"
         menu_items = [
             (f"[D]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
             (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
@@ -2684,10 +2684,7 @@ class Application:
                             stdscr.addstr(row, col, ']')
                             col += 1
                 else:
-                    if active:
-                        stdscr.addstr(row, col, ch, curses.color_pair(4) | curses.A_BOLD)
-                    else:
-                        stdscr.addstr(row, col, ch)
+                    stdscr.addstr(row, col, ch)
                     col += 1
                     i += 1
 
@@ -2854,9 +2851,9 @@ class Application:
                 else:
                     entry = self.entries[self.highlighted_index] if 0 <= self.highlighted_index < len(self.entries) else None
                     if isinstance(entry, SectionLabel):
-                        hist_suffix += " [↑/↓ navigate] [SPACE hide/show] [ESC clear]"
+                        hist_suffix += " [↑/↓ navigate] [SPACE hide/show] [p pause section] [ESC clear]"
                     else:
-                        hist_suffix += " [↑/↓ navigate] [ENTER details] [ESC clear]"
+                        hist_suffix += " [↑/↓ navigate] [ENTER details] [p pause host] [ESC clear]"
                 if any(isinstance(e, SectionLabel) for e in self.entries):
                     # \[ and \] inside [..] are escaped bracket literals used as hotkey chars
                     hist_suffix += r"  [\[ fold-all]  [\] unfold-all]"
@@ -4677,11 +4674,13 @@ class Application:
 
                 # Column header at row 0 if there is room for at least one host row too
                 show_header = height >= 3  # header(1) + host(1) + menu(1)
-                hosts_start = 1 if show_header else 0
+                hosts_start = 0
 
-                # Host rows fill from hosts_start up to (but not including) the menu row
-                available = max(0, height - hosts_start - 1)  # -1 for bottom menu row
-                visible_hosts = min(num_hosts, available)
+                # Host rows fill from hosts_start up to (but not including) the menu row.
+                # When the column header is shown it occupies one extra row, so the
+                # number of data rows is one less than the total space available.
+                header_rows = 1 if show_header else 0
+                visible_hosts = min(num_hosts, max(0, height - 1 - header_rows))
 
                 # Events get whatever space remains between hosts and the menu row
                 section_end = hosts_start + (1 if show_header else 0) + visible_hosts
