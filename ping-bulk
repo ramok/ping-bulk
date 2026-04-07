@@ -715,16 +715,18 @@ class Monitor(ABC):
             with self.lock:
                 history_list = list(self.history)
                 times_list   = list(self.history_times)
-            t_end = end_time - offset
+            t_end = int(end_time - offset)
             # One pass: map each (timestamp, value) to a bucket index.
-            # Bucket 0 = most recent 1s window ending at t_end; bucket i ends at t_end-i.
-            # Newer entries overwrite older ones in the same bucket (scan oldest→newest).
+            # Bucket 0 = the current second; bucket i = i seconds ago.
+            # Each ping belongs to the second it arrived in: int(ts) i.e. floor(ts).
+            # This ensures all pings within the same second land in the same bucket
+            # regardless of their sub-second offset, preventing per-host jitter.
             if cell_width > 1:
                 result = [' ' * cell_width] * length
             else:
                 result = [' '] * length
             for ts, val in zip(times_list, history_list):
-                bucket = int(t_end - ts)
+                bucket = t_end - int(ts)
                 if 0 <= bucket < length:
                     if cell_width > 1:
                         num_w = cell_width - 1
@@ -822,9 +824,8 @@ class PingMonitor(Monitor):
                 self.error = str(exc)
                 with self.lock:
                     self.history.append('ERR')
+                    self.history_times.append(time.time())
                 break
-
-            got_output = False  # True once any ping-result line is received
 
             for raw_line in self._proc.stdout:
                 if not self.running:
@@ -889,6 +890,7 @@ class PingMonitor(Monitor):
                 self.error = stderr_text.strip()
                 with self.lock:
                     self.history.append('ERR')
+                    self.history_times.append(time.time())
                 break  # do not restart for fatal errors
 
             # Unexpected (non-fatal) exit — restart after backoff
@@ -1292,6 +1294,7 @@ class SshPingMonitor(Monitor):
                 self.error = str(exc)
                 with self.lock:
                     self.history.append("ERR")
+                    self.history_times.append(time.time())
                 break
 
             got_output = False
@@ -1302,17 +1305,13 @@ class SshPingMonitor(Monitor):
 
                 line = raw_line.rstrip()
 
-                ping_ts = None
+                # Always use local receive time for history_times so all monitors
+                # share the same clock reference regardless of remote clock skew.
+                ping_ts = time.time()
                 if line.startswith("["):
                     close = line.find("]")
                     if close != -1:
-                        try:
-                            ping_ts = float(line[1:close])
-                        except ValueError:
-                            pass
                         line = line[close + 2:]
-                if ping_ts is None:
-                    ping_ts = time.time()
 
                 if "time=" in line:
                     try:
@@ -1353,6 +1352,7 @@ class SshPingMonitor(Monitor):
                 self.error = stderr_text.strip()
                 with self.lock:
                     self.history.append("ERR")
+                    self.history_times.append(time.time())
                 break
 
             if not got_output:
@@ -2785,8 +2785,10 @@ class Application:
         render_time = int(time.time())
         sync = self.sync_history
 
-        if self.history_offset > 0:
-            # Scrolled view: always show the full available width
+        if sync or self.history_offset > 0:
+            # Sync mode: always show the full width — new pings land at bucket 0
+            # and old ones fall off naturally; sweep animation is irrelevant.
+            # Scrolled view: always show the full available width too.
             display_count = ping_length
         else:
             if max_ping_count < ping_length:
