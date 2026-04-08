@@ -5,7 +5,7 @@ Covers:
   - $0 (full-string back-reference)
   - no-backref host lines inside :for  → warn + add once
   - duplicate hosts (within loop, across iterations, vs. outside loop)
-  - unclosed :for at EOF  → error entry
+  - unclosed :for at EOF  → implicit :done (hosts produced, no error)
   - :done without :for    → error entry
   - nested :for           → error entry
   - :ssh-begin/:ssh-end inside :for → error entries
@@ -445,23 +445,23 @@ class TestForLoopDuplicates:
 # ===========================================================================
 
 class TestForLoopErrors:
-    """Error conditions: unclosed :for, :done without :for, nested :for."""
+    """Error conditions: implicit :done at EOF, :done without :for, nested :for."""
 
-    # TODO: allow to do not use :done
-    def test_unclosed_for_at_eof_produces_error(self, pb, tmp_path):
-        """A :for loop that reaches EOF without :done produces an error entry."""
+    def test_unclosed_for_at_eof_is_implicit_done(self, pb, tmp_path):
+        """A :for loop that reaches EOF without :done is treated as implicit :done."""
         content = """\
             :for node{1,2}
             node$1
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         error_entries = [(k, v) for k, v in entries if k == 'error']
+        host_entries = [v for k, v in entries if k == 'host']
 
-        assert len(error_entries) == 1, (
-            f"Expected exactly one error entry for unclosed :for; got {entries!r}"
+        assert not error_entries, (
+            f"Expected no error for implicit :done at EOF; got {error_entries!r}"
         )
-        assert 'unclosed' in error_entries[0][1].lower(), (
-            f"Error should mention 'unclosed'; got {error_entries[0][1]!r}"
+        assert host_entries == ['node1', 'node2'], (
+            f"Expected hosts node1, node2 from implicit :done; got {host_entries!r}"
         )
 
     def test_done_without_for_produces_error(self, pb, tmp_path):

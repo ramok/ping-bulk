@@ -1574,7 +1574,9 @@ def parse_hosts_file(filename):
       :for pattern    — open a loop; every body line is repeated for each expansion
                         of *pattern*, with back-references (\\N / $N) substituted.
                         :for may appear inside an :ssh-begin block.
-      :done           — close the most recent :for loop
+      :done           — close the most recent :for loop; if the file ends without
+                        :done, an implicit :done is applied at EOF so the loop still
+                        produces its entries (useful for :source'd files)
       :cmd [args]     — any other ':'-prefixed line is treated as a startup command
                         (same syntax as the interactive ':' command line)
       # ...           — comment line; ignored entirely
@@ -1750,10 +1752,15 @@ def parse_hosts_file(filename):
                                     entries.append(('cmd', f':resolv {host} {resolved_comment}'))
                                 entries.append(('optional_host' if optional else 'host', host))
 
-    # Warn if the file ended while still inside a :for loop.
+    # EOF while inside a :for loop — treat as implicit :done so that files
+    # ending with a :for block (no trailing :done) work correctly, including
+    # when loaded interactively via :source.
     if for_loop_pattern is not None:
-        entries.append(('error',
-            f"unclosed :for loop (pattern: {for_loop_pattern!r})"))
+        entries.extend(_process_for_loop(
+            for_loop_pattern, for_loop_body,
+            seen_hosts, for_loop_ssh_args,
+            var_names=for_loop_var_name
+        ))
 
     return entries
 

@@ -354,7 +354,10 @@ Format
     included only once.  ``:for`` may appear inside an ``:ssh-begin`` block.
 
 ``:done``
-    Close the current ``:for`` loop.
+    Close the current ``:for`` loop.  If the file ends without a ``:done``
+    (e.g. the ``:for`` block is the last thing in the file), an implicit
+    ``:done`` is applied at EOF so the loop still produces its entries.
+    This also applies when a file is loaded interactively via ``:source``.
 
 ``:cmd [args]``
     Any command listed under **COMMANDS** above; applied immediately
