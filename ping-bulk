@@ -3,12 +3,14 @@ import argparse
 import ctypes
 import ctypes.util
 import curses
+import fnmatch
 import glob as _glob
 import itertools
 import math
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -104,6 +106,8 @@ SET_PARAMS = [
              'align history bars to wall-clock time (default on)'),
     SetParam('pause', '_cmd_pause', ['on', 'off'],
              'pause all monitors (stop sending pings)'),
+    SetParam('mux-split', '_cmd_mux_split', ['v', 'h', 'window'],
+             'default pane split direction for :mux (v=below h=right window=new)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -196,6 +200,16 @@ _FULL_HELP = [
     "  web{1..3}.example.com   brace range → web1.example.com … web3.example.com",
     "  web{a,b,c}.example.com  brace list  → weba, webb, webc .example.com",
     "  10.0.{1..2}.{10,2{1,2}} nested      → cartesian product (8 addresses)",
+    "-DIVIDER-",
+    "  SSH connect  (requires tmux or screen)",
+    "  c              connect to highlighted host via SSH in a new pane/window",
+    "                 pre-fills :mux ssh <host> [opts from :connect-options]",
+    "  :mux [-v|-h|-w] <cmd>  run cmd in split pane (v=below h=right w=window)",
+    "  :tmux / :screen        same as :mux; name hints at preferred backend",
+    "  :connect-options <pat> <ssh-opts>  set SSH flags for hosts matching glob",
+    "  :connect-options <pat> -           disable connect for matching hosts",
+    "  :connect-options       (no args)   clear all rules",
+    "  :set mux-split v|h|window          default split direction",
 ]
 
 _EXAMPLE_HELP = """\
@@ -2084,12 +2098,144 @@ CMD_REGISTRY = [
                        'help': 'align history bars to wall-clock time (default: on)'}),
     CmdDef(['let'],              '_cmd_let',        None,
            '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
+    CmdDef(['mux', 'tmux', 'screen'], '_cmd_mux', None,
+           '[-v|-h|-w] <command...>', 'run command in tmux/screen pane (-v below, -h right, -w window)'),
+    CmdDef(['connect-options'],  '_cmd_connect_options', None,
+           '<glob> <ssh-opts|->', 'set SSH flags for matching hosts; - disables connect'),
+    CmdDef(['edit'],             '_cmd_edit',       None,
+           '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
 ]
 
 # Flat name/alias → CmdDef lookup used by _dispatch_cmd and _get_completions.
 _CMD_MAP: dict = {name: cmd for cmd in CMD_REGISTRY for name in cmd.names}
+
+# ── Terminal backend abstraction ─────────────────────────────────────────────
+# Covers tmux, screen (future), and X terminal emulators (future).
+
+_KIOSK_TMUX_CONF = '/etc/ping-bulk/kiosk.tmux.conf'
+_KIOSK_SSH_IDENTITY = '/etc/ping-bulk/id_ed25519'
+
+
+class TerminalBackend(ABC):
+    """Abstract base for terminal multiplexer / emulator backends."""
+
+    @classmethod
+    @abstractmethod
+    def available(cls) -> bool:
+        """True if the backend binary is found in PATH."""
+
+    @abstractmethod
+    def is_inside(self) -> bool:
+        """True if currently running inside this backend's session."""
+
+    @abstractmethod
+    def split(self, direction: str, command: list) -> None:
+        """Open command in a split pane.  direction: 'v' (below) or 'h' (right)."""
+
+    @abstractmethod
+    def new_window(self, command: list) -> None:
+        """Open command in a new window."""
+
+    @abstractmethod
+    def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
+        """Return argv to relaunch inside this backend."""
+
+
+class TmuxBackend(TerminalBackend):
+    """tmux backend."""
+
+    @classmethod
+    def available(cls) -> bool:
+        return shutil.which('tmux') is not None
+
+    def is_inside(self) -> bool:
+        return bool(os.environ.get('TMUX'))
+
+    def split(self, direction: str, command: list) -> None:
+        flag = '-v' if direction == 'v' else '-h'
+        subprocess.Popen(['tmux', 'split-window', flag, '--'] + command)
+
+    def new_window(self, command: list) -> None:
+        subprocess.Popen(['tmux', 'new-window', '--'] + command)
+
+    def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
+        cmd = ['tmux']
+        if kiosk_conf and os.path.exists(kiosk_conf):
+            cmd += ['-f', kiosk_conf]
+        cmd += ['new', '-As', 'ping-bulk', '--']
+        cmd += argv
+        return cmd
+
+
+class ScreenBackend(TerminalBackend):
+    """GNU screen backend (stub — split support limited)."""
+
+    @classmethod
+    def available(cls) -> bool:
+        return shutil.which('screen') is not None
+
+    def is_inside(self) -> bool:
+        return bool(os.environ.get('STY'))
+
+    def split(self, direction: str, command: list) -> None:
+        # screen requires three sequential -X calls; -v = side-by-side (opposite tmux)
+        split_args = ['screen', '-X', 'split']
+        if direction == 'h':
+            split_args.append('-v')
+        subprocess.run(split_args)
+        subprocess.run(['screen', '-X', 'focus'])
+        subprocess.Popen(['screen', '-X', 'screen'] + command)
+
+    def new_window(self, command: list) -> None:
+        subprocess.Popen(['screen', '-X', 'screen'] + command)
+
+    def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
+        return ['screen', '-d', '-RR', '-S', 'ping-bulk'] + argv
+
+
+_MUX_BACKENDS: dict[str, TerminalBackend] = {
+    'tmux':   TmuxBackend(),
+    'screen': ScreenBackend(),
+}
+
+
+def _resolve_mux_backend(preference: str = None) -> TerminalBackend | None:
+    """Return the TerminalBackend to use, or None if none is available.
+
+    If already inside a specific multiplexer, always use that one.
+    Otherwise, use *preference* (the command alias name) as a hint,
+    falling back to whichever backend is available.
+    """
+    for backend in _MUX_BACKENDS.values():
+        if backend.is_inside():
+            return backend
+    order = ([preference] if preference and preference in _MUX_BACKENDS else []) \
+            + ['tmux', 'screen']
+    seen = set()
+    for name in order:
+        if name and name not in seen and name in _MUX_BACKENDS:
+            seen.add(name)
+            b = _MUX_BACKENDS[name]
+            if b.available():
+                return b
+    return None
+
+
+def _kiosk_ssh_flags() -> list:
+    """Return SSH flags that isolate kiosk sessions from the user's home directory.
+
+    -F none              — ignore ~/.ssh/config
+    -o IdentityFile=none — no default identity files from ~/.ssh/
+    -o IdentitiesOnly=yes — only use explicitly listed identity files
+
+    If the kiosk SSH identity key exists, it is appended as -i <path>.
+    """
+    flags = ['-F', 'none', '-o', 'IdentityFile=none', '-o', 'IdentitiesOnly=yes']
+    if os.path.exists(_KIOSK_SSH_IDENTITY):
+        flags += ['-i', _KIOSK_SSH_IDENTITY]
+    return flags
 
 
 class Application:
@@ -2131,6 +2277,10 @@ class Application:
         self.highlighted_index = None  # None = no selection; int = index in self.entries
         self.log_file = None        # path to append event log, or None
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
+        self.connect_rules: list = []  # [(glob_pattern, ssh_opts | None), ...]; None = disabled
+        self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
+        self.kiosk_mode = False        # set True by --kiosk flag
+        self.hosts_file = None         # path of the active hosts file (for :edit)
         self._monitoring_started = False  # set True once start_monitoring() is called
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
@@ -2268,6 +2418,7 @@ class Application:
                 f.write(f":set log-size {self.log_size}\n")
                 f.write(f":set history-size {self.history_size}\n")
                 f.write(f":set sync-history {'on' if self.sync_history else 'off'}\n")
+                f.write(f":set mux-split {self.mux_split}\n")
                 if self.log_file:
                     f.write(f":log {self.log_file}\n")
                 else:
@@ -3698,6 +3849,14 @@ class Application:
             line = "Quit? [y/N]: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
+        elif p['type'] == 'mux_relaunch':
+            line = "Not in a multiplexer — relaunch inside tmux? [Y/n]: "
+            stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
+            stdscr.move(height - 1, min(len(line), width - 2))
+        elif p['type'] == 'edit_reload':
+            line = f"Reload '{p.get('file', '')}' ? [Y/n]: "
+            stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
+            stdscr.move(height - 1, min(len(line), width - 2))
 
     def _handle_prompt_key(self, key):
         """Process one keypress while a prompt is active.
@@ -3756,6 +3915,26 @@ class Application:
             if key in (ord('y'), ord('Y')):
                 self.running = False
             self.prompt = None  # any key closes the quit prompt
+
+        elif p['type'] == 'mux_relaunch':
+            if key not in (ord('n'), ord('N'), 27):
+                # Y / Enter / any affirmative key → relaunch in tmux
+                backend = _MUX_BACKENDS.get('tmux') or next(
+                    (b for b in _MUX_BACKENDS.values() if b.available()), None)
+                if backend:
+                    cmd = backend.relaunch_cmd(sys.argv)
+                    self.prompt = None
+                    curses.endwin()
+                    os.execvp(cmd[0], cmd)
+                else:
+                    self.add_event("cmd", "relaunch: tmux/screen not found")
+            self.prompt = None
+
+        elif p['type'] == 'edit_reload':
+            if key not in (ord('n'), ord('N'), 27):
+                self._cmd_source(p.get('file', ''))
+                self.add_event("cmd", f"edit: reloaded {p.get('file', '')}")
+            self.prompt = None
 
     def save_to_file(self, filename, append=False, write_separator=True):
         """Write the current event log to a file.
@@ -4118,6 +4297,7 @@ class Application:
 
         cmd_def = _CMD_MAP.get(cmd)
         if cmd_def:
+            self._last_cmd_name = cmd  # let handlers know which alias was used
             getattr(self, cmd_def.action)(args)
         else:
             self.add_event("cmd",
@@ -4244,6 +4424,242 @@ class Application:
             )
             self.add_event("cmd", f"let: set {preview}"
                            + (' …' if len(name_rows) > 3 else ''))
+
+
+    # ── :mux / :tmux / :screen ──────────────────────────────────────────────
+
+    def _cmd_mux_split(self, args=''):
+        """Set or cycle the default mux split direction (:set mux-split v|h|window)."""
+        valid = ['v', 'h', 'window']
+        if not args:
+            idx = valid.index(self.mux_split) if self.mux_split in valid else 0
+            self.mux_split = valid[(idx + 1) % len(valid)]
+        elif args in valid:
+            self.mux_split = args
+        else:
+            self.add_event("cmd", f"mux-split: invalid value '{args}'; choices: v h window")
+            return
+        if self._monitoring_started:
+            self.add_event("cmd", f"mux-split: {self.mux_split}")
+
+    def _cmd_mux(self, args=''):
+        """Run a command in a tmux/screen pane or window.
+
+        :mux [-v|-h|-w] <command...>
+        :tmux / :screen are aliases; the alias name hints at a preferred backend.
+        """
+        # Determine which alias was used (stored briefly on self._last_cmd_name).
+        preference = getattr(self, '_last_cmd_name', None)
+        if preference not in ('tmux', 'screen'):
+            preference = None
+
+        tokens = args.split() if args else []
+
+        # Parse optional split-direction override
+        direction = self.mux_split
+        if tokens and tokens[0] in ('-v', '-h', '-w'):
+            flag = tokens.pop(0)
+            direction = {'-v': 'v', '-h': 'h', '-w': 'window'}.get(flag, flag[1:])
+
+        if not tokens:
+            self.add_event("cmd", "mux: usage: :mux [-v|-h|-w] <command...>")
+            return
+
+        # Kiosk whitelist: only ssh and login are permitted
+        if self.kiosk_mode:
+            cmd_name = tokens[0].lower()
+            if cmd_name not in ('ssh', 'login'):
+                self.add_event("cmd",
+                    f"mux: '{cmd_name}' not allowed in kiosk mode (only ssh/login)")
+                return
+
+        backend = _resolve_mux_backend(preference)
+        if backend is None:
+            self.add_event("cmd",
+                "mux: no terminal multiplexer available (install tmux or screen)")
+            return
+
+        if direction == 'window':
+            backend.new_window(tokens)
+        else:
+            backend.split(direction, tokens)
+
+    def _build_connect_cmd(self, monitor) -> tuple:
+        """Return (disabled: bool, ssh_cmd: list) for the 'c' hotkey.
+
+        Iterates connect_rules with fnmatch (last-match wins).  Returns
+        (True, []) if a disable rule matched, or (False, ssh_cmd_tokens) otherwise.
+        """
+        host = getattr(monitor, 'host', '')
+        resolved = getattr(monitor, 'resolved_hostname', '') or ''
+
+        matched_opts = ''
+        matched_disabled = False
+        for pattern, opts in self.connect_rules:
+            if fnmatch.fnmatch(host, pattern) or fnmatch.fnmatch(resolved, pattern):
+                if opts is None:
+                    matched_disabled = True
+                else:
+                    matched_disabled = False
+                    matched_opts = opts
+
+        if matched_disabled:
+            return True, []
+
+        # Build ssh command tokens
+        if isinstance(monitor, SshPingMonitor):
+            # Reuse the existing SSH args (jump hosts, user, etc.) from the monitor
+            ssh_parts = list(monitor._original_ssh_args)
+        else:
+            # Plain PingMonitor or PortMonitor
+            if isinstance(monitor, PortMonitor):
+                target = monitor._ping_host
+            else:
+                target = monitor.host
+            ssh_parts = [target]
+
+        # Prepend connect-options flags (before target host)
+        if matched_opts:
+            try:
+                opt_tokens = shlex.split(matched_opts)
+            except ValueError:
+                opt_tokens = matched_opts.split()
+            ssh_parts = opt_tokens + ssh_parts
+
+        # In kiosk mode, inject SSH key isolation flags at the front
+        if self.kiosk_mode:
+            ssh_parts = _kiosk_ssh_flags() + ssh_parts
+
+        return False, ['ssh'] + ssh_parts
+
+    def _open_cmd_prefill(self, text: str):
+        """Open command mode with the given text pre-filled and cursor at the end."""
+        self.cmd = {
+            'chars': list(text),
+            'cursor': len(text),
+            'hist_idx': -1,
+            'saved_line': '',
+            'completions': [], 'comp_idx': -1, 'comp_prefix': '',
+        }
+
+    def _connect_to_highlighted(self):
+        """Handle the 'c' hotkey: build an SSH command for the highlighted host
+        and open command mode pre-filled with 'mux ssh <cmd>'.
+
+        If not inside any multiplexer and not in kiosk mode, offer to relaunch.
+        If the host has a disable rule in connect_rules, flash a message instead.
+        """
+        if self.highlighted_index is None or \
+                not (0 <= self.highlighted_index < len(self.entries)):
+            self.add_event("cmd", "c: select a host first (\u2191/\u2193 to navigate)")
+            return
+
+        entry = self.entries[self.highlighted_index]
+        if not isinstance(entry, Monitor):
+            self.add_event("cmd", "c: select a host line (not a section header)")
+            return
+
+        backend = _resolve_mux_backend()
+        if backend is None:
+            if self.kiosk_mode:
+                self.add_event("cmd", "c: no terminal multiplexer (install tmux)")
+                return
+            # Offer relaunch — open a Y/n prompt
+            self.prompt = {'type': 'mux_relaunch', 'chars': []}
+            return
+
+        disabled, ssh_cmd = self._build_connect_cmd(entry)
+        if disabled:
+            self.add_event("cmd", f"c: connect disabled for {entry.host}")
+            return
+
+        prefill = 'mux ' + shlex.join(ssh_cmd)
+        self._open_cmd_prefill(prefill)
+
+    # ── :connect-options ────────────────────────────────────────────────────
+
+    def _cmd_connect_options(self, args=''):
+        """Manage glob-based SSH connect rules.
+
+        :connect-options <glob> <ssh-opts>  — add/replace rule (opts='-' to disable)
+        :connect-options <glob>             — remove rule for that pattern
+        :connect-options                    — clear all rules
+        """
+        if not args.strip():
+            self.connect_rules.clear()
+            if self._monitoring_started:
+                self.add_event("cmd", "connect-options: all rules cleared")
+            return
+
+        parts = args.split(None, 1)
+        pattern = parts[0]
+        if len(parts) == 1:
+            # Remove the rule for this pattern
+            before = len(self.connect_rules)
+            self.connect_rules = [(p, o) for p, o in self.connect_rules if p != pattern]
+            if self._monitoring_started:
+                removed = before - len(self.connect_rules)
+                self.add_event("cmd",
+                    f"connect-options: removed {removed} rule(s) for '{pattern}'")
+            return
+
+        opts_str = parts[1].strip()
+        # '-' is the special disable marker -> store as None
+        opts = None if opts_str == '-' else opts_str
+        # Replace existing rule for the same pattern
+        self.connect_rules = [(p, o) for p, o in self.connect_rules if p != pattern]
+        self.connect_rules.append((pattern, opts))
+        if self._monitoring_started:
+            status = 'disabled' if opts is None else f'opts={opts_str!r}'
+            self.add_event("cmd", f"connect-options: '{pattern}' → {status}")
+
+    # ── :edit ────────────────────────────────────────────────────────────────
+
+    def _resolve_editor(self) -> list:
+        """Return [editor_binary] or [editor_binary, flags] to open a file.
+
+        Kiosk mode uses rvim (restricted vim, no shell escape).
+        Normal mode respects $VISUAL, $EDITOR, then Debian's 'editor' alternative.
+        """
+        if self.kiosk_mode:
+            if shutil.which('rvim'):
+                return ['rvim']
+            if shutil.which('vim'):
+                return ['vim', '-Z']
+            return []
+        for candidate in [
+            os.environ.get('VISUAL'),
+            os.environ.get('EDITOR'),
+            'editor', 'vim', 'vi',
+        ]:
+            if candidate and shutil.which(candidate):
+                return [candidate]
+        return []
+
+    def _cmd_edit(self, args=''):
+        """Open the active hosts file in an external editor, then reload it."""
+        if not self.hosts_file:
+            self.add_event("cmd", "edit: no hosts file loaded (use -f <file>)")
+            return
+
+        editor_cmd = self._resolve_editor()
+        if not editor_cmd:
+            self.add_event("cmd", "edit: no editor found "
+                           "(set $VISUAL or $EDITOR, or install vim)")
+            return
+
+        import curses as _curses
+        _curses.endwin()
+        try:
+            subprocess.call(editor_cmd + [self.hosts_file])
+        finally:
+            _curses.doupdate()
+
+        if self.kiosk_mode:
+            self._cmd_source(self.hosts_file)
+            self.add_event("cmd", f"edit: reloaded {self.hosts_file}")
+        else:
+            self.prompt = {'type': 'edit_reload', 'chars': [], 'file': self.hosts_file}
 
     def _cmd_dns(self, args=''):
         """Cycle (no arg) or set DNS display mode."""
@@ -4534,6 +4950,10 @@ class Application:
                     ping_host_pattern = tokens[-1]
                     ssh_args = tokens[:-1]
                     ssh_dest = ssh_args[-1]
+
+                    # In kiosk mode, prepend isolation flags to block ~/.ssh/ access
+                    if self.kiosk_mode:
+                        ssh_args = _kiosk_ssh_flags() + ssh_args
 
                     # Preserve original SSH args before applying :resolv mappings
                     original_ssh_args = ssh_args.copy()
@@ -5220,6 +5640,8 @@ class Application:
                             self.details_monitor = entry
                 elif key == ord('C'):
                     self._open_prompt_clear()
+                elif key == ord('c'):
+                    self._connect_to_highlighted()
                 elif key == ord(':'):
                     self.cmd = {
                         'chars': [], 'cursor': 0,
@@ -5343,6 +5765,8 @@ press '?' inside the app for the full keyboard reference.\
             parser.add_argument(*cmd.cli_flags, **(cmd.cli_kwargs or {}))
 
     parser.add_argument('hosts', nargs='*', metavar='HOST', help='hosts/IPs to ping')
+    parser.add_argument('--kiosk', action='store_true',
+                        help='run in kiosk mode: auto-launch tmux, restrict commands, use rvim')
     parser.add_argument('--help-full',    action='store_true',
                         help='show full manual and exit')
     parser.add_argument('--help-example', action='store_true',
@@ -5396,6 +5820,8 @@ def main(stdscr, args):
         return
 
     app = Application(entries, log_file=args.log_file)
+    app.hosts_file = args.file
+    app.kiosk_mode = bool(args.kiosk)
 
     # Apply any display-mode flags supplied on the command line.
     # These run after _load_config() so they always take precedence over the
@@ -5416,4 +5842,16 @@ def main(stdscr, args):
 
 if __name__ == "__main__":
     _args = _parse_args()
+    if _args.kiosk:
+        # In kiosk mode, auto-relaunch inside tmux if not already inside one
+        _tmux = TmuxBackend()
+        _screen = ScreenBackend()
+        if not _tmux.is_inside() and not _screen.is_inside():
+            if _tmux.available():
+                _cmd = _tmux.relaunch_cmd(sys.argv, kiosk_conf=_KIOSK_TMUX_CONF)
+                os.execvp(_cmd[0], _cmd)
+            elif _screen.available():
+                _cmd = _screen.relaunch_cmd(sys.argv)
+                os.execvp(_cmd[0], _cmd)
+            # If neither available, fall through and run directly
     curses.wrapper(main, _args)

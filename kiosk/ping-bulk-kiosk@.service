@@ -1,0 +1,46 @@
+[Unit]
+Description=ping-bulk kiosk monitor on %I
+Documentation=man:ping-bulk(1)
+After=systemd-user-sessions.service network-online.target
+Wants=network-online.target
+# Replace the normal getty on the same tty
+Conflicts=getty@%i.service
+After=getty@%i.service
+
+[Service]
+Type=simple
+
+# Run as a dedicated low-privilege user.
+# Create it with: useradd -r -m -d /var/lib/ping-monitor ping-monitor
+User=ping-monitor
+Group=ping-monitor
+
+# Hosts file to monitor.  Adjust the path as needed.
+ExecStart=/usr/local/bin/ping-bulk --kiosk -f /etc/ping-bulk/hosts
+
+# Attach directly to the physical tty
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/%I
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+
+# Always restart so the console is never left idle
+Restart=always
+RestartSec=2
+
+# Systemd security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Allow writing to the ping-monitor home (SSH known_hosts, tmux socket, etc.)
+ReadWritePaths=/var/lib/ping-monitor /run/ping-monitor
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
