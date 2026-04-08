@@ -23,6 +23,39 @@ from threading import Thread
 # Stats column modes cycled with [s]; 'off' means hidden
 STATS_MODES = ['off', 'Down', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', 'All']
 
+# Sentinel index used when a custom column set is active (beyond STATS_MODES list).
+_CUSTOM_STATS_SENTINEL = len(STATS_MODES)
+
+# Map of user-facing stat names (lowercase) → canonical label used by _compute_stat.
+# 'last' → 'Last' (live RTT, same as 'off' mode but explicit), 'down' → 'Down', etc.
+# 'off' and 'all' are valid single-mode names but NOT valid in comma lists.
+STAT_NAMES = {
+    'last':  'Last',
+    'down':  'Down',
+    'loss%': 'Loss%',
+    'avg':   'Avg',
+    'min':   'Min',
+    'max':   'Max',
+    'stdev': 'StDev',
+    'rx':    'RX',
+    'tx':    'TX',
+    'xx':    'XX',
+}
+
+# Header labels shown in multi-column mode; 'down' gets a wider 'Up/Down' header.
+_STAT_HEADER = {
+    'Last':  'ms',
+    'Down':  'Up/Down',
+    'Loss%': 'Loss%',
+    'Avg':   'Avg',
+    'Min':   'Min',
+    'Max':   'Max',
+    'StDev': 'StDev',
+    'RX':    'RX',
+    'TX':    'TX',
+    'XX':    'XX',
+}
+
 # Ping history character modes cycled with [h]
 HISTORY_MODES = ['success', 'rtt', 'scaled']
 
@@ -57,8 +90,8 @@ class SetParam:
 SET_PARAMS = [
     SetParam('dns',       '_cmd_dns',      lambda: [m.lower() for m in DNS_MODES],
              'DNS display mode'),
-    SetParam('stats',     '_cmd_stats',    lambda: [m.lower() for m in STATS_MODES],
-             'stats column mode'),
+    SetParam('stats',     '_cmd_stats',    '_complete_stats_arg',
+             'stats column mode (single name or comma-separated list e.g. last,avg,stdev)'),
     SetParam('sort',      '_cmd_sort',     ['none', 'name', 'status', 'latency'],
              'sort order'),
     SetParam('ping-view', '_cmd_history',  lambda: [m.lower() for m in HISTORY_MODES],
@@ -121,6 +154,9 @@ _FULL_HELP = [
     f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
     "                            set display modes; omit value to cycle/show",
     "                            log-size / history-size: numeric value only",
+    "  :set stats last,avg,stdev  custom multi-column stats (comma-separated)",
+    "                            names: last down loss% avg min max stdev rx tx xx",
+    "  :set stats ,               clear custom stats, reset to off",
     "  :pause [on|off]            toggle/set global pause (stop all pings)",
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
@@ -1837,8 +1873,9 @@ CMD_REGISTRY = [
            '[off|hostname|ip]',   'cycle or set DNS display mode',
            cli_flags=('--dns',),
            cli_kwargs={'metavar': 'MODE', 'choices': [m.lower() for m in DNS_MODES], 'help': f"DNS display mode at startup: {' | '.join(m.lower() for m in DNS_MODES)}"}),
-    CmdDef(['stats'],            '_cmd_stats',      lambda: [m.lower() for m in STATS_MODES],
-           '[mode]',              'cycle or set stats column',
+    CmdDef(['stats'],            '_cmd_stats',      None,
+           '[mode|col,col,…]',   'cycle or set stats column (single name or comma list e.g. last,avg,stdev)',
+           arg_completer='_complete_stats_arg',
            cli_flags=('--stats',),
            cli_kwargs={'metavar': 'MODE', 'choices': [m.lower() for m in STATS_MODES], 'help': f"stats column at startup: {' | '.join(m.lower() for m in STATS_MODES)}".replace('%', '%%')}),
     CmdDef(['sort'],             '_cmd_sort',       ['none', 'name', 'status', 'latency'],
@@ -1929,6 +1966,7 @@ class Application:
         self.events = deque(maxlen=self.log_size)
         self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
         self.stats_mode = 0    # index into STATS_MODES; 0 = off
+        self.stats_custom = None  # list[str] of canonical stat names when in custom mode, else None
         self.sort_by = 'none'  # none, name, status, latency
         self.history_mode = 0  # index into HISTORY_MODES
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
@@ -2064,7 +2102,11 @@ class Application:
             with open(path, 'w') as f:
                 f.write("# ping-bulk configuration\n")
                 f.write(f":set dns {DNS_MODES[self.dns_mode]}\n")
-                f.write(f":set stats {STATS_MODES[self.stats_mode]}\n")
+                if self.stats_custom is not None:
+                    custom_str = ','.join(h.lower() for h in self.stats_custom)
+                    f.write(f":set stats {custom_str}\n")
+                else:
+                    f.write(f":set stats {STATS_MODES[self.stats_mode]}\n")
                 f.write(f":set sort {self.sort_by}\n")
                 f.write(f":set ping-view {HISTORY_MODES[self.history_mode]}\n")
                 f.write(f":set log-size {self.log_size}\n")
@@ -2178,8 +2220,12 @@ class Application:
             if param is not None:
                 # Complete the value token (3rd), but not beyond it.
                 if len(parts) <= 3 and not (len(parts) == 3 and text.endswith(' ')):
-                    arg_prefix = parts[2].lower() if len(parts) == 3 else ''
-                    return [v for v in param.get_values() if v.startswith(arg_prefix)]
+                    arg_prefix = parts[2] if len(parts) == 3 else ''
+                    # If values is a method name string, delegate to that completer.
+                    if isinstance(param.values, str):
+                        return getattr(self, param.values)(arg_prefix)
+                    arg_prefix_lower = arg_prefix.lower()
+                    return [v for v in param.get_values() if v.startswith(arg_prefix_lower)]
 
         return []
 
@@ -2207,6 +2253,32 @@ class Application:
         """
         prefix_lower = prefix.lower()
         return sorted(k for k in self.hosts_map if k.lower().startswith(prefix_lower))
+
+    def _complete_stats_arg(self, prefix):
+        """Return Tab-completion candidates for the :stats / :set stats argument.
+
+        - No comma in prefix: offer all STATS_MODES names (lowercase).
+        - Comma present: the user is building a comma list; offer remaining valid
+          STAT_NAMES (excluding already-used names, 'all', and 'off') filtered
+          by what has been typed after the last comma.
+        """
+        if ',' not in prefix:
+            # Single-mode completion: all STATS_MODES + STAT_NAMES aliases
+            all_names = sorted(set(m.lower() for m in STATS_MODES) | set(STAT_NAMES.keys()))
+            return [n for n in all_names if n.startswith(prefix.lower())]
+        # Comma-list completion
+        parts = [p.strip().lower() for p in prefix.split(',')]
+        already_used = set(parts[:-1])  # everything before the last comma
+        last = parts[-1]  # what's typed after the last comma
+        # Offer STAT_NAMES keys excluding already-used, 'all', 'off'
+        candidates = sorted(
+            k for k in STAT_NAMES
+            if k not in already_used and k not in ('all', 'off')
+            and k.startswith(last)
+        )
+        # Return as full replacements: keep everything up to last comma + candidate
+        prefix_base = prefix[:prefix.rfind(',') + 1]
+        return [prefix_base + c for c in candidates]
 
     def start_monitoring(self):
         """Start all ping threads"""
@@ -2283,8 +2355,13 @@ class Application:
                     threading.Thread(target=monitor.resolve_dns, daemon=True).start()
 
     def cycle_stats(self, direction=1):
-        """Cycle through stats display modes. direction=1 forward, -1 backward."""
-        self.stats_mode = (self.stats_mode + direction) % len(STATS_MODES)
+        """Cycle through stats display modes. direction=1 forward, -1 backward.
+
+        When a custom column set is active it occupies one extra slot at index
+        _CUSTOM_STATS_SENTINEL (== len(STATS_MODES)) in the cycle.
+        """
+        cycle_len = len(STATS_MODES) + (1 if self.stats_custom is not None else 0)
+        self.stats_mode = (self.stats_mode + direction) % cycle_len
 
     def cycle_sort(self, direction=1):
         """Cycle through sort options. direction=1 forward, -1 backward."""
@@ -2640,9 +2717,14 @@ class Application:
             pause_label = "[P]ause:all"
         else:
             pause_label = f"[P]ause:{paused_count}"
+        if self.stats_custom is not None:
+            custom_label = ','.join(h.lower() for h in self.stats_custom)
+            stats_label = f"[s]tats:{custom_label}"
+        else:
+            stats_label = f"[s]tats:{STATS_MODES[self.stats_mode]:<5}"
         menu_items = [
             (f"[D]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
-            (f"[s]tats:{STATS_MODES[self.stats_mode]:<5}", False),
+            (stats_label, False),
             (f"[o]rder:{self.sort_by}", False),
             (f"[H]istory:{HISTORY_MODES[self.history_mode]}", False),
             (f"[S]ync:{'on' if self.sync_history else 'off'}", self.sync_history),
@@ -2790,10 +2872,12 @@ class Application:
           off         — stat_col: Last latency (colored), history full width
           single mode — stat_col: stat value (replaces Last), history full width
           All         — all stats flush-left after hostname, history fills remaining width
+          custom      — dynamic multi-column block after hostname, history fills remaining width
         """
-        mode_name = STATS_MODES[self.stats_mode]
-        show_all = (mode_name == 'All')
-        show_single = (self.stats_mode > 0 and not show_all)
+        mode_name = STATS_MODES[self.stats_mode] if self.stats_mode < len(STATS_MODES) else 'custom'
+        show_all    = (mode_name == 'All')
+        show_custom = (self.stats_custom is not None and self.stats_mode == _CUSTOM_STATS_SENTINEL)
+        show_single = (self.stats_mode > 0 and not show_all and not show_custom)
 
         # Adaptive hostname column: wide enough for all display names (including
         # their per-level indentation), the header label, and section title prefixes.
@@ -2833,14 +2917,33 @@ class Application:
         ms_col = all_stats_col
         updown_col = ms_col + 8
         tail_col = updown_col + updown_col_w + 2
-        hist_col_effective = (all_stats_col + ALL_STATS_WIDTH + 1) if show_all else hist_col
+
+        # In custom mode, compute per-column widths dynamically (header vs data).
+        custom_col_widths = []   # list of int, one per column in stats_custom
+        custom_start_col = all_stats_col  # same anchor as All mode
+        if show_custom and self.stats_custom:
+            for cname in self.stats_custom:
+                header = _STAT_HEADER.get(cname, cname)
+                w = len(header)
+                for m in self.monitors:
+                    val = self._compute_stat(m, cname)
+                    w = max(w, len(val.strip()))
+                custom_col_widths.append(w)
+        custom_total_w = (sum(custom_col_widths) + 2 * max(0, len(custom_col_widths) - 1)
+                          if custom_col_widths else 0)
+
+        if show_all:
+            hist_col_effective = all_stats_col + ALL_STATS_WIDTH + 1
+        elif show_custom:
+            hist_col_effective = custom_start_col + custom_total_w + 1
+        else:
+            hist_col_effective = hist_col
 
         if show_header:
             stdscr.addstr(start_row, 0, "Hostname", curses.A_BOLD)
 
-            if not show_all:
+            if not show_all and not show_custom:
                 # stat_col header: mode label when a single stat is active, "ms" otherwise
-                # Left-justify within the 6-char stat field to align with data rows
                 col25_label = mode_name if show_single else "ms"
                 stdscr.addstr(start_row, stat_col, f"{col25_label:>{stat_field_w}}", curses.A_BOLD)
 
@@ -2877,6 +2980,16 @@ class Application:
                               f"{'Avg':>6}  {'Min':>6}  {'Max':>6}  "
                               f"{'Loss%':>6}  {'StDev':>6}  {'RX':>6}  {'TX':>6}  {'XX':>6}")
                 stdscr.addstr(start_row, all_stats_col, all_header, curses.A_BOLD)
+
+            if show_custom and self.stats_custom and custom_start_col < width:
+                parts = []
+                for i, cname in enumerate(self.stats_custom):
+                    w = custom_col_widths[i]
+                    header = _STAT_HEADER.get(cname, cname)
+                    parts.append(f"{header:>{w}}")
+                custom_header = "  ".join(parts)
+                stdscr.addstr(start_row, custom_start_col,
+                              custom_header[:max(0, width - 1 - custom_start_col)], curses.A_BOLD)
 
         data_start = start_row + (1 if show_header else 0)
         row = data_start
@@ -3067,8 +3180,8 @@ class Application:
             padded_name = (' ' * host_indent + display_name[:display_width]).ljust(name_col_width)
             stdscr.addstr(row, 0, padded_name, row_attr)
 
-            # Stat col: Last latency (off) or single stat value; hidden in All mode
-            if not show_all:
+            # Stat col: Last latency (off) or single stat value; hidden in All/custom mode
+            if not show_all and not show_custom:
                 stat_value_col = stat_col + (stat_field_w - 6)
                 if monitor.paused:
                     # Paused: show ⏸ in cyan regardless of stats mode
@@ -3181,6 +3294,38 @@ class Application:
                 all_str = self._compute_all_stats(monitor)
                 all_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
                 stdscr.addstr(row, tail_col, all_str, all_color | row_attr)
+
+            # Custom stats block flush-left after hostname
+            if show_custom and self.stats_custom and custom_start_col < width:
+                if monitor.paused:
+                    stdscr.addstr(row, custom_start_col, "⏸", curses.color_pair(6) | row_attr)
+                else:
+                    col = custom_start_col
+                    for i, cname in enumerate(self.stats_custom):
+                        if col >= safe_width:
+                            break
+                        w = custom_col_widths[i]
+                        val = self._compute_stat(monitor, cname)
+                        val_stripped = val.strip()
+                        val_padded = f"{val_stripped:>{w}}"
+                        if monitor.error is not None:
+                            attr = curses.color_pair(2) | curses.A_BOLD | row_attr
+                        elif cname == 'Down':
+                            _, is_down = Application._compute_updown(monitor)
+                            attr = (curses.color_pair(2) if is_down else 0) | row_attr
+                        elif cname == 'Last':
+                            if monitor.latency is not None:
+                                attr = (curses.color_pair(1) if monitor.latency < 50
+                                        else curses.color_pair(3)) | row_attr
+                            else:
+                                attr = curses.color_pair(2) | row_attr
+                        else:
+                            attr = row_attr
+                        try:
+                            stdscr.addstr(row, col, val_padded, attr)
+                        except curses.error:
+                            pass
+                        col += w + (2 if i < len(self.stats_custom) - 1 else 0)
 
             entry_index += 1
             row += 1
@@ -3931,16 +4076,60 @@ class Application:
             self.cycle_dns(1)
 
     def _cmd_stats(self, args=''):
-        """Cycle (no arg) or set stats column mode."""
-        if args:
-            modes_lower = [m.lower() for m in STATS_MODES]
-            if args.lower() in modes_lower:
-                self.stats_mode = modes_lower.index(args.lower())
-            else:
-                self.add_event("cmd",
-                    f"stats: unknown mode '{args}' — choices: {' '.join(STATS_MODES)}")
-        else:
+        """Cycle (no arg), set single-mode, or set custom comma-separated column list.
+
+        Examples:
+          :set stats avg          — single mode
+          :set stats last,avg,stdev — custom multi-column
+          :set stats ,            — clear custom, back to off
+        """
+        if not args:
             self.cycle_stats(1)
+            return
+
+        args = args.strip()
+
+        # Bare comma or empty list → clear custom, reset to off
+        if args in (',', ''):
+            self.stats_custom = None
+            self.stats_mode = 0
+            return
+
+        # Comma list → custom multi-column mode
+        if ',' in args:
+            tokens = [t.strip().lower() for t in args.split(',') if t.strip()]
+            if not tokens:
+                self.stats_custom = None
+                self.stats_mode = 0
+                return
+            unknown = [t for t in tokens if t not in STAT_NAMES]
+            if unknown:
+                valid = sorted(STAT_NAMES.keys())
+                self.add_event("cmd",
+                    f"stats: unknown column(s): {', '.join(unknown)} — "
+                    f"valid: {', '.join(valid)}")
+                return
+            self.stats_custom = [STAT_NAMES[t] for t in tokens]
+            self.stats_mode = _CUSTOM_STATS_SENTINEL
+            return
+
+        # Single name — could be standard STATS_MODES or a STAT_NAMES alias
+        arg_lower = args.lower()
+        modes_lower = [m.lower() for m in STATS_MODES]
+        if arg_lower in modes_lower:
+            self.stats_mode = modes_lower.index(arg_lower)
+            self.stats_custom = None
+        elif arg_lower in STAT_NAMES:
+            # e.g. ':set stats last' → treat as custom single-column
+            self.stats_custom = [STAT_NAMES[arg_lower]]
+            self.stats_mode = _CUSTOM_STATS_SENTINEL
+        else:
+            valid = sorted(set(modes_lower) | set(STAT_NAMES.keys()))
+            self.add_event("cmd",
+                f"stats: unknown mode '{args}' — "
+                f"choices: {', '.join(v for v in valid if v != 'last')}"
+                f" (or comma list e.g. last,avg,stdev)")
+
 
     def _cmd_sort(self, args=''):
         """Cycle (no arg) or set sort order."""

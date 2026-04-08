@@ -178,9 +178,9 @@ class TestGetCompletions:
         assert result == [], f"Expected [], got {result}"
 
     def test_stats_with_trailing_space_returns_all_stats_modes(self, app, pb):
-        """'stats ' must return the full list of STATS_MODES (lowercased)."""
+        """'stats ' must return all STATS_MODES plus extra stat aliases (lowercased)."""
         result = app._get_completions('stats ')
-        expected = [m.lower() for m in pb.STATS_MODES]
+        expected = sorted(set(m.lower() for m in pb.STATS_MODES) | set(pb.STAT_NAMES.keys()))
         assert result == expected, (
             f"Expected stats modes {expected}, got {result}"
         )
@@ -686,10 +686,10 @@ class TestTabHandling:
     # ── :set <param> <value> completions ─────────────────────────────────
 
     def test_set_param_value_all_completions(self, app, pb):
-        """':set stats ' + Tab → popup lists all stats mode values."""
+        """':set stats ' + Tab → popup lists all stats modes and stat name aliases."""
         _set_text(app, 'set stats ')
         app._handle_cmd_key(self.TAB)
-        expected = {m.lower() for m in pb.STATS_MODES}
+        expected = set(m.lower() for m in pb.STATS_MODES) | set(pb.STAT_NAMES.keys())
         assert set(app.cmd['completions']) == expected, (
             f"Expected all stats modes {expected}, got {app.cmd['completions']}"
         )

@@ -146,11 +146,23 @@ Display
     With no argument, cycle the DNS display mode forward.
     With an argument, set the mode directly.
 
-``:set stats [mode]``
+``:set stats [mode|col,col,…]``
     With no argument, cycle the stats column forward.
-    With an argument, set the column directly.
-    Valid modes: ``off``, ``Down``, ``Loss%``, ``Avg``, ``Min``, ``Max``,
+    With a single argument, set the column directly.
+    Valid single modes: ``off``, ``Down``, ``Loss%``, ``Avg``, ``Min``, ``Max``,
     ``StDev``, ``RX``, ``TX``, ``XX``, ``All``.
+
+    To display multiple custom columns side-by-side, pass a comma-separated
+    list of column names.  Valid column names (case-insensitive): ``last``,
+    ``down``, ``loss%``, ``avg``, ``min``, ``max``, ``stdev``, ``rx``,
+    ``tx``, ``xx``.  The special names ``all`` and ``off`` are not valid in a
+    comma list.  A bare comma (``,``) resets to ``off``.
+
+    Examples::
+
+        :set stats last,avg,stdev
+        :set stats down,loss%
+        :set stats ,
 
 ``:set sort [mode]``
     With no argument, cycle the sort order forward.
@@ -629,7 +641,12 @@ Recognised settings
     DNS display mode.
 
 ``:set stats off|Down|Loss%|Avg|Min|Max|StDev|RX|TX|XX|All``
-    Stats column.
+    Stats column — single mode.
+
+``:set stats last,avg,stdev``
+    Custom multi-column stats.  Comma-separated list of column names:
+    ``last``, ``down``, ``loss%``, ``avg``, ``min``, ``max``, ``stdev``,
+    ``rx``, ``tx``, ``xx``.  Use ``:set stats ,`` to reset to ``off``.
 
 ``:set sort none|name|status|latency``
     Sort order.
