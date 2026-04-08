@@ -160,6 +160,10 @@ _FULL_HELP = [
     "  :pause [on|off]            toggle/set global pause (stop all pings)",
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
+    "  :let <name> [value]        define a variable; $name / ${name} substituted in hosts file and loops",
+    "  :let name{1..N} val-$1    indexed variables (brace expansion on name, eager $N in value)",
+    "  $name or ${name}          substitute value; empty string if undefined (${name} for disambiguation)",
+    "  ${name_$1}                two-level: expand $N first, then look up the resulting name",
     "  :log [file|off]           show active log file, set/save log to file, or disable logging",
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
@@ -622,6 +626,77 @@ def _has_backref(s):
     import re
     # Match $N, ${N} (numeric), $name, ${name} (alphabetic identifiers)
     return bool(re.search(r'\$(?:\{\w+\}|\d|[a-zA-Z_]\w*)', s))
+
+
+def _expand_let_vars(line, variables, backrefs=None, full_str=None):
+    r"""Substitute ``:let`` variable references in *line*.
+
+    Recognised forms:
+
+    ``$name`` / ``${name}``
+        Both forms are equivalent: substituted with the variable value when
+        defined, or the **empty string** when not defined.  ``${name}`` is
+        useful to delimit the variable name from adjacent characters.
+        Digit-only names (``$0``–``$9``) and named loop back-references are
+        left untouched so that ``_apply_backref`` can handle them later.
+
+    ``${name_$N}``
+        Brace-delimited with inner digit back-references.  ``$N`` inside
+        ``${...}`` is expanded first using *backrefs* / *full_str*, then the
+        resulting string is looked up as a variable name.  If the key is not
+        found the empty string is substituted.
+
+    Processing is left-to-right; ``${...}`` is handled before bare ``$name``
+    because the regex alternation is ordered.
+
+    Parameters
+    ----------
+    line : str
+        Source line that may contain variable references.
+    variables : dict[str, str]
+        The current ``:let`` variable store.
+    backrefs : list[str] or dict[str, str] or None
+        Current for-loop back-references (used to expand ``$N`` inside
+        ``${...}``).  ``None`` is safe — no inner substitution.
+    full_str : str or None
+        Full expanded string for ``$0`` inside ``${...}``.
+
+    Returns
+    -------
+    str
+        *line* with all variable references substituted.
+    """
+    if '$' not in line:
+        return line  # fast path: no $ at all
+
+    def _resolve_braced(m):
+        expr = m.group(1)
+        # Pure digit — this is a numeric back-reference; leave for _apply_backref.
+        if expr.isdigit():
+            return m.group(0)
+        # Inner pass: expand $N inside the expression using backrefs.
+        if backrefs is not None and re.search(r'\$\d', expr):
+            expr = _apply_backref(expr, backrefs, full_str)
+        # Named loop back-reference (e.g. $x from `:for x in ...`): leave
+        # unchanged so that _apply_backref can resolve it after us.
+        if isinstance(backrefs, dict) and expr in backrefs:
+            return m.group(0)
+        return variables.get(expr, '')  # empty string if not defined
+
+    def _resolve_bare(m):
+        name = m.group(1)
+        if name.isdigit():
+            return m.group(0)  # leave $N for _apply_backref
+        # Named loop back-references take priority; leave them for _apply_backref.
+        if isinstance(backrefs, dict) and name in backrefs:
+            return m.group(0)
+        return variables.get(name, '')  # empty string if not defined
+
+    # First handle ${expr} (brace-delimited, may contain $N inside)
+    result = re.sub(r'\$\{([^}]*)\}', _resolve_braced, line)
+    # Then handle bare $name (identifier, not digit)
+    result = re.sub(r'\$([a-zA-Z_]\w*)', _resolve_bare, result)
+    return result
 
 
 def _config_path():
@@ -1431,7 +1506,8 @@ class SectionLabel:
         self.folded = bool(folded_default)  # True = starts collapsed
 
 
-def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_names=None):
+def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
+                      var_names=None, variables=None):
     """Expand a ``:for`` loop and return a list of entry tuples.
 
     Applies back-references (``$0``–``$9`` or ``$name``) to each body
@@ -1456,6 +1532,10 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
         When non-``None``, a list of variable names for named back-references
         (e.g. ``['x', 'y']`` from ``:for x,y in pattern``).
         When ``None``, numbered back-references are used (``$1``, ``$2``, ...).
+    variables : dict[str, str] or None
+        ``:let`` variable store from the enclosing parse context.  Each body
+        line is passed through ``_expand_let_vars`` before back-reference
+        substitution.  A ``None`` value is treated as an empty dict.
 
     Returns
     -------
@@ -1463,6 +1543,8 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
         Tuples of the same kinds as :func:`parse_hosts_file` returns, plus
         ``('warn', message)`` for no-backref and duplicate-host situations.
     """
+    if variables is None:
+        variables = {}
     entries = []
     try:
         rows = _expand_host_with_captures(pattern)
@@ -1479,7 +1561,41 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
     for iteration_idx, (full_str, captures) in enumerate(rows):
         if var_names is not None:
             captures = dict(zip(var_names, captures))
+        # Loop-local variable copy so :let inside the body doesn't bleed out
+        local_vars = dict(variables)
         for line in body_lines:
+            # ── :let inside loop body ──────────────────────────────────────
+            if line.startswith(':'):
+                _parts = line.split(None, 1)
+                if _parts[0][1:].lower() == 'let':
+                    let_rest = _parts[1] if len(_parts) > 1 else ''
+                    _lp = let_rest.split(None, 1)
+                    if _lp:
+                        let_name_tmpl = _lp[0]
+                        let_val_tmpl  = _lp[1] if len(_lp) > 1 else ''
+                        # Expand name template with current back-refs
+                        let_name_exp = _apply_backref(let_name_tmpl, captures, full_str)
+                        try:
+                            name_rows = _expand_host_with_captures(let_name_exp)
+                        except ValueError:
+                            name_rows = [(let_name_exp, [], let_name_exp)]
+                        for exp_name, name_caps in name_rows:
+                            exp_val = _apply_backref(let_val_tmpl, captures, full_str)
+                            local_vars[exp_name] = exp_val
+                    continue  # :let produces no host/cmd entries
+
+            # ── variable expansion ─────────────────────────────────────────
+            # Save the pre-expansion line to check for variable back-refs; a line
+            # containing $name / ${...} that gets substituted counts as dynamic
+            # (should produce one entry per iteration, not be deduplicated).
+            original_line = line
+            line = _expand_let_vars(line, local_vars, captures, full_str)
+            if not line.strip():
+                continue  # expansion produced empty line — skip
+            # A line is "dynamic" if it had any back-ref BEFORE expansion (including
+            # $name variable refs) or still has some after (numeric $N).
+            _line_was_dynamic = _has_backref(original_line)
+
             if line.startswith('##'):
                 # Section header — apply back-references and emit every iteration.
                 n_hashes = len(line) - len(line.lstrip('#'))
@@ -1543,7 +1659,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
                 # expanded name has no :resolv mapping at Application init time.
                 optional = line.startswith('?')
                 host_line = line[1:] if optional else line
-                if _has_backref(host_line):
+                if _has_backref(host_line) or _line_was_dynamic:
                     # Substitute back-references then expand remaining brace groups.
                     expanded_tmpl = _apply_backref(host_line, captures, full_str)
                     try:
@@ -1589,7 +1705,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None, var_
     return entries
 
 
-def parse_hosts_file(filename):
+def parse_hosts_file(filename, variables=None):
     """Parse a hosts file and return an ordered list of entry tuples.
 
     Each tuple is one of:
@@ -1602,6 +1718,9 @@ def parse_hosts_file(filename):
     File format rules:
       ## Title        — section header (legacy); 'Title' is everything after '## '
       :title Title    — section header (preferred); 'Title' is everything after ':title '
+      :let name val   — define a variable; ``$name`` is substituted in subsequent lines.
+                        The name may contain brace expansion (e.g. ``name{1..4}``);
+                        ``$N`` in the value is eagerly expanded per brace index.
       :ssh-begin [ssh-opts] <dest>
                       — open an SSH block; all plain host lines until :ssh-end are
                         expanded into ':ssh [ssh-opts] <dest> <host>' commands.
@@ -1620,6 +1739,8 @@ def parse_hosts_file(filename):
       anything else   — treated as a host/IP address to ping (or, inside an
                         :ssh-begin block, expanded to an :ssh command)
     """
+    if variables is None:
+        variables = {}
     entries = []
     ssh_block_args = None  # None = not inside an :ssh-begin block; str = SSH args
 
@@ -1676,7 +1797,8 @@ def parse_hosts_file(filename):
                         entries.extend(_process_for_loop(
                             for_loop_pattern, for_loop_body,
                             seen_hosts, for_loop_ssh_args,
-                            var_names=for_loop_var_name
+                            var_names=for_loop_var_name,
+                            variables=variables,
                         ))
                         for_loop_pattern = None
                         for_loop_body = []
@@ -1708,6 +1830,32 @@ def parse_hosts_file(filename):
             elif line.startswith(':'):
                 parts = line.split(None, 1)
                 cmd_word = parts[0][1:].lower()  # strip leading ':'
+                if cmd_word == 'let':
+                    # :let name [value]  — define or redefine a variable.
+                    # The name itself may contain brace expansion; $N in the value is
+                    # eagerly expanded once per brace-index iteration.
+                    let_rest = parts[1].strip() if len(parts) > 1 else ''
+                    let_parts = let_rest.split(None, 1)
+                    if not let_parts:
+                        entries.append(('error', ':let: missing variable name'))
+                    else:
+                        let_name_tmpl = let_parts[0]
+                        let_val_tmpl  = let_parts[1] if len(let_parts) > 1 else ''
+                        try:
+                            name_rows = _expand_host_with_captures(let_name_tmpl)
+                        except ValueError as e:
+                            entries.append(('error', f':let name expansion error: {e}'))
+                            name_rows = []
+                        for exp_name, name_caps in name_rows:
+                            exp_val = _apply_backref(let_val_tmpl, name_caps, let_val_tmpl)
+                            variables[exp_name] = exp_val
+                    continue
+                # Apply variable expansion to all other :-directives before parsing them.
+                line = _expand_let_vars(line, variables)
+                if not line.strip():
+                    continue
+                parts = line.split(None, 1)
+                cmd_word = parts[0][1:].lower()  # re-parse after expansion
                 m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
                 if m_title:
                     level = int(m_title.group(1)) if m_title.group(1) else 1
@@ -1747,6 +1895,10 @@ def parse_hosts_file(filename):
                 else:
                     entries.append(('cmd', line))
             else:
+                # Apply variable expansion before processing host lines.
+                line = _expand_let_vars(line, variables)
+                if not line.strip():
+                    continue
                 if ssh_block_args is not None:
                     # Inside an :ssh-begin block — expand each host and emit an :ssh command.
                     try:
@@ -1795,7 +1947,8 @@ def parse_hosts_file(filename):
         entries.extend(_process_for_loop(
             for_loop_pattern, for_loop_body,
             seen_hosts, for_loop_ssh_args,
-            var_names=for_loop_var_name
+            var_names=for_loop_var_name,
+            variables=variables,
         ))
 
     return entries
@@ -1929,6 +2082,8 @@ CMD_REGISTRY = [
            cli_flags=('--sync-history',),
            cli_kwargs={'choices': ['on', 'off'], 'default': None,
                        'help': 'align history bars to wall-clock time (default: on)'}),
+    CmdDef(['let'],              '_cmd_let',        None,
+           '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
 ]
@@ -1975,6 +2130,7 @@ class Application:
         self.host_scroll = 0     # number of entries to skip from top of host list
         self.highlighted_index = None  # None = no selection; int = index in self.entries
         self.log_file = None        # path to append event log, or None
+        self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self._monitoring_started = False  # set True once start_monitoring() is called
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
@@ -4018,7 +4174,7 @@ class Application:
             return
 
         try:
-            new_entries = parse_hosts_file(filename)
+            new_entries = parse_hosts_file(filename, variables=self.variables)
             for kind, *rest in new_entries:
                 value = rest[0] if rest else ''
                 if kind == 'host':
@@ -4056,6 +4212,38 @@ class Application:
             self.add_event("cmd", f"source: loaded '{filename}'")
         except Exception as e:
             self.add_event("cmd", f"source error: {e}")
+
+    def _cmd_let(self, args=''):
+        """Define or redefine a :let variable.
+
+        Usage: :let <name> [value]
+
+        Sets self.variables[name] = value (empty string when value omitted).
+        The name may contain brace expansion; $N in the value is eagerly
+        substituted per brace index.  Takes effect immediately for subsequent
+        :source or :for loops loaded in the same session.
+        """
+        if not args:
+            self.add_event("cmd", "let: usage: :let <name> [value]")
+            return
+        parts = args.split(None, 1)
+        name_tmpl = parts[0]
+        val_tmpl  = parts[1] if len(parts) > 1 else ''
+        try:
+            name_rows = _expand_host_with_captures(name_tmpl)
+        except ValueError as e:
+            self.add_event("cmd", f"let: name expansion error: {e}")
+            return
+        for exp_name, name_caps in name_rows:
+            exp_val = _apply_backref(val_tmpl, name_caps, val_tmpl)
+            self.variables[exp_name] = exp_val
+        if self._monitoring_started:
+            preview = ', '.join(
+                f'{n}={v!r}' for n, *rest in name_rows[:3]
+                for v in [_apply_backref(val_tmpl, rest[0] if rest else [], val_tmpl)]
+            )
+            self.add_event("cmd", f"let: set {preview}"
+                           + (' …' if len(name_rows) > 3 else ''))
 
     def _cmd_dns(self, args=''):
         """Cycle (no arg) or set DNS display mode."""

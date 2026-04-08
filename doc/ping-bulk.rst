@@ -371,6 +371,60 @@ Format
     ``:done`` is applied at EOF so the loop still produces its entries.
     This also applies when a file is loaded interactively via ``:source``.
 
+``:done``
+    Close the current ``:for`` loop.  If the file ends without a ``:done``
+    (e.g. the ``:for`` block is the last thing in the file), an implicit
+    ``:done`` is applied at EOF so the loop still produces its entries.
+    This also applies when a file is loaded interactively via ``:source``.
+
+``:let name [value]``
+    Define (or redefine) a variable named *name* with the given *value*.
+    When *value* is omitted the variable is set to the empty string.
+
+    Variables can be referenced anywhere in subsequent non-``:let`` lines
+    using bare syntax (``$name``) or brace-delimited syntax (``${name}``).
+    Both forms behave identically: the variable value is substituted when
+    defined, or the **empty string** when not defined.  The brace form is
+    useful to delimit the variable name from adjacent characters::
+
+        :let net 10.0.1
+        ${net}.100      # → 10.0.1.100
+        $net.100        # same result
+
+    **Brace expansion on the name** — *name* may itself use brace
+    expansion to define multiple indexed variables at once::
+
+        :let fold{1..3,5} -
+
+    This stores ``fold1``, ``fold2``, ``fold3``, and ``fold5`` each set to
+    ``"-"``.  Inside the value, ``$1`` refers to the corresponding brace
+    group, so::
+
+        :let hub{1..4} 10.0.$1.0/24
+
+    stores ``hub1=10.0.1.0/24``, ``hub2=10.0.2.0/24``, and so on.
+
+    **Two-level ``${name_$N}`` expansion** — inside ``${...}`` the inner
+    ``$N`` digits are expanded using the current loop back-references
+    *first*, then the resulting string is looked up as a variable name.
+    Undefined variables expand to the empty string, so only the iterations
+    that need a special value require a ``:let``::
+
+        :let fold4 -            # only hub-4 starts folded
+
+        :for sensor-hub-{1..5}
+            :title${fold$1} $0
+            sensor-hub-$1-router
+        :done
+
+    For iteration ``$1=4`` the directive becomes ``:title-`` (folded by
+    default); for all other iterations ``${fold$N}`` is undefined and
+    expands to ``""`` giving ``:title`` (unfolded).
+
+    **Loop-local scope** — a ``:let`` inside a ``:for`` body creates a
+    loop-local variable.  It is visible only within that iteration and
+    does not modify the outer variable store.
+
 ``:cmd [args]``
     Any command listed under **COMMANDS** above; applied immediately
     when the file is loaded.

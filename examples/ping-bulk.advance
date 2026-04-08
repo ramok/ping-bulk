@@ -81,6 +81,34 @@ google.com:https
 8.8.8.8
 1.1.1.1
 
+# ── :let variables ────────────────────────────────────────────────────────
+# :let defines reusable variables.  $name and ${name} are equivalent:
+# both substitute the value when defined, and are left unchanged when not.
+# ${name} is mainly useful to delimit the variable name from adjacent text.
+#
+# :let name{range} value  — indexed variables via brace expansion.
+# $1 in the value refers to the brace group of the name expansion.
+:let domain .example.com
+:let gw{1..3} 10.10.$1.1
+
+## DC gateways
+$gw1$domain
+$gw2$domain
+${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
+
+# ── :let with per-loop folding ──────────────────────────────────────────────
+# ${name_$N} two-level expansion: $N is resolved first (from loop back-ref),
+# then the resulting string is used as the variable name.
+# Undefined variables expand to "" — so only exceptions need a :let entry.
+:let fold3 -        # hub-3 starts folded; all others (undefined) → "" → expanded
+
+## Sensor hubs (conditional fold)
+:for sensor-hub-{1..5}
+    :title${fold$1} sensor-hub-$1
+    sensor-hub-$1-router
+    sensor-hub-$1-uplink
+:done
+
 # ── Use :for loop with backreferences to assign names ──────────────────────
 # $0 expands to the full expanded host string for each iteration.
 # Numbered ($1) or named variables ($x) refer to brace groups.

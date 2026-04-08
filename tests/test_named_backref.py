@@ -109,8 +109,8 @@ class TestApplyNamedBackref:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']
-        # Undefined variables should remain as-is (placeholder visible)
-        assert hosts == ['server-1-$y', 'server-2-$y']
+        # Undefined $y expands to "" (empty string)
+        assert hosts == ['server-1-', 'server-2-']
 
 
     def test_mixed_with_literal_dollar(self, pb, tmp_path):
