@@ -149,6 +149,24 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :ssh ops@remote-b 10.20.0.1
 :ssh ops@remote-b 10.20.0.{2..3}
 
+# ── SSH connect-options ────────────────────────────────────────────────────
+# Map hostname globs to default SSH flags used by the 'c' hotkey.
+# Rules are evaluated in order; last match wins.
+#
+# Use '-' to disable the SSH connect hotkey for hosts that don't have SSH
+# (public IPs, monitoring-only targets, etc.).
+
+:connect-options *-router     -l admin    # Mikrotik routers
+:connect-options *-comm-mod   -l root     # comm modules
+:connect-options *-jetson     -l jetson   # Jetson boards
+:connect-options *-nuc        -l dev      # NUC devices
+:connect-options *-ps*        -l dev      # power supplies
+
+# Disable connect for public services — no SSH makes sense here
+:connect-options 1.1.1.1      -
+:connect-options 8.8.8.8      -
+:connect-options 1.0.0.1      -
+
 # ── Dynamic Additions ──────────────────────────────────────────────────────
 # You can also dynamically source other config files or add specific hosts
 # directly from within this script or interactively at runtime.

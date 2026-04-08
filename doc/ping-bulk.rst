@@ -429,8 +429,112 @@ Format
     Any command listed under **COMMANDS** above; applied immediately
     when the file is loaded.
 
-Sections and folding
---------------------
+``:connect-options <glob-pattern> <ssh-opts>``
+    Set SSH flags to be prepended when the ``c`` hotkey is used on a host
+    whose name matches *glob-pattern* (``fnmatch`` rules, case-sensitive).
+    Rules are evaluated in definition order; the **last match wins**.
+
+    The special value ``-`` **disables** the SSH connect hotkey for
+    matching hosts (useful for public IPs where SSH makes no sense)::
+
+        :connect-options *-router     -l admin
+        :connect-options *-comm-mod   -l root
+        :connect-options *-jetson     -l jetson
+        :connect-options *-nuc        -l dev
+        :connect-options *-ps*        -l dev
+
+        # Disable connect for public monitoring targets
+        :connect-options 1.1.1.1      -
+        :connect-options *.google.com -
+
+    Pattern is matched against both the literal hostname and the resolved
+    hostname (if DNS resolution has run).  ``SshPingMonitor`` hosts
+    reuse their existing jump-host arguments from the ``:ssh`` directive.
+
+    Called interactively as ``:connect-options`` (no args) it clears all
+    rules; with one argument it removes that pattern's rule.
+
+``c`` hotkey (SSH connect)
+--------------------------
+
+When a host is highlighted (``↑``/``↓`` to navigate), pressing ``c``
+pre-fills the command line with::
+
+    mux ssh [connect-options-flags] <host>
+
+The user can review and edit the command before pressing **Enter**.
+
+If ping-bulk is **not** running inside a terminal multiplexer (tmux or
+screen), ``c`` offers to relaunch it inside tmux.
+
+The ``[c connect]`` hint is shown in the ping history column header when
+a host is highlighted and connect is not disabled.  The host details
+overlay (``Enter``) also shows the effective connect command and allows
+pressing ``c`` directly.
+
+``:mux [-v|-h|-w] <command…>``
+    Run *command* in a new tmux or screen pane/window.  Also available
+    as ``:tmux`` and ``:screen``; the command name serves as a preference
+    hint for which backend to use.
+
+    Split options override the ``:set mux-split`` default for that call:
+
+    ``-v``
+        New pane below (vertical split).  This is the default.
+    ``-h``
+        New pane to the right (horizontal split).
+    ``-w``
+        New window.
+
+    In **kiosk mode** only ``ssh`` and ``login`` are permitted as the
+    command; all others are blocked.
+
+``:set mux-split v|h|window``
+    Set the default split direction used by ``:mux`` and the ``c``
+    hotkey.  Saved by ``:saveconfig``.
+
+``:edit``
+    Open the loaded hosts file in an external editor.  After the editor
+    exits, ping-bulk prompts to reload the file (``Y``/``n``).
+
+    Editor resolution order: ``$VISUAL`` → ``$EDITOR`` → ``editor``
+    (Debian alternatives) → ``vim`` → ``vi``.
+
+    In **kiosk mode** the editor is restricted to ``rvim`` (``vim -Z``),
+    which disables ``:!``, ``:shell``, and external filters to prevent
+    shell escapes.  The file is reloaded automatically (no prompt).
+
+Kiosk mode
+----------
+
+Passing ``--kiosk`` on the command line enables kiosk mode, which is
+intended for unattended deployment on a physical console (e.g. ``/dev/tty1``)
+controlled by systemd.
+
+When ``--kiosk`` is active and ping-bulk is **not** already inside a
+terminal multiplexer, it automatically executes::
+
+    tmux -f /etc/ping-bulk/kiosk.tmux.conf new -As ping-bulk -- <argv>
+
+The hardened tmux configuration (``kiosk/ping-bulk-kiosk.tmux.conf``
+in the repository) removes all tmux key bindings (``unbind-key -a``) and
+sets ``default-command login``, so any new window or pane opened by the
+user requires login authentication.
+
+Security features in kiosk mode:
+
+- All SSH connections (both monitoring via ``:ssh`` and interactive via
+  ``c``) prepend ``-F none -o IdentityFile=none -o IdentitiesOnly=yes``
+  to ignore ``~/.ssh/`` entirely.
+- If ``/etc/ping-bulk/id_ed25519`` exists it is used as the sole
+  identity file (``-i /etc/ping-bulk/id_ed25519``).
+- ``:mux`` only allows ``ssh`` and ``login`` as commands.
+- ``:q`` / ``q`` quit is not disabled, but ``Restart=always`` in the
+  systemd unit ensures ping-bulk is restarted immediately.
+
+See ``kiosk/README.md`` in the repository for the full setup guide.
+
+
 
 Section headers (``##`` / ``:title``, ``###`` / ``:title2``, …) group
 hosts into collapsible blocks.  Sections can be nested up to any depth.
