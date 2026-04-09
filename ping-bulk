@@ -4622,6 +4622,12 @@ class Application:
                     "mux: no terminal multiplexer or X terminal available "
                     "(install tmux, screen, or an X terminal emulator)")
                 return
+            # For real mux backends (tmux/screen): if we're not currently inside
+            # a session, the backend binary exists but has no session socket —
+            # offer to relaunch inside one instead of hitting a cryptic error.
+            if backend is not _MUX_BACKENDS.get('terminal') and not backend.is_inside():
+                self.prompt = {'type': 'mux_relaunch', 'chars': []}
+                return
 
         try:
             if direction == 'window':
@@ -5491,10 +5497,9 @@ class Application:
                     lines.append(f"    {e_line}")
             lines.append("")
 
-        footer = "  [Enter / q / Esc] Close  [↑ / ↓ / PgUp / PgDn] Scroll"
         if not conn_disabled:
-            footer += "  [c] Connect"
-        lines.append(footer)
+            lines.append("  [c] SSH connect")
+        lines.append("  [Enter / q / Esc] Close  [↑ / ↓ / PgUp / PgDn] Scroll")
 
         # Calculate box dimensions
         # Limit the box height to the terminal; always keep room for both borders.
