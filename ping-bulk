@@ -5505,6 +5505,11 @@ class Application:
 
         self.start_monitoring()
 
+        if self.kiosk_mode and not shutil.which('vlock') and not shutil.which('physlock'):
+            self.add_event("warn",
+                "kiosk: vlock/physlock not found — idle lock-after-time will not work; "
+                "install vlock or physlock to enable session locking")
+
         try:
             while self.running:
                 stdscr.erase()
