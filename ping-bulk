@@ -803,6 +803,7 @@ class Monitor(ABC):
         self.last_state = None
         self.down_since = None  # monotonic timestamp of when the host went down
         self.up_since = None    # monotonic timestamp of when the host came up
+        self._down_pending_ts = None  # set when host first goes DOWN; cleared when logged or recovered
         self.ping_count = 0     # total pings ever sent (never capped, unlike history deque)
         self.running = True
         self.paused = False
@@ -2779,8 +2780,18 @@ class Application:
         return f"{secs} sec"
 
     def check_state_changes(self):
-        """Monitor state changes and log events"""
+        """Monitor state changes and log events.
+
+        Uses a high-water-mark approach for the event log: DOWN is logged only
+        after the host has been continuously down for _DOWN_LOG_SECS seconds.
+        If it recovers before that threshold the brief flicker is silently
+        ignored.  This eliminates spurious "Down time: 0 sec" entries caused
+        by single-packet losses or a temporary frozen SSH link.
+        """
+        _DOWN_LOG_SECS = 3.0   # seconds of continuous DOWN before logging
+
         while self.running:
+            now = time.monotonic()
             for monitor in self.monitors:
                 # Log a fatal process error exactly once, as soon as it is detected.
                 if monitor.error is not None and not monitor.error_logged:
@@ -2792,32 +2803,45 @@ class Application:
 
                 current_state = monitor.alive
                 if monitor.last_state is None:
+                    # First observation — set initial state; never treat this as a down event.
                     monitor.last_state = current_state
-                    if current_state:
-                        monitor.up_since = time.monotonic()
+                    if current_state is True:
+                        monitor.up_since = now
                         display_name = monitor.get_display_name(dns_mode='off')
                         self.add_event(display_name, "host starts up")
                     elif current_state is False:
-                        monitor.down_since = time.monotonic()
-                        display_name = monitor.get_display_name(dns_mode='off')
-                        self.add_event(display_name, "host down")
+                        monitor.down_since = now
+                        monitor._down_pending_ts = now
+                        # Don't log yet — wait for the HWM threshold
                 elif monitor.last_state != current_state:
                     display_name = monitor.get_display_name(dns_mode='off')
-                    if current_state:
-                        # Host recovered — report downtime if tracked
+                    if current_state is True:
+                        # DOWN → UP transition
                         if monitor.down_since is not None:
-                            downtime = time.monotonic() - monitor.down_since
+                            # A "host down" event was already logged; report recovery.
+                            downtime = now - monitor.down_since
                             monitor.down_since = None
                             msg = f"host recover. Down time: {self._format_downtime(downtime)}"
-                        else:
-                            msg = "host recover"
-                        monitor.up_since = time.monotonic()
-                        self.add_event(display_name, msg)
+                            self.add_event(display_name, msg)
+                        # If _down_pending_ts is set but down_since is None the host
+                        # recovered before the threshold — silent flicker, no log entry.
+                        monitor._down_pending_ts = None
+                        monitor.up_since = now
                     else:
-                        monitor.down_since = time.monotonic()
+                        # UP → DOWN transition: start pending timer, don't log yet.
+                        monitor.down_since = None
+                        monitor._down_pending_ts = now
                         monitor.up_since = None
-                        self.add_event(display_name, "host down")
                     monitor.last_state = current_state
+                else:
+                    # State unchanged — check whether the pending DOWN timer has expired.
+                    if (monitor._down_pending_ts is not None
+                            and monitor.down_since is None
+                            and now - monitor._down_pending_ts >= _DOWN_LOG_SECS):
+                        monitor.down_since = monitor._down_pending_ts
+                        monitor._down_pending_ts = None
+                        display_name = monitor.get_display_name(dns_mode='off')
+                        self.add_event(display_name, "host down")
             time.sleep(0.5)
 
     def cycle_dns(self, direction=1):
