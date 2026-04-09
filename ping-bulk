@@ -4756,10 +4756,19 @@ class Application:
                 return
 
         try:
+            # Wrap the command so the pane stays open after the process exits,
+            # letting the user see any error output before the pane closes.
+            hold_script = (
+                shlex.join(tokens)
+                + '; _rc=$?;'
+                  ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
+                  ' read _ignored'
+            )
+            held_tokens = ['sh', '-c', hold_script]
             if direction == 'window':
-                backend.new_window(tokens)
+                backend.new_window(held_tokens)
             else:
-                backend.split(direction, tokens)
+                backend.split(direction, held_tokens)
         except RuntimeError as e:
             self.add_event("cmd", f"mux: {e}")
 

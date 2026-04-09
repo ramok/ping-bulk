@@ -266,29 +266,41 @@ class TestCmdMuxDirection:
         mock_backend.available.return_value = True
         return app, mock_backend
 
+    @staticmethod
+    def _held(tokens):
+        """Return the ['sh', '-c', ...] wrapper that _cmd_mux builds."""
+        import shlex
+        script = (
+            shlex.join(tokens)
+            + '; _rc=$?;'
+              ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
+              ' read _ignored'
+        )
+        return ['sh', '-c', script]
+
     def test_default_split_direction(self, pb, tmp_path):
         app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('ssh host')
-        mock_backend.split.assert_called_once_with('v', ['ssh', 'host'])
+        mock_backend.split.assert_called_once_with('v', self._held(['ssh', 'host']))
 
     def test_explicit_v_flag(self, pb, tmp_path):
         app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('-v ssh host')
-        mock_backend.split.assert_called_once_with('v', ['ssh', 'host'])
+        mock_backend.split.assert_called_once_with('v', self._held(['ssh', 'host']))
 
     def test_explicit_h_flag(self, pb, tmp_path):
         app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('-h ssh host')
-        mock_backend.split.assert_called_once_with('h', ['ssh', 'host'])
+        mock_backend.split.assert_called_once_with('h', self._held(['ssh', 'host']))
 
     def test_window_flag(self, pb, tmp_path):
         app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('-w ssh host')
-        mock_backend.new_window.assert_called_once_with(['ssh', 'host'])
+        mock_backend.new_window.assert_called_once_with(self._held(['ssh', 'host']))
         mock_backend.split.assert_not_called()
 
     def test_mux_split_setting_used(self, pb, tmp_path):
@@ -297,7 +309,7 @@ class TestCmdMuxDirection:
         app.mux_split = 'h'
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('ssh host')
-        mock_backend.split.assert_called_once_with('h', ['ssh', 'host'])
+        mock_backend.split.assert_called_once_with('h', self._held(['ssh', 'host']))
 
     def test_no_backend_logs_error(self, pb, tmp_path):
         app = _make_app(pb, tmp_path)
