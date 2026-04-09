@@ -2151,6 +2151,30 @@ class TerminalBackend(ABC):
         """Return argv to relaunch inside this backend."""
 
 
+def _session_name_from_argv(argv: list) -> str:
+    """Derive a mux session name from the last -f/--file argument in argv.
+
+    Uses the basename (without extension) of the last -f value given.
+    Falls back to 'ping-bulk' when no -f argument is present.
+    """
+    last_f = None
+    it = iter(argv[1:])
+    for tok in it:
+        if tok in ('-f', '--file'):
+            try:
+                last_f = next(it)
+            except StopIteration:
+                pass
+        elif tok.startswith('-f') and not tok.startswith('--'):
+            last_f = tok[2:]
+        elif tok.startswith('--file='):
+            last_f = tok[len('--file='):]
+    if last_f:
+        name = os.path.splitext(os.path.basename(last_f))[0]
+        return name or 'ping-bulk'
+    return 'ping-bulk'
+
+
 class TmuxBackend(TerminalBackend):
     """tmux backend."""
 
@@ -2178,7 +2202,7 @@ class TmuxBackend(TerminalBackend):
         cmd = ['tmux']
         if kiosk_conf and os.path.exists(kiosk_conf):
             cmd += ['-f', kiosk_conf]
-        cmd += ['new', '-As', 'ping-bulk', '--']
+        cmd += ['new', '-As', _session_name_from_argv(argv), '--']
         cmd += argv
         return cmd
 
@@ -2228,7 +2252,7 @@ class ScreenBackend(TerminalBackend):
         cmd = ['screen']
         if kiosk_conf and os.path.exists(kiosk_conf):
             cmd += ['-c', kiosk_conf]
-        cmd += ['-d', '-RR', '-S', 'ping-bulk'] + argv
+        cmd += ['-d', '-RR', '-S', _session_name_from_argv(argv)] + argv
         return cmd
 
 
