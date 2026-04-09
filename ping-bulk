@@ -2112,7 +2112,7 @@ CMD_REGISTRY = [
 _CMD_MAP: dict = {name: cmd for cmd in CMD_REGISTRY for name in cmd.names}
 
 # ── Terminal backend abstraction ─────────────────────────────────────────────
-# Covers tmux (implemented) and screen (stub — split/focus not yet wired up).
+# Covers tmux and screen (implemented).
 # X terminal emulators are a future extension (not implemented).
 
 _KIOSK_TMUX_CONF = '/etc/ping-bulk/kiosk.tmux.conf'
@@ -2171,7 +2171,7 @@ class TmuxBackend(TerminalBackend):
 
 
 class ScreenBackend(TerminalBackend):
-    """GNU screen backend (stub — split support limited)."""
+    """GNU screen backend."""
 
     @classmethod
     def available(cls) -> bool:
@@ -2180,20 +2180,37 @@ class ScreenBackend(TerminalBackend):
     def is_inside(self) -> bool:
         return bool(os.environ.get('STY'))
 
+    @staticmethod
+    def _screen_token(tok: str) -> str:
+        """Quote a single token for use inside a screen eval command string."""
+        if ' ' not in tok and "'" not in tok:
+            return tok
+        return "'" + tok.replace("'", r"'\''") + "'"
+
     def split(self, direction: str, command: list) -> None:
-        # screen requires three sequential -X calls; -v = side-by-side (opposite tmux)
-        split_args = ['screen', '-X', 'split']
-        if direction == 'h':
-            split_args.append('-v')
-        subprocess.run(split_args)
-        subprocess.run(['screen', '-X', 'focus'])
-        subprocess.Popen(['screen', '-X', 'screen'] + command)
+        # direction='v' → pane below  = screen horizontal split (default 'split')
+        # direction='h' → pane right  = screen vertical split ('split -v')
+        split_cmd = 'split' if direction == 'v' else 'split -v'
+        cmd_str = 'screen ' + ' '.join(self._screen_token(t) for t in command)
+        sty = os.environ.get('STY', '')
+        base = ['screen']
+        if sty:
+            base += ['-S', sty]
+        subprocess.run(base + ['-X', 'eval', split_cmd, 'focus', cmd_str])
 
     def new_window(self, command: list) -> None:
-        subprocess.Popen(['screen', '-X', 'screen'] + command)
+        sty = os.environ.get('STY', '')
+        base = ['screen']
+        if sty:
+            base += ['-S', sty]
+        subprocess.Popen(base + ['-X', 'screen'] + command)
 
     def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
-        return ['screen', '-d', '-RR', '-S', 'ping-bulk'] + argv
+        cmd = ['screen']
+        if kiosk_conf and os.path.exists(kiosk_conf):
+            cmd += ['-c', kiosk_conf]
+        cmd += ['-d', '-RR', '-S', 'ping-bulk'] + argv
+        return cmd
 
 
 _MUX_BACKENDS: dict[str, TerminalBackend] = {
