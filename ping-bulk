@@ -2081,7 +2081,9 @@ CMD_REGISTRY = [
            '<file>',              'load hosts/commands from file',
            arg_completer=_complete_path_arg,
            cli_flags=('-f', '--file'),
-           cli_kwargs={'metavar': 'FILE', 'help': 'hosts file (# comment, ## section header, one host per line)', 'dest': 'file'}),
+           cli_kwargs={'metavar': 'FILE', 'action': 'append',
+                       'help': 'hosts file; may be given multiple times, loaded in order',
+                       'dest': 'file'}),
     CmdDef(['resolv'],           '_cmd_resolv',     None,
            '<ip> <host>',         'static name→IP mapping (overrides DNS for ping and SSH)'),
     CmdDef(['resolv-port'],      '_cmd_resolv_port', None,
@@ -6002,12 +6004,12 @@ press '?' inside the app for the full keyboard reference.\
 def main(stdscr, args):
     entries = []
 
-    # Load entries from file first, then append positional hosts
-    if args.file:
+    # Load entries from each -f file in order, then append positional hosts
+    for fpath in (args.file or []):
         try:
-            entries.extend(parse_hosts_file(args.file))
+            entries.extend(parse_hosts_file(fpath))
         except OSError as e:
-            print(f"ping-bulk: cannot open '{args.file}': {e}", file=sys.stderr)
+            print(f"ping-bulk: cannot open '{fpath}': {e}", file=sys.stderr)
             return
 
     seen_cli_hosts = set()
@@ -6032,7 +6034,7 @@ def main(stdscr, args):
         return
 
     app = Application(entries, log_file=args.log_file)
-    app.hosts_file = args.file
+    app.hosts_file = args.file[-1] if args.file else None
     app.kiosk_mode = bool(args.kiosk)
 
     # Apply any display-mode flags supplied on the command line.
