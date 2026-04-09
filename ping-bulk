@@ -2447,6 +2447,7 @@ class Application:
         self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
         self.terminal_emulator = 'auto'  # X terminal emulator name ('auto' or binary)
         self.kiosk_mode = False        # set True by --kiosk flag
+        self.startup_select = None     # host name to pre-highlight at startup (--select)
         self.hosts_file = None         # path of the active hosts file (for :edit)
         self._monitoring_started = False  # set True once start_monitoring() is called
         self._load_config()         # apply config-file settings (before hosts-file commands)
@@ -4134,7 +4135,12 @@ class Application:
                 backend = _MUX_BACKENDS.get('tmux') or next(
                     (b for b in _MUX_BACKENDS.values() if b.available()), None)
                 if backend:
-                    cmd = backend.relaunch_cmd(sys.argv)
+                    extra = []
+                    if p.get('pending_host'):
+                        extra += ['--select', p['pending_host']]
+                    if p.get('pending_cmd'):
+                        extra += [':' + p['pending_cmd']]
+                    cmd = backend.relaunch_cmd(sys.argv + extra)
                     self.prompt = None
                     curses.endwin()
                     os.execvp(cmd[0], cmd)
@@ -4662,6 +4668,25 @@ class Application:
         if self._monitoring_started:
             self.add_event("cmd", f"terminal: {value}")
 
+    def _mux_relaunch_prompt(self, tokens: list) -> dict:
+        """Build a mux_relaunch prompt dict, capturing context for post-relaunch restore.
+
+        tokens — the :mux command tokens (e.g. ['ssh', '10.0.0.1', '-l', 'root'])
+        """
+        pending_cmd = 'mux ' + shlex.join(tokens) if tokens else None
+        pending_host = None
+        if (self.highlighted_index is not None
+                and 0 <= self.highlighted_index < len(self.entries)):
+            entry = self.entries[self.highlighted_index]
+            if isinstance(entry, Monitor):
+                pending_host = entry.host
+        return {
+            'type': 'mux_relaunch',
+            'chars': [],
+            'pending_host': pending_host,
+            'pending_cmd': pending_cmd,
+        }
+
     def _cmd_mux(self, args=''):
         """Run a command in a tmux/screen pane, window, or X terminal.
 
@@ -4715,7 +4740,7 @@ class Application:
                         self.add_event("cmd",
                             f"mux: {preference} is not installed")
                     else:
-                        self.prompt = {'type': 'mux_relaunch', 'chars': []}
+                        self.prompt = self._mux_relaunch_prompt(tokens)
                     return
             backend = _resolve_mux_backend(preference)
             if backend is None:
@@ -4727,7 +4752,7 @@ class Application:
             # a session, the backend binary exists but has no session socket —
             # offer to relaunch inside one instead of hitting a cryptic error.
             if backend is not _MUX_BACKENDS.get('terminal') and not backend.is_inside():
-                self.prompt = {'type': 'mux_relaunch', 'chars': []}
+                self.prompt = self._mux_relaunch_prompt(tokens)
                 return
 
         try:
@@ -4823,8 +4848,14 @@ class Application:
             if self.kiosk_mode:
                 self.add_event("cmd", "c: no terminal multiplexer (install tmux)")
                 return
-            # Offer relaunch — open a Y/n prompt
-            self.prompt = {'type': 'mux_relaunch', 'chars': []}
+            # Build the SSH command now so it can be restored after relaunch.
+            disabled, ssh_cmd = self._build_connect_cmd(entry)
+            pending_cmd = ('mux ' + shlex.join(ssh_cmd)) if not disabled else None
+            self.prompt = {
+                'type': 'mux_relaunch', 'chars': [],
+                'pending_host': entry.host,
+                'pending_cmd': pending_cmd,
+            }
             return
 
         disabled, ssh_cmd = self._build_connect_cmd(entry)
@@ -5758,6 +5789,14 @@ class Application:
 
         self.start_monitoring()
 
+        # Pre-select a host requested via --select (e.g. after a mux relaunch)
+        if self.startup_select:
+            for i, entry in enumerate(self.entries):
+                if isinstance(entry, Monitor) and entry.host == self.startup_select:
+                    self.highlighted_index = i
+                    break
+            self.startup_select = None
+
         if self.kiosk_mode and not shutil.which('vlock') and not shutil.which('physlock'):
             self.add_event("warn",
                 "kiosk: vlock/physlock not found — idle lock-after-time will not work; "
@@ -6067,6 +6106,8 @@ press '?' inside the app for the full keyboard reference.\
     parser.add_argument('hosts', nargs='*', metavar='HOST', help='hosts/IPs to ping')
     parser.add_argument('--kiosk', action='store_true',
                         help='run in kiosk mode: auto-launch tmux, restrict commands, use rnano/rvim')
+    parser.add_argument('--select', metavar='HOST', dest='select_host',
+                        help=argparse.SUPPRESS)  # internal: pre-select a host by name at startup
     parser.add_argument('--help-full',    action='store_true',
                         help='show full manual and exit')
     parser.add_argument('--help-example', action='store_true',
@@ -6122,6 +6163,7 @@ def main(stdscr, args):
     app = Application(entries, log_file=args.log_file)
     app.hosts_file = args.file[-1] if args.file else None
     app.kiosk_mode = bool(args.kiosk)
+    app.startup_select = args.select_host or None
 
     # Apply any display-mode flags supplied on the command line.
     # These run after _load_config() so they always take precedence over the
