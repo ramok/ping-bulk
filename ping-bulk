@@ -108,6 +108,9 @@ SET_PARAMS = [
              'pause all monitors (stop sending pings)'),
     SetParam('mux-split', '_cmd_mux_split', ['v', 'h', 'window'],
              'default pane split direction for :mux (v=below h=right window=new)'),
+    SetParam('terminal', '_cmd_set_terminal',
+             lambda: ['auto'] + [b for b, _ in _XTERM_CANDIDATES],
+             'X/Wayland terminal emulator for :term (auto = x-terminal-emulator, fallback xterm)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -206,10 +209,12 @@ _FULL_HELP = [
     "                 pre-fills :mux ssh <host> [opts from :connect-options]",
     "  :mux [-v|-h|-w] <cmd>  run cmd in split pane (v=below h=right w=window)",
     "  :tmux / :screen        same as :mux; name hints at preferred backend",
+    "  :term / :terminal      same as :mux but forces X/Wayland terminal window",
     "  :connect-options <pat> <ssh-opts>  set SSH flags for hosts matching glob",
     "  :connect-options <pat> -           disable connect for matching hosts",
     "  :connect-options       (no args)   clear all rules",
     "  :set mux-split v|h|window          default split direction",
+    "  :set terminal auto|xterm             X terminal emulator for :term",
 ]
 
 _EXAMPLE_HELP = """\
@@ -2100,6 +2105,8 @@ CMD_REGISTRY = [
            '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
     CmdDef(['mux', 'tmux', 'screen'], '_cmd_mux', None,
            '[-v|-h|-w] <command...>', 'run command in tmux/screen pane (-v below, -h right, -w window)'),
+    CmdDef(['term', 'terminal', 'xterm'], '_cmd_mux', None,
+           '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
     CmdDef(['connect-options'],  '_cmd_connect_options', None,
            '<glob> <ssh-opts|->', 'set SSH flags for matching hosts; - disables connect'),
     CmdDef(['edit'],             '_cmd_edit',       None,
@@ -2112,8 +2119,8 @@ CMD_REGISTRY = [
 _CMD_MAP: dict = {name: cmd for cmd in CMD_REGISTRY for name in cmd.names}
 
 # ── Terminal backend abstraction ─────────────────────────────────────────────
-# Covers tmux and screen (implemented).
-# X terminal emulators are a future extension (not implemented).
+# Covers tmux, screen, and X/Wayland terminal emulators (implemented).
+# Kiosk mode uses tmux only.
 
 _KIOSK_TMUX_CONF = '/etc/ping-bulk/kiosk.tmux.conf'
 _KIOSK_SSH_IDENTITY = '/etc/ping-bulk/id_ed25519'
@@ -2213,9 +2220,70 @@ class ScreenBackend(TerminalBackend):
         return cmd
 
 
+# Known X terminal emulators: (binary, separator_before_command)
+# separator None means command is appended directly (e.g. kitty).
+_XTERM_CANDIDATES = [
+    ('x-terminal-emulator', '-e'),   # Debian/Ubuntu alternatives default
+    ('xterm',               '-e'),   # fallback
+]
+
+
+class XTermBackend(TerminalBackend):
+    """X / Wayland terminal emulator backend.
+
+    Opens commands in a new terminal window.  Cannot split; split() falls
+    back to new_window().  Detection requires DISPLAY or WAYLAND_DISPLAY.
+    """
+
+    def __init__(self):
+        self.terminal = 'auto'  # 'auto' or explicit binary name
+
+    @classmethod
+    def available(cls) -> bool:
+        return bool(
+            (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
+            and cls._find_binary('auto')
+        )
+
+    @classmethod
+    def _find_binary(cls, name: str) -> str | None:
+        if name and name != 'auto':
+            return shutil.which(name)
+        for cand, _ in _XTERM_CANDIDATES:
+            found = shutil.which(cand)
+            if found:
+                return found
+        return None
+
+    def is_inside(self) -> bool:
+        return False  # you're never "inside" an X terminal emulator
+
+    def _build_cmd(self, command: list) -> list:
+        binary = self._find_binary(self.terminal)
+        if not binary:
+            return []
+        name = os.path.basename(binary)
+        sep = next((s for b, s in _XTERM_CANDIDATES if b == name), '-e')
+        if sep is None:
+            return [binary] + command
+        return [binary, sep] + command
+
+    def split(self, direction: str, command: list) -> None:
+        self.new_window(command)  # X terminals can't split; open a new window
+
+    def new_window(self, command: list) -> None:
+        cmd = self._build_cmd(command)
+        if cmd:
+            subprocess.Popen(cmd)
+
+    def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
+        return argv  # not applicable for terminal emulators
+
+
 _MUX_BACKENDS: dict[str, TerminalBackend] = {
-    'tmux':   TmuxBackend(),
-    'screen': ScreenBackend(),
+    'tmux':     TmuxBackend(),
+    'screen':   ScreenBackend(),
+    'terminal': XTermBackend(),
 }
 
 
@@ -2224,13 +2292,13 @@ def _resolve_mux_backend(preference: str = None) -> TerminalBackend | None:
 
     If already inside a specific multiplexer, always use that one.
     Otherwise, use *preference* (the command alias name) as a hint,
-    falling back to whichever backend is available.
+    falling back to whichever backend is available (tmux → screen → terminal).
     """
-    for backend in _MUX_BACKENDS.values():
-        if backend.is_inside():
+    for name, backend in _MUX_BACKENDS.items():
+        if name != 'terminal' and backend.is_inside():
             return backend
     order = ([preference] if preference and preference in _MUX_BACKENDS else []) \
-            + ['tmux', 'screen']
+            + ['tmux', 'screen', 'terminal']
     seen = set()
     for name in order:
         if name and name not in seen and name in _MUX_BACKENDS:
@@ -2297,6 +2365,7 @@ class Application:
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.connect_rules: list = []  # [(glob_pattern, ssh_opts | None), ...]; None = disabled
         self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
+        self.terminal_emulator = 'auto'  # X terminal emulator name ('auto' or binary)
         self.kiosk_mode = False        # set True by --kiosk flag
         self.hosts_file = None         # path of the active hosts file (for :edit)
         self._monitoring_started = False  # set True once start_monitoring() is called
@@ -2437,6 +2506,8 @@ class Application:
                 f.write(f":set history-size {self.history_size}\n")
                 f.write(f":set sync-history {'on' if self.sync_history else 'off'}\n")
                 f.write(f":set mux-split {self.mux_split}\n")
+                if self.terminal_emulator != 'auto':
+                    f.write(f":set terminal {self.terminal_emulator}\n")
                 if self.log_file:
                     f.write(f":log {self.log_file}\n")
                 else:
@@ -4449,7 +4520,7 @@ class Application:
                            + (' …' if len(name_rows) > 3 else ''))
 
 
-    # ── :mux / :tmux / :screen ──────────────────────────────────────────────
+    # ── :mux / :tmux / :screen / :term ──────────────────────────────────────
 
     def _cmd_mux_split(self, args=''):
         """Set or cycle the default mux split direction (:set mux-split v|h|window)."""
@@ -4465,16 +4536,26 @@ class Application:
         if self._monitoring_started:
             self.add_event("cmd", f"mux-split: {self.mux_split}")
 
+    def _cmd_set_terminal(self, args=''):
+        """Set the X/Wayland terminal emulator used by :term (:set terminal <name>|auto)."""
+        value = args.strip() or 'auto'
+        self.terminal_emulator = value
+        _MUX_BACKENDS['terminal'].terminal = value
+        if self._monitoring_started:
+            self.add_event("cmd", f"terminal: {value}")
+
     def _cmd_mux(self, args=''):
-        """Run a command in a tmux/screen pane or window.
+        """Run a command in a tmux/screen pane, window, or X terminal.
 
         :mux [-v|-h|-w] <command...>
         :tmux / :screen are aliases; the alias name hints at a preferred backend.
+        :term / :terminal / :xterm force the X terminal emulator backend.
         """
         # Determine which alias was used (stored briefly on self._last_cmd_name).
-        preference = getattr(self, '_last_cmd_name', None)
-        if preference not in ('tmux', 'screen'):
-            preference = None
+        _alias = getattr(self, '_last_cmd_name', None)
+        _alias_map = {'tmux': 'tmux', 'screen': 'screen',
+                      'term': 'terminal', 'terminal': 'terminal', 'xterm': 'terminal'}
+        preference = _alias_map.get(_alias)
 
         tokens = args.split() if args else []
 
@@ -4488,7 +4569,7 @@ class Application:
             self.add_event("cmd", "mux: usage: :mux [-v|-h|-w] <command...>")
             return
 
-        # Kiosk whitelist: only ssh and login are permitted
+        # Kiosk whitelist: only ssh and login are permitted; X terminal not allowed
         if self.kiosk_mode:
             cmd_name = tokens[0].lower()
             if cmd_name not in ('ssh', 'login'):
@@ -4504,7 +4585,8 @@ class Application:
             backend = _resolve_mux_backend(preference)
             if backend is None:
                 self.add_event("cmd",
-                    "mux: no terminal multiplexer available (install tmux or screen)")
+                    "mux: no terminal multiplexer or X terminal available "
+                    "(install tmux, screen, or an X terminal emulator)")
                 return
 
         if direction == 'window':

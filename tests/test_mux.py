@@ -304,7 +304,8 @@ class TestCmdMuxDirection:
         mock_none = MagicMock()
         mock_none.is_inside.return_value = False
         mock_none.available.return_value = False
-        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_none, 'screen': mock_none}):
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_none, 'screen': mock_none,
+                                            'terminal': mock_none}):
             before = len(app.events)
             app._cmd_mux('ssh host')
         assert len(app.events) > before
@@ -377,7 +378,8 @@ class TestConnectToHighlighted:
         mock_none = MagicMock()
         mock_none.is_inside.return_value = False
         mock_none.available.return_value = False
-        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_none, 'screen': mock_none}):
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_none, 'screen': mock_none,
+                                            'terminal': mock_none}):
             app._connect_to_highlighted()
         assert app.prompt is not None
         assert app.prompt['type'] == 'mux_relaunch'
