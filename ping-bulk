@@ -149,8 +149,8 @@ _FULL_HELP = [
     "  [zO]             open highlighted section and all sub-sections",
     "  [zc]             close (fold) highlighted section",
     "  [zC]             close highlighted section and all sub-sections",
-    "  [zR] / ]         open (unfold) ALL sections",
-    "  [zM] / \\[        close (fold) ALL sections",
+    "  [zR] / [\\]]         open (unfold) ALL sections",
+    "  [zM] / [\\[]         close (fold) ALL sections",
     "  [zr]             open one fold level (deepest closed level)",
     "  [zm]             close one fold level (shallowest open level)",
     "  (type '[z]' → [z] appears bottom-right → press second key)",
@@ -159,20 +159,23 @@ _FULL_HELP = [
     "  :q  :quit                 quit",
     "  :ping <host>              add a new host to monitor",
     "  :source <file>            load hosts/commands from file",
-    f"  :set {'|'.join(p.name for p in SET_PARAMS)} [value]",
+    f"  :set {'|'.join(p.name for p in SET_PARAMS)} \\[value]",
     "                            set display modes; omit value to cycle/show",
     "                            log-size / history-size: numeric value only",
     "  :set stats last,avg,stdev  custom multi-column stats (comma-separated)",
     "                            names: last down loss% avg min max stdev rx tx xx",
     "  :set stats ,               clear custom stats, reset to off",
-    "  :pause [on|off]            toggle/set global pause (stop all pings)",
+    "  :pause \\[on|off]            toggle/set global pause (stop all pings)",
+
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
-    "  :let <name> [value]        define a variable; $name / ${name} substituted in hosts file and loops",
+    "  :let <name> \\[value]        define a variable; $name / ${name} substituted in hosts file and loops",
+
     "  :let name{1..N} val-$1    indexed variables (brace expansion on name, eager $N in value)",
     "  $name or ${name}          substitute value; empty string if undefined (${name} for disambiguation)",
     "  ${name_$1}                two-level: expand $N first, then look up the resulting name",
-    "  :log [file|off]           show active log file, set/save log to file, or disable logging",
+    "  :log \\[file|off]           show active log file, set/save log to file, or disable logging",
+
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
     "  :saveconfig               save current settings to config file",
@@ -180,8 +183,8 @@ _FULL_HELP = [
     "                            ip-pat may use brace expansion; \\N in host = brace group N",
     "                            :ssh user@hostname resolves hostname, preserves username",
     "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
-    "  :ssh [opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
-    "  :ssh-begin [opts] <dest>  host lines → :ssh [opts] <dest> <host>",
+    "  :ssh \\[opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
+    "  :ssh-begin \\[opts] <dest>  host lines → :ssh \\[opts] <dest> <host>",
     "  :ssh-end                  close :ssh-begin block (hosts file only)",
     "  :help  or  ?              show this help",
     "-DIVIDER-",
@@ -207,8 +210,8 @@ _FULL_HELP = [
     "-DIVIDER-",
     "  SSH connect  (requires tmux or screen)",
     "  [c]            connect to highlighted host via SSH in a new pane/window",
-    "                 pre-fills :mux ssh <host> [opts from :connect-options]",
-    "  :mux [-v|-h|-w] <cmd>  run cmd in split pane (v=below h=right w=window)",
+    "                 pre-fills :mux ssh <host> \\[opts from :connect-options]",
+    "  :mux \\[-v|-h|-w] <cmd>  run cmd in split pane (v=below h=right w=window)",
     "  :tmux / :screen        same as :mux; name hints at preferred backend",
     "  :term / :terminal      same as :mux but forces X/Wayland terminal window",
     "  :connect-options <pat> <ssh-opts>  set SSH flags for hosts matching glob",
@@ -5690,7 +5693,7 @@ class Application:
 
         if not conn_disabled:
             lines.append("  [c] SSH connect")
-        lines.append("  [Enter / q / Esc] Close  [↑ / ↓ / PgUp / PgDn] Scroll")
+        lines.append("  [Enter/q/Esc] Close  [↑/↓/PgUp/PgDn] Scroll")
 
         self.details_scroll = self._draw_overlay_box(
             stdscr, height, width, lines, self.details_scroll, inner_w,
