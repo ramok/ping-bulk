@@ -9,6 +9,7 @@ import itertools
 import math
 import os
 import re
+import select
 import shlex
 import shutil
 import socket
@@ -1430,7 +1431,17 @@ class SshPingMonitor(Monitor):
         updating stats on each success ('time=') or -O timeout
         ('no answer yet') line.  The '-D' Unix-timestamp prefix is stripped
         before parsing.
+
+        Uses select() with a short timeout so that if the SSH subprocess
+        hangs (e.g. the jump host goes down), missing pings are recorded
+        and the host is shown as DOWN rather than staying frozen at the
+        last known state.
         """
+        # If no output arrives within this many seconds, synthesise a lost
+        # ping.  Slightly above the 1 s ping interval so normal fluctuation
+        # never triggers it; short enough to catch a frozen SSH link quickly.
+        _STALE_SECS = 2.0
+
         backoff = 1  # seconds; doubles on each unexpected exit, capped at 30
 
         while self.running:
@@ -1455,14 +1466,33 @@ class SshPingMonitor(Monitor):
 
             got_output = False
 
-            for raw_line in self._proc.stdout:
-                if not self.running:
-                    break
+            while self.running:
+                rlist, _, _ = select.select([self._proc.stdout], [], [], _STALE_SECS)
+
+                if not rlist:
+                    # Timeout — no output from SSH subprocess.
+                    if got_output:
+                        # We had live output before; SSH link appears frozen.
+                        # Synthesise a lost ping so history advances correctly.
+                        ping_ts = time.time()
+                        with self.lock:
+                            self.alive = False
+                            self.latency = None
+                            self.history.append(None)
+                            self.history_times.append(ping_ts)
+                            self.xx_count += 1
+                        self.ping_count += 1
+                    # Also check if the process has already exited.
+                    if self._proc.poll() is not None:
+                        break
+                    continue
+
+                raw_line = self._proc.stdout.readline()
+                if not raw_line:
+                    break  # EOF — process exited
 
                 line = raw_line.rstrip()
 
-                # Always use local receive time for history_times so all monitors
-                # share the same clock reference regardless of remote clock skew.
                 ping_ts = time.time()
                 if line.startswith("["):
                     close = line.find("]")
