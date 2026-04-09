@@ -2401,6 +2401,8 @@ class Application:
         self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
         self.stats_mode = 0    # index into STATS_MODES; 0 = off
         self.stats_custom = None  # list[str] of canonical stat names when in custom mode, else None
+        self._custom_col_hwm: dict = {}   # cname -> high-water-mark width (expands fast, shrinks slow)
+        self._custom_col_hwm_age: dict = {}  # cname -> render frames since last expansion
         self.sort_by = 'none'  # none, name, status, latency
         self.history_mode = 0  # index into HISTORY_MODES
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
@@ -3361,17 +3363,32 @@ class Application:
         updown_col = ms_col + 8
         tail_col = updown_col + updown_col_w + 2
 
-        # In custom mode, compute per-column widths dynamically (header vs data).
+        # In custom mode, compute per-column widths with a high-water-mark:
+        # expands immediately when a wider value appears, but only shrinks after
+        # _CUSTOM_COL_SHRINK_LAG consecutive frames of narrower values.
+        _CUSTOM_COL_SHRINK_LAG = 20
         custom_col_widths = []   # list of int, one per column in stats_custom
         custom_start_col = all_stats_col  # same anchor as All mode
         if show_custom and self.stats_custom:
             for cname in self.stats_custom:
                 header = _STAT_HEADER.get(cname, cname)
-                w = len(header)
+                actual_w = len(header)
                 for m in self.monitors:
                     val = self._compute_stat(m, cname)
-                    w = max(w, len(val.strip()))
-                custom_col_widths.append(w)
+                    actual_w = max(actual_w, len(val.strip()))
+                hwm = self._custom_col_hwm.get(cname, 0)
+                if actual_w >= hwm:
+                    # Expand (or same width): update immediately, reset decay counter.
+                    self._custom_col_hwm[cname] = actual_w
+                    self._custom_col_hwm_age[cname] = 0
+                else:
+                    # Narrower: increment decay counter; only shrink after the lag.
+                    age = self._custom_col_hwm_age.get(cname, 0) + 1
+                    self._custom_col_hwm_age[cname] = age
+                    if age >= _CUSTOM_COL_SHRINK_LAG:
+                        self._custom_col_hwm[cname] = actual_w
+                        self._custom_col_hwm_age[cname] = 0
+                custom_col_widths.append(self._custom_col_hwm[cname])
         custom_total_w = (sum(custom_col_widths) + 2 * max(0, len(custom_col_widths) - 1)
                           if custom_col_widths else 0)
 
