@@ -2163,10 +2163,16 @@ class TmuxBackend(TerminalBackend):
 
     def split(self, direction: str, command: list) -> None:
         flag = '-v' if direction == 'v' else '-h'
-        subprocess.Popen(['tmux', 'split-window', flag, '--'] + command)
+        r = subprocess.run(['tmux', 'split-window', flag, '--'] + command,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
 
     def new_window(self, command: list) -> None:
-        subprocess.Popen(['tmux', 'new-window', '--'] + command)
+        r = subprocess.run(['tmux', 'new-window', '--'] + command,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
 
     def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
         cmd = ['tmux']
@@ -2203,14 +2209,20 @@ class ScreenBackend(TerminalBackend):
         base = ['screen']
         if sty:
             base += ['-S', sty]
-        subprocess.run(base + ['-X', 'eval', split_cmd, 'focus', cmd_str])
+        r = subprocess.run(base + ['-X', 'eval', split_cmd, 'focus', cmd_str],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or f"screen exited {r.returncode}")
 
     def new_window(self, command: list) -> None:
         sty = os.environ.get('STY', '')
         base = ['screen']
         if sty:
             base += ['-S', sty]
-        subprocess.Popen(base + ['-X', 'screen'] + command)
+        r = subprocess.run(base + ['-X', 'screen'] + command,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or f"screen exited {r.returncode}")
 
     def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
         cmd = ['screen']
@@ -2273,8 +2285,17 @@ class XTermBackend(TerminalBackend):
 
     def new_window(self, command: list) -> None:
         cmd = self._build_cmd(command)
-        if cmd:
-            subprocess.Popen(cmd)
+        if not cmd:
+            return
+        proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+        # Poll briefly — terminal emulators fail immediately if display is missing
+        try:
+            proc.wait(timeout=0.2)
+            if proc.returncode != 0:
+                stderr = proc.stderr.read().decode(errors='replace').strip()
+                raise RuntimeError(stderr or f"terminal exited {proc.returncode}")
+        except subprocess.TimeoutExpired:
+            pass  # still running — opened successfully
 
     def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
         return argv  # not applicable for terminal emulators
@@ -4582,6 +4603,19 @@ class Application:
                 self.add_event("cmd", "mux: kiosk mode requires tmux (not found)")
                 return
         else:
+            # When the user explicitly names a multiplexer (e.g. :tmux or :screen),
+            # verify we are actually inside that session before trying — otherwise
+            # the backend binary exists but the session socket does not and the
+            # subprocess prints its error directly to the terminal.
+            if preference in ('tmux', 'screen'):
+                named = _MUX_BACKENDS[preference]
+                if not named.is_inside():
+                    if not named.available():
+                        self.add_event("cmd",
+                            f"mux: {preference} is not installed")
+                    else:
+                        self.prompt = {'type': 'mux_relaunch', 'chars': []}
+                    return
             backend = _resolve_mux_backend(preference)
             if backend is None:
                 self.add_event("cmd",
@@ -4589,10 +4623,13 @@ class Application:
                     "(install tmux, screen, or an X terminal emulator)")
                 return
 
-        if direction == 'window':
-            backend.new_window(tokens)
-        else:
-            backend.split(direction, tokens)
+        try:
+            if direction == 'window':
+                backend.new_window(tokens)
+            else:
+                backend.split(direction, tokens)
+        except RuntimeError as e:
+            self.add_event("cmd", f"mux: {e}")
 
     def _build_connect_cmd(self, monitor) -> tuple:
         """Return (disabled: bool, ssh_cmd: list) for the 'c' hotkey.
