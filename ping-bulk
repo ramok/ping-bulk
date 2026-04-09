@@ -129,7 +129,7 @@ _FULL_HELP = [
     "  S             toggle sync-history (wall-clock alignment)",
     "  p             pause/unpause selected host or section (no-op if nothing selected)",
     "  P             toggle global pause (all monitors)",
-    "  ↑ / ↓          navigate host list",
+    "  ↑ / ↓  (j / k)  navigate host list",
     "  Enter          show detailed stats for highlighted host",
     "  Space          insert 'seen' marker (or toggle section fold = za)",
     "  C              clear event log",
@@ -3353,13 +3353,13 @@ class Application:
 
             if not self.help_open and not self.details_open and self.cmd is None and self.prompt is None:
                 if self.highlighted_index is None:
-                    hist_suffix += " [↑/↓ select host]"
+                    hist_suffix += " [↑↓/jk select host]"
                 else:
                     entry = self.entries[self.highlighted_index] if 0 <= self.highlighted_index < len(self.entries) else None
                     if isinstance(entry, SectionLabel):
-                        hist_suffix += " [↑/↓ navigate] [SPACE hide/show] [p pause section] [ESC clear]"
+                        hist_suffix += " [↑↓/jk navigate] [SPACE hide/show] [p pause section] [ESC clear]"
                     else:
-                        hist_suffix += " [↑/↓ navigate] [ENTER details] [p pause host] [ESC clear]"
+                        hist_suffix += " [↑↓/jk navigate] [ENTER details] [p pause host] [ESC clear]"
                         # Show connect hint if connect is not disabled for this host
                         if isinstance(entry, Monitor):
                             disabled, _ = self._build_connect_cmd(entry)
@@ -5813,9 +5813,9 @@ class Application:
                     self.scroll_history(self._visible_ping_length)
                 elif key == curses.KEY_SRIGHT:  # Ctrl+Right
                     self.scroll_history(-self._visible_ping_length)
-                # UP/DOWN arrow keys: navigate through visible entries only
+                # UP/DOWN arrow keys and j/k vim keys: navigate through visible entries only
                 # Auto-initialize selection to first visible entry on first press
-                elif key == curses.KEY_UP:
+                elif key in (curses.KEY_UP, ord('k')):
                     if not self.entries:
                         pass  # no entries to navigate
                     else:
@@ -5835,7 +5835,7 @@ class Application:
                             except ValueError:
                                 # Current highlight is not visible; snap to last visible
                                 self.highlighted_index = visible_indices[-1]
-                elif key == curses.KEY_DOWN:
+                elif key in (curses.KEY_DOWN, ord('j')):
                     if not self.entries:
                         pass  # no entries to navigate
                     else:
