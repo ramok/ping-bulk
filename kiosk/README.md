@@ -85,11 +85,30 @@ automatically in kiosk mode.
 |---------|------------------------|
 | `c` hotkey SSH | Allowed; uses `/etc/ping-bulk/id_ed25519` if present |
 | `~/.ssh/` keys | **Ignored** (`-F none -o IdentityFile=none -o IdentitiesOnly=yes`) |
-| `:mux` arbitrary cmds | Blocked — only `ssh` is whitelisted |
+| `:mux` arbitrary cmds | Blocked — only `ssh` and `login` are whitelisted |
+| `:mux` backend | **tmux only** — screen and X terminals are not used in kiosk mode |
 | New tmux window/pane | Runs `login` for authentication |
 | tmux hotkeys | All removed (`unbind-key -a`) |
 | `:q` / `q` / `Q` | Disabled — systemd `Restart=always` handles cleanup |
-| `:edit` | Uses `rvim` (restricted vim, no `:!`, no shell escape) |
+| `:edit` | Uses `rnano` (restricted nano) or `rvim` (restricted vim) — `$VISUAL`/`$EDITOR` are ignored |
+| `:edit` permission | Checked — write access to the hosts file is required |
+| Session lock | Optional via `lock-after-time` in `ping-bulk-kiosk.tmux.conf` |
+
+---
+
+## Session locking by inactivity
+
+tmux can automatically lock the session after a period of no keyboard input.
+To enable, uncomment these lines in `/etc/ping-bulk/kiosk.tmux.conf`:
+
+```
+set-option -g lock-after-time 600     # seconds; 0 disables
+set-option -g lock-command "vlock -c" # requires vlock package
+```
+
+`vlock -c` locks only the current virtual console.  Install it with
+`apt install vlock`.  When triggered, the user must enter the `ping-monitor`
+Unix password to unlock.  Alternatively use `physlock` for a tighter lock.
 
 ---
 

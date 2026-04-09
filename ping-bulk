@@ -2112,7 +2112,8 @@ CMD_REGISTRY = [
 _CMD_MAP: dict = {name: cmd for cmd in CMD_REGISTRY for name in cmd.names}
 
 # ── Terminal backend abstraction ─────────────────────────────────────────────
-# Covers tmux, screen (future), and X terminal emulators (future).
+# Covers tmux (implemented) and screen (stub — split/focus not yet wired up).
+# X terminal emulators are a future extension (not implemented).
 
 _KIOSK_TMUX_CONF = '/etc/ping-bulk/kiosk.tmux.conf'
 _KIOSK_SSH_IDENTITY = '/etc/ping-bulk/id_ed25519'
@@ -4477,12 +4478,17 @@ class Application:
                 self.add_event("cmd",
                     f"mux: '{cmd_name}' not allowed in kiosk mode (only ssh/login)")
                 return
-
-        backend = _resolve_mux_backend(preference)
-        if backend is None:
-            self.add_event("cmd",
-                "mux: no terminal multiplexer available (install tmux or screen)")
-            return
+            # Kiosk only supports tmux
+            backend = _MUX_BACKENDS.get('tmux')
+            if backend is None or not backend.available():
+                self.add_event("cmd", "mux: kiosk mode requires tmux (not found)")
+                return
+        else:
+            backend = _resolve_mux_backend(preference)
+            if backend is None:
+                self.add_event("cmd",
+                    "mux: no terminal multiplexer available (install tmux or screen)")
+                return
 
         if direction == 'window':
             backend.new_window(tokens)
@@ -4623,12 +4629,14 @@ class Application:
     def _resolve_editor(self) -> list:
         """Return [editor_binary] or [editor_binary, flags] to open a file.
 
-        Kiosk mode uses rvim (restricted vim, no shell escape).
+        Kiosk mode uses rnano (restricted nano, no shell escape), then rvim.
+        All environment variables ($VISUAL/$EDITOR) are ignored in kiosk mode.
         Normal mode respects $VISUAL, $EDITOR, then Debian's 'editor' alternative.
         """
         if self.kiosk_mode:
-            if shutil.which('rvim'):
-                return ['rvim']
+            for candidate in ('rnano', 'rvim'):
+                if shutil.which(candidate):
+                    return [candidate]
             if shutil.which('vim'):
                 return ['vim', '-Z']
             return []
@@ -4647,10 +4655,19 @@ class Application:
             self.add_event("cmd", "edit: no hosts file loaded (use -f <file>)")
             return
 
+        if not os.access(self.hosts_file, os.W_OK):
+            self.add_event("cmd",
+                f"edit: no write permission for {self.hosts_file}")
+            return
+
         editor_cmd = self._resolve_editor()
         if not editor_cmd:
-            self.add_event("cmd", "edit: no editor found "
-                           "(set $VISUAL or $EDITOR, or install vim)")
+            if self.kiosk_mode:
+                self.add_event("cmd",
+                    "edit: no restricted editor found (install rnano or rvim)")
+            else:
+                self.add_event("cmd", "edit: no editor found "
+                               "(set $VISUAL or $EDITOR, or install vim)")
             return
 
         import curses as _curses
@@ -5791,7 +5808,7 @@ press '?' inside the app for the full keyboard reference.\
 
     parser.add_argument('hosts', nargs='*', metavar='HOST', help='hosts/IPs to ping')
     parser.add_argument('--kiosk', action='store_true',
-                        help='run in kiosk mode: auto-launch tmux, restrict commands, use rvim')
+                        help='run in kiosk mode: auto-launch tmux, restrict commands, use rnano/rvim')
     parser.add_argument('--help-full',    action='store_true',
                         help='show full manual and exit')
     parser.add_argument('--help-example', action='store_true',
