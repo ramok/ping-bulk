@@ -4640,6 +4640,10 @@ class Application:
                 self.add_event("cmd",
                     f"mux: '{cmd_name}' not allowed in kiosk mode (only ssh/login)")
                 return
+            # Inject key-isolation flags immediately after 'ssh' so the user
+            # cannot see or modify them in the pre-filled command line.
+            if cmd_name == 'ssh':
+                tokens = ['ssh'] + _kiosk_ssh_flags() + tokens[1:]
             # Kiosk only supports tmux
             backend = _MUX_BACKENDS.get('tmux')
             if backend is None or not backend.available():
@@ -4722,17 +4726,14 @@ class Application:
                     target = monitor.host
             ssh_parts = [target]
 
-        # Prepend connect-options flags (before target host)
+        # Append connect-options flags after the target so the user sees
+        # the destination first and can easily edit the options.
         if matched_opts:
             try:
                 opt_tokens = shlex.split(matched_opts)
             except ValueError:
                 opt_tokens = matched_opts.split()
-            ssh_parts = opt_tokens + ssh_parts
-
-        # In kiosk mode, inject SSH key isolation flags at the front
-        if self.kiosk_mode:
-            ssh_parts = _kiosk_ssh_flags() + ssh_parts
+            ssh_parts = ssh_parts + opt_tokens
 
         return False, ['ssh'] + ssh_parts
 
@@ -5441,7 +5442,13 @@ class Application:
         if conn_disabled:
             lines.append(f"  Connect: disabled")
         else:
-            conn_str = shlex.join(conn_ssh) if conn_ssh else '-'
+            # In kiosk mode show the full command including isolation flags so
+            # the operator can verify what will actually be executed.
+            if self.kiosk_mode and conn_ssh and conn_ssh[0] == 'ssh':
+                display_ssh = ['ssh'] + _kiosk_ssh_flags() + conn_ssh[1:]
+            else:
+                display_ssh = conn_ssh
+            conn_str = shlex.join(display_ssh) if display_ssh else '-'
             conn_wrap_w = max(10, inner_w - 12)
             wrapped_conn = textwrap.wrap(conn_str, width=conn_wrap_w)
             lines.append(f"  Connect: {wrapped_conn[0] if wrapped_conn else '-'}")

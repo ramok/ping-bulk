@@ -115,7 +115,7 @@ class TestBuildConnectCmd:
         monitor = app.entries[0]
         disabled, cmd = app._build_connect_cmd(monitor)
         assert not disabled
-        assert cmd == ['ssh', '-l', 'admin', '127.0.0.1']
+        assert cmd == ['ssh', '127.0.0.1', '-l', 'admin']
 
     def test_matching_disable_rule(self, app):
         app.connect_rules = [('127.*', None)]
@@ -147,30 +147,30 @@ class TestBuildConnectCmd:
         assert cmd == ['ssh', '127.0.0.1']
 
     def test_kiosk_mode_injects_isolation_flags(self, app):
-        """In kiosk mode, -F none -o IdentityFile=none -o IdentitiesOnly=yes prepended."""
+        """_build_connect_cmd returns a clean command in kiosk mode; flags are
+        injected later by _cmd_mux so the user cannot edit them."""
         app.kiosk_mode = True
         monitor = app.entries[0]
         disabled, cmd = app._build_connect_cmd(monitor)
         assert not disabled
-        assert '-F' in cmd
-        assert 'none' in cmd
-        assert '-o' in cmd
-        assert 'IdentityFile=none' in cmd
-        assert 'IdentitiesOnly=yes' in cmd
+        # No kiosk flags in the returned (user-editable) command
+        assert '-F' not in cmd
+        assert 'IdentityFile=none' not in cmd
         # Host still present
         assert '127.0.0.1' in cmd
 
     def test_kiosk_mode_with_matching_opts(self, app):
-        """Kiosk isolation flags precede connect-options opts and host."""
+        """connect-options follow the host; kiosk flags are NOT in the prefill."""
         app.kiosk_mode = True
         app.connect_rules = [('127.*', '-l admin')]
         monitor = app.entries[0]
         disabled, cmd = app._build_connect_cmd(monitor)
         assert not disabled
-        # -F none must come before -l admin
-        f_idx = cmd.index('-F')
+        # -l admin follows the host; no kiosk isolation flags
+        host_idx = cmd.index('127.0.0.1')
         l_idx = cmd.index('-l')
-        assert f_idx < l_idx
+        assert host_idx < l_idx
+        assert '-F' not in cmd
 
 
 # ===========================================================================
