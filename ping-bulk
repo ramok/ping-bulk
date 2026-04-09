@@ -122,38 +122,38 @@ _FULL_HELP = [
     "  ping-bulk — keyboard reference                      [q / Esc] close",
     "-DIVIDER-",
     "  Hotkeys",
-    "  q / Q         quit",
-    "  D             cycle DNS display mode",
-    "  s             cycle stats column",
-    "  o / O         cycle sort order forward / backward",
-    "  H             cycle ping-history display mode",
-    "  S             toggle sync-history (wall-clock alignment)",
-    "  p             pause/unpause selected host or section (no-op if nothing selected)",
-    "  P             toggle global pause (all monitors)",
-    "  ↑ / ↓  (j / k)  navigate host list",
-    "  Enter          show detailed stats for highlighted host",
-    "  Space          insert 'seen' marker (or toggle section fold = za)",
-    "  C              clear event log",
-    "  Esc            clear host selection",
-    "  :              open command line",
-    "  ?              show this help",
-    "  ← / →          scroll history ← older (step) / → live (step)",
-    "  Ctrl+← / Ctrl+→  scroll history ← older (page) / → live (page)",
-    "  ↑ / ↓          scroll event log up / down",
-    "  PgUp / PgDn    scroll event log by page",
+    "  [q] / [Q]        quit",
+    "  [D]              cycle DNS display mode",
+    "  [s]              cycle stats column",
+    "  [o] / [O]        cycle sort order forward / backward",
+    "  [H]              cycle ping-history display mode",
+    "  [S]              toggle sync-history (wall-clock alignment)",
+    "  [p]              pause/unpause selected host or section (no-op if nothing selected)",
+    "  [P]              toggle global pause (all monitors)",
+    "  [↑] / [↓]  ([j] / [k])  navigate host list",
+    "  [Enter]          show detailed stats for highlighted host",
+    "  [Space]          insert 'seen' marker (or toggle section fold = za)",
+    "  [C]              clear event log",
+    "  [Esc]            clear host selection",
+    "  [:]              open command line",
+    "  [?]              show this help",
+    "  [←] / [→]        scroll history ← older (step) / → live (step)",
+    "  [Ctrl+←] / [Ctrl+→]  scroll history ← older (page) / → live (page)",
+    "  [↑] / [↓]        scroll event log up / down",
+    "  [PgUp] / [PgDn]  scroll event log by page",
     "-DIVIDER-",
     "  Section folding  (highlight a section header, then press)",
-    "  z a / Space    toggle fold of highlighted section",
-    "  z A / Ctrl+Spc toggle fold recursively (section + all sub-sections)",
-    "  z o            open (unfold) highlighted section",
-    "  z O            open highlighted section and all sub-sections",
-    "  z c            close (fold) highlighted section",
-    "  z C            close highlighted section and all sub-sections",
-    "  z R / ]        open (unfold) ALL sections",
-    "  z M / [        close (fold) ALL sections",
-    "  z r            open one fold level (deepest closed level)",
-    "  z m            close one fold level (shallowest open level)",
-    "  (type 'z' → [z] appears bottom-right → press second key)",
+    "  [za] / [Space]   toggle fold of highlighted section",
+    "  [zA] / [Ctrl+Spc]  toggle fold recursively (section + all sub-sections)",
+    "  [zo]             open (unfold) highlighted section",
+    "  [zO]             open highlighted section and all sub-sections",
+    "  [zc]             close (fold) highlighted section",
+    "  [zC]             close highlighted section and all sub-sections",
+    "  [zR] / ]         open (unfold) ALL sections",
+    "  [zM] / \\[        close (fold) ALL sections",
+    "  [zr]             open one fold level (deepest closed level)",
+    "  [zm]             close one fold level (shallowest open level)",
+    "  (type '[z]' → [z] appears bottom-right → press second key)",
     "-DIVIDER-",
     "  Commands",
     "  :q  :quit                 quit",
@@ -206,7 +206,7 @@ _FULL_HELP = [
     "  10.0.{1..2}.{10,2{1,2}} nested      → cartesian product (8 addresses)",
     "-DIVIDER-",
     "  SSH connect  (requires tmux or screen)",
-    "  c              connect to highlighted host via SSH in a new pane/window",
+    "  [c]            connect to highlighted host via SSH in a new pane/window",
     "                 pre-fills :mux ssh <host> [opts from :connect-options]",
     "  :mux [-v|-h|-w] <cmd>  run cmd in split pane (v=below h=right w=window)",
     "  :tmux / :screen        same as :mux; name hints at preferred backend",
@@ -3298,11 +3298,19 @@ class Application:
         Plain text outside tokens is drawn in the default colour.
 
         Returns the column position after the last character drawn.
+
+        Outside a token, ``\\[`` is an escaped literal ``[`` (prevents token
+        parsing for lines that contain a bare ``[`` character as a hotkey label).
         """
         i = 0
         while i < len(text) and col < width - 1:
             ch = text[i]
-            if ch == '[':
+            if ch == '\\' and i + 1 < len(text) and text[i + 1] == '[':
+                # \[ outside a token → draw a literal '[' without starting a token
+                stdscr.addstr(row, col, '[')
+                col += 1
+                i += 2
+            elif ch == '[':
                 stdscr.addstr(row, col, ch)
                 col += 1
                 i += 1
@@ -5391,71 +5399,77 @@ class Application:
         self.help_open = True
         self.help_scroll = 0
 
-    def _draw_help_overlay(self, stdscr, height, width):
-        """Draw the help overlay as a centered bordered popup with scroll support.
+    def _draw_overlay_box(self, stdscr, height, width, lines, scroll_offset, inner_w, *,
+                          handle_dividers=False):
+        """Draw a centered bordered overlay popup; return the clamped scroll offset.
 
-        Uses _FULL_HELP as content; each line is padded / truncated to
-        inner_w characters.  The box is drawn with box-drawing characters
-        and rendered in reverse-video so it floats visually above the main UI.
-        The overlay is closed by pressing q, Q, or Esc (handled in run()).
+        Draws a ┌─┐ / │ │ / └─┘ box centered on the terminal.  Content lines
+        are rendered with :meth:`_draw_hint_text` so ``[key]`` tokens receive
+        hotkey colouring (white/bold) while surrounding text stays plain.
 
-        Scrolling:
-          self.help_scroll = 0  — top of content
-          self.help_scroll > 0  — scrolled down by that many lines
-        When the content is taller than the terminal the top border embeds a
-        scroll indicator ' ↑↓ n-m/total ' centered in the dashes so the user
-        can see where they are.  The scroll position is clamped here so callers
-        may increment it freely without worrying about bounds.
+        Parameters
+        ----------
+        lines           Full content line list.  When *handle_dividers* is
+                        True, the sentinel ``"-DIVIDER-"`` draws a ``├─┤`` box
+                        divider instead of a content row.
+        scroll_offset   First visible line index.  Clamped to a valid range
+                        before drawing; the clamped value is returned.
+        inner_w         Content column width (box is ``inner_w + 2`` chars wide).
+        handle_dividers When True, ``"-DIVIDER-"`` entries become ├─┤ rules.
+
+        Returns
+        -------
+        int
+            The clamped scroll offset actually used.
         """
-        ideal_w = max(len(line) for line in _FULL_HELP if line != "-DIVIDER-")
-        inner_w = min(ideal_w, max(20, width - 4))
-        box_w = inner_w + 2   # inner width + two border chars
+        box_w = inner_w + 2
+        box_h_available = min(len(lines) + 2, height)
+        visible_count   = max(0, box_h_available - 2)
+        max_scroll      = max(0, len(lines) - visible_count)
+        scroll_offset   = max(0, min(scroll_offset, max_scroll))
 
-        # Limit the box height to the terminal; always keep room for both borders.
-        box_h_available = min(len(_FULL_HELP) + 2, height)
-        visible_count = max(0, box_h_available - 2)
-
-        # Clamp scroll position so it never exceeds the last valid window start.
-        max_scroll = max(0, len(_FULL_HELP) - visible_count)
-        self.help_scroll = max(0, min(self.help_scroll, max_scroll))
-
-        col0 = max(0, (width - box_w) // 2)
+        col0 = max(0, (width  - box_w)          // 2)
         row0 = max(0, (height - box_h_available) // 2)
 
-        attr = curses.A_REVERSE
+        border_attr = curses.A_BOLD
 
-        # Top border — embed a scroll indicator when not all lines fit on screen.
+        # Top border — embed a scroll indicator when content doesn't fully fit.
         if row0 < height:
             if max_scroll > 0:
-                line_first = self.help_scroll + 1
-                line_last  = self.help_scroll + visible_count
-                indicator  = f' ↑↓ {line_first}-{line_last}/{len(_FULL_HELP)} '
+                line_first = scroll_offset + 1
+                line_last  = scroll_offset + visible_count
+                indicator  = f' ↑↓ {line_first}-{line_last}/{len(lines)} '
                 left_w  = (inner_w - len(indicator)) // 2
                 right_w = inner_w - left_w - len(indicator)
-                inner = '─' * left_w + indicator + '─' * right_w
-                top_border = '┌' + inner + '┐'
+                top_border = '┌' + '─' * left_w + indicator + '─' * right_w + '┐'
             else:
                 top_border = '┌' + '─' * inner_w + '┐'
             try:
-                stdscr.addstr(row0, col0, top_border[:width - col0], attr)
+                stdscr.addstr(row0, col0, top_border[:width - col0], border_attr)
             except curses.error:
                 pass
 
-        # Content rows — show only the slice selected by help_scroll.
-        visible_lines = _FULL_HELP[self.help_scroll:self.help_scroll + visible_count]
+        # Content rows
+        visible_lines = lines[scroll_offset:scroll_offset + visible_count]
         for i, line in enumerate(visible_lines):
             r = row0 + 1 + i
             if r >= height:
                 break
-            if line == "-DIVIDER-":
+            if handle_dividers and line == "-DIVIDER-":
                 try:
-                    stdscr.addstr(r, col0, ('├' + '─' * inner_w + '┤')[:width - col0], attr)
+                    stdscr.addstr(r, col0,
+                                  ('├' + '─' * inner_w + '┤')[:width - col0],
+                                  border_attr)
                 except curses.error:
                     pass
             else:
-                padded = line.ljust(inner_w)[:inner_w]
                 try:
-                    stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
+                    stdscr.addstr(r, col0, '│', border_attr)
+                    text = line.ljust(inner_w)[:inner_w]
+                    self._draw_hint_text(stdscr, r, col0 + 1, text,
+                                         col0 + 1 + inner_w)
+                    if col0 + 1 + inner_w < width:
+                        stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
                 except curses.error:
                     pass
 
@@ -5464,9 +5478,34 @@ class Application:
         if r < height:
             try:
                 stdscr.addstr(r, col0,
-                              ('└' + '─' * inner_w + '┘')[:width - col0], attr)
+                              ('└' + '─' * inner_w + '┘')[:width - col0],
+                              border_attr)
             except curses.error:
                 pass
+
+        return scroll_offset
+
+    def _draw_help_overlay(self, stdscr, height, width):
+        """Draw the help overlay as a centered bordered popup with scroll support.
+
+        Uses _FULL_HELP as content.  The box uses bold borders and renders each
+        line through _draw_hint_text so ``[key]`` tokens are highlighted in
+        white/bold (same style as the main menu bar).
+        The overlay is closed by pressing q, Q, or Esc (handled in run()).
+
+        Scrolling:
+          self.help_scroll = 0  — top of content
+          self.help_scroll > 0  — scrolled down by that many lines
+        When the content is taller than the terminal the top border embeds a
+        scroll indicator ' ↑↓ n-m/total ' centered in the dashes so the user
+        can see where they are.  The scroll position is clamped by the helper.
+        """
+        ideal_w = max(len(line) for line in _FULL_HELP if line != "-DIVIDER-")
+        inner_w = min(ideal_w, max(20, width - 4))
+        self.help_scroll = self._draw_overlay_box(
+            stdscr, height, width, _FULL_HELP, self.help_scroll, inner_w,
+            handle_dividers=True,
+        )
 
     def _draw_details_overlay(self, stdscr, height, width):
         """Draw the host details overlay as a centered bordered popup.
@@ -5653,59 +5692,9 @@ class Application:
             lines.append("  [c] SSH connect")
         lines.append("  [Enter / q / Esc] Close  [↑ / ↓ / PgUp / PgDn] Scroll")
 
-        # Calculate box dimensions
-        # Limit the box height to the terminal; always keep room for both borders.
-        box_h_available = min(len(lines) + 2, height)
-        visible_count = max(0, box_h_available - 2)
-
-        # Clamp scroll position so it never exceeds the last valid window start.
-        max_scroll = max(0, len(lines) - visible_count)
-        self.details_scroll = max(0, min(self.details_scroll, max_scroll))
-
-        box_w = inner_w + 2
-
-        # Center the box
-        col0 = max(0, (width - box_w) // 2)
-        row0 = max(0, (height - box_h_available) // 2)
-
-        attr = curses.A_REVERSE
-
-        # Top border — embed a scroll indicator when not all lines fit on screen.
-        if row0 < height:
-            if max_scroll > 0:
-                line_first = self.details_scroll + 1
-                line_last  = self.details_scroll + visible_count
-                indicator  = f' ↑↓ {line_first}-{line_last}/{len(lines)} '
-                left_w  = (inner_w - len(indicator)) // 2
-                right_w = inner_w - left_w - len(indicator)
-                inner = '─' * left_w + indicator + '─' * right_w
-                top_border = '┌' + inner + '┐'
-            else:
-                top_border = '┌' + '─' * inner_w + '┐'
-            try:
-                stdscr.addstr(row0, col0, top_border[:width - col0], attr)
-            except curses.error:
-                pass
-
-        # Content rows — show only the slice selected by details_scroll.
-        visible_lines = lines[self.details_scroll:self.details_scroll + visible_count]
-        for i, line in enumerate(visible_lines):
-            r = row0 + 1 + i
-            if r >= height:
-                break
-            padded = line.ljust(inner_w)[:inner_w]
-            try:
-                stdscr.addstr(r, col0, ('│' + padded + '│')[:width - col0], attr)
-            except curses.error:
-                pass
-
-        # Bottom border
-        r = row0 + 1 + visible_count
-        if r < height:
-            try:
-                stdscr.addstr(r, col0, ('└' + '─' * inner_w + '┘')[:width - col0], attr)
-            except curses.error:
-                pass
+        self.details_scroll = self._draw_overlay_box(
+            stdscr, height, width, lines, self.details_scroll, inner_w,
+        )
 
     def _register_shift_tab_seqs(self):
         """Register Shift+Tab escape sequences as KEY_BTAB with ncurses.
