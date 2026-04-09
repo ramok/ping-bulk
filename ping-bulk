@@ -4709,9 +4709,17 @@ class Application:
         else:
             # Plain PingMonitor or PortMonitor
             if isinstance(monitor, PortMonitor):
-                target = monitor._ping_host
+                if monitor.resolv_static and monitor.resolved_ip:
+                    target = monitor.resolved_ip
+                else:
+                    target = monitor._ping_host
             else:
-                target = monitor.host
+                # Use the static-resolved IP when a :resolv mapping is in place;
+                # the display name (monitor.host) may not be DNS-resolvable by SSH.
+                if monitor.resolv_static and monitor.resolved_ip:
+                    target = monitor.resolved_ip
+                else:
+                    target = monitor.host
             ssh_parts = [target]
 
         # Prepend connect-options flags (before target host)
