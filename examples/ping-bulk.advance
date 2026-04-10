@@ -19,9 +19,7 @@
 :resolv 10.0.2.{1..4} server${1}
 
 # ── Display preferences (optional) ────────────────────────────────────────
-:set stats down
-:set ping-view scaled
-:set dns hostname
+:set stats down; :set ping-view scaled; :set dns hostname
 
 # ── Hierarchical sections ──────────────────────────────────────────────────
 # ## (or :title) creates a level-1 section header.
@@ -82,6 +80,18 @@ google.com:https
 ## Public connectivity
 8.8.8.8
 1.1.1.1
+
+# ── Semicolon separator ────────────────────────────────────────────────────
+# A semicolon (;) is a line separator — equivalent to a newline.
+# Useful for compact one-liners, keeping related entries together, or
+# defining a :let variable and using it on the same physical line.
+
+:let ns1 9.9.9.9; :let ns2 149.112.112.112
+
+## DNS resolvers
+# Two resolvers per physical line:
+8.8.4.4; 1.0.0.1
+$ns1; $ns2
 
 # ── :let variables ────────────────────────────────────────────────────────
 # :let defines reusable variables.  $name and ${name} are equivalent:
@@ -173,6 +183,5 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # You can also dynamically source other config files or add specific hosts
 # directly from within this script or interactively at runtime.
 #
-:ping 1.0.0.1
 :source ./examples/ping-bulk.simple
 
