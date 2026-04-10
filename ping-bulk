@@ -3650,7 +3650,8 @@ class Application:
         _b('p', ':pause-selected')
         # Actions
         _b('C', ':clear-prompt')
-        _b('c', ':connect')
+        _b('c', ':mux ssh %{j?-J %{j: -J }} %d', context=frozenset('d'))
+        _b('c', ':mux ssh %r')
         _b('?', ':help')
         _b('<Esc>', ':select none')
         # Selection
@@ -6889,11 +6890,6 @@ class Application:
                                ord('q'), ord('Q'), 27, 3):
                         self.details_open = False
                         self.details_monitor = None
-                    elif key == ord('c') and self.details_monitor is not None:
-                        # Connect from details overlay: close overlay then connect
-                        self.details_open = False
-                        self.details_monitor = None
-                        self._connect_to_highlighted()
                     elif key == curses.KEY_UP:
                         self.details_scroll = max(0, self.details_scroll - 1)
                     elif key == curses.KEY_DOWN:

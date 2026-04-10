@@ -1,8 +1,9 @@
 """Unit tests for :prog-options command."""
 
 import os
+import shlex
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 def _make_app(pb, tmp_path):
@@ -93,3 +94,95 @@ class TestProgOptions:
             app._save_config()
         text = open(cfg).read()
         assert ':prog-options ssh kiosk-* --disable' in text
+
+
+# ===========================================================================
+# :mux auto-injection of :prog-options from bindings
+# ===========================================================================
+
+def _make_app_with_monitor(pb, tmp_path, host='myhost', resolved_hostname='myhost'):
+    """Return an app with one PingMonitor entry highlighted."""
+    cfg = str(tmp_path / 'ping-bulk' / 'config')
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    open(cfg, 'w').close()
+    with patch.object(pb, '_config_path', return_value=cfg):
+        app = pb.Application([('host', host)])
+    app._monitoring_started = True
+    # Ensure there is a highlighted entry
+    app.highlighted_index = 0
+    # Set the resolved hostname on the monitor entry
+    if app.entries:
+        entry = app.entries[0]
+        if isinstance(entry, pb.Monitor):
+            entry.resolved_hostname = resolved_hostname
+    return app
+
+
+def _make_mock_backend():
+    mock_backend = MagicMock()
+    mock_backend.is_inside.return_value = True
+    mock_backend.available.return_value = True
+    return mock_backend
+
+
+def _held(tokens):
+    """Return the ['sh', '-c', ...] wrapper that _cmd_mux builds."""
+    script = (
+        shlex.join(tokens)
+        + '; _rc=$?;'
+          ' if [ "$_rc" -ne 0 ]; then'
+          ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
+          ' read _ignored; fi'
+    )
+    return ['sh', '-c', script]
+
+
+class TestMuxProgOptionsInjection:
+
+    def test_opts_injected_from_binding(self, pb, tmp_path):
+        """:mux ssh from binding with matching prog-options → opts injected."""
+        app = _make_app_with_monitor(pb, tmp_path, host='myhost')
+        app._cmd_prog_options('ssh myhost -o ProxyJump=gw')
+        mock_backend = _make_mock_backend()
+        app._mux_from_binding = True
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            app._cmd_mux('ssh myhost')
+        mock_backend.split.assert_called_once_with(
+            'v', _held(['ssh', '-o', 'ProxyJump=gw', 'myhost'])
+        )
+
+    def test_disabled_from_binding_aborts(self, pb, tmp_path):
+        """:mux ssh from binding with --disable → silently aborted."""
+        app = _make_app_with_monitor(pb, tmp_path, host='kiosk-1')
+        app._cmd_prog_options('ssh kiosk-* --disable')
+        mock_backend = _make_mock_backend()
+        app._mux_from_binding = True
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            app._cmd_mux('ssh kiosk-1')
+        mock_backend.split.assert_not_called()
+        mock_backend.new_window.assert_not_called()
+
+    def test_no_injection_when_not_from_binding(self, pb, tmp_path):
+        """:mux ssh typed manually → prog-options NOT injected."""
+        app = _make_app_with_monitor(pb, tmp_path, host='myhost')
+        app._cmd_prog_options('ssh myhost -o ProxyJump=gw')
+        mock_backend = _make_mock_backend()
+        # _mux_from_binding is False (default)
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            app._cmd_mux('ssh myhost')
+        mock_backend.split.assert_called_once_with(
+            'v', _held(['ssh', 'myhost'])
+        )
+
+    def test_flag_reset_after_binding(self, pb, tmp_path):
+        """_mux_from_binding is False again after _execute_binding returns."""
+        app = _make_app_with_monitor(pb, tmp_path, host='myhost')
+        # Simulate a binding that calls :mux ssh %h
+        binding = pb._Binding(
+            commands=[':mux ssh myhost'],
+            edit_mode=False,
+        )
+        mock_backend = _make_mock_backend()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            app._execute_binding(binding)
+        assert not app._mux_from_binding
