@@ -277,19 +277,41 @@ Key bindings
 
 **Variable expansion** (expanded at keypress time)
 
-+-------------------+-----------------------------------+
-| Token             | Expands to                        |
-+===================+===================================+
-| ``%h``            | Selected host display name        |
-| ``%i``            | Selected host IP (resolved)       |
-| ``%H``            | All hosts in section (space-sep)  |
-| ``%p``            | Port number (TCP monitor only)    |
-| ``%j``            | Jump host(s) (SSH monitor only)   |
-| ``%s``            | Section title                     |
-| ``%%``            | Literal ``%``                     |
-+-------------------+-----------------------------------+
++-------------------+-------------------------------------------------------+
+| Token             | Expands to                                            |
++===================+=======================================================+
+| ``%h``            | Selected host display name                            |
+| ``%i``            | Selected host IP (resolved)                           |
+| ``%r``            | Connectable target: static ``:resolv`` IP if set,     |
+|                   | otherwise the display hostname                        |
+| ``%d``            | SSH destination (``SshPingMonitor`` only, e.g.        |
+|                   | ``user@gateway``)                                     |
+| ``%j``            | Jump host(s) (``SshPingMonitor`` only, from ``-J``    |
+|                   | flags; space-separated by default)                    |
+| ``%H``            | All hosts in section (space-sep)                      |
+| ``%R``            | All hosts in section using ``%r`` logic (space-sep)   |
+| ``%p``            | Port number (TCP monitor only)                        |
+| ``%s``            | Section title                                         |
+| ``%%``            | Literal ``%``                                         |
++-------------------+-------------------------------------------------------+
 
 Custom separator: ``%{H:,}`` for comma, ``%{H:\n}`` for newline.
+The same syntax applies to list variables: ``%{j: -J }`` joins jump
+hosts with the string `` -J `` between items.
+
+Conditional variable expansion
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``%{var?template}``
+    Expands *template* if *var* is set (non-empty), otherwise produces
+    an empty string.  Inner ``%``-variables inside *template* are also
+    expanded.  This is useful to build flags that should only appear
+    when an optional value is present::
+
+        %{j?-J %{j: -J }}
+
+    When jump hosts exist this produces ``-J host1 -J host2``; when
+    there are no jump hosts it expands to nothing.
 
 If a required variable is unavailable (e.g. ``%p`` on an ICMP host),
 the keypress is ignored and a warning is shown in the event log.
@@ -517,40 +539,68 @@ Format
     when the file is loaded.  This includes ``:bindkey``, so
     administrators can pre-configure key bindings in a hosts file.
 
-``:connect-options <glob-pattern> <ssh-opts>``
-    Set SSH flags to be prepended when the ``c`` hotkey is used on a host
-    whose name matches *glob-pattern* (``fnmatch`` rules, case-sensitive).
-    Rules are evaluated in definition order; the **last match wins**.
+``:prog-options <prog> <glob> <opts>``
+    Add or replace an option rule for *prog* (e.g. ``ssh``).  When
+    ``:mux <prog>`` is invoked from a key binding, the options matching
+    the current host are automatically prepended to *prog*'s argument
+    list.  Rules use ``fnmatch`` glob matching (case-sensitive) against
+    both the literal hostname and the resolved hostname; the **last
+    match wins**.
 
-    The special value ``-`` **disables** the SSH connect hotkey for
-    matching hosts (useful for public IPs where SSH makes no sense)::
+    The special value ``--disable`` suppresses the launch entirely for
+    matching hosts::
 
-        :connect-options *-router     -l admin
-        :connect-options *-comm-mod   -l root
-        :connect-options *-jetson     -l jetson
-        :connect-options *-nuc        -l dev
-        :connect-options *-ps*        -l dev
+        :prog-options ssh *.internal.example.com -o ProxyJump=bastion
+        :prog-options ssh *-router                -l admin
+        :prog-options ssh *-comm-mod              -l root
 
-        # Disable connect for public monitoring targets
-        :connect-options 1.1.1.1      -
-        :connect-options *.google.com -
+        # Disable SSH connect for public monitoring targets
+        :prog-options ssh restricted.example.com  --disable
+        :prog-options ssh 1.1.1.1                 --disable
 
-    Pattern is matched against both the literal hostname and the resolved
-    hostname (if DNS resolution has run).  ``SshPingMonitor`` hosts
-    reuse their existing jump-host arguments from the ``:ssh`` directive.
+    Additional forms:
 
-    Called interactively as ``:connect-options`` (no args) it clears all
-    rules; with one argument it removes that pattern's rule.
+    ``:prog-options <prog> <glob>``
+        Remove the rule for that exact pattern.
+
+    ``:prog-options <prog>``
+        List all rules registered for *prog*.
+
+    ``:prog-options``
+        List all rules for all programs.
 
 ``c`` hotkey (SSH connect)
 --------------------------
 
 When a host is highlighted (``↑``/``↓`` to navigate), pressing ``c``
-pre-fills the command line with::
+pre-fills the command line for editing and executes after **Enter**.
 
-    mux ssh [connect-options-flags] <host>
+The default ``c`` binding behaves as follows:
 
-The user can review and edit the command before pressing **Enter**.
+- For ``SshPingMonitor`` hosts (those that have an SSH destination
+  ``%d``, e.g. hosts added via ``:ssh`` or ``:ssh-begin``)::
+
+      :mux ssh%{j? -J %{j: -J }} %d
+
+  This reconnects to the SSH gateway, automatically appending any
+  ``-J`` jump-host flags that were used in the original ``:ssh``
+  directive.
+
+- For plain ICMP/TCP hosts::
+
+      :mux ssh %r
+
+  ``%r`` resolves to the static ``:resolv`` IP if one is registered,
+  otherwise to the display hostname.
+
+Users can override the ``c`` binding in their config or hosts file::
+
+    :bindkey c :mux ssh -l admin %r
+
+Any ``:prog-options ssh`` rules that match the host are automatically
+injected by ``:mux``, so `:prog-options` is the recommended way to
+supply per-host SSH flags rather than duplicating them in every
+``:bindkey`` definition.
 
 If ping-bulk is **not** running inside a terminal multiplexer (tmux or
 screen), ``c`` offers to relaunch it inside tmux.

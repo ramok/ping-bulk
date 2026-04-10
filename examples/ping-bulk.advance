@@ -161,23 +161,33 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :ssh ops@remote-b 10.20.0.1
 :ssh ops@remote-b 10.20.0.{2..3}
 
-# ── SSH connect-options ────────────────────────────────────────────────────
-# Map hostname globs to default SSH flags used by the 'c' hotkey.
+# ── :prog-options ─────────────────────────────────────────────────────────
+# Map hostname globs to SSH flags injected automatically by :mux.
 # Rules are evaluated in order; last match wins.
 #
-# Use '-' to disable the SSH connect hotkey for hosts that don't have SSH
-# (public IPs, monitoring-only targets, etc.).
+# Syntax:
+#   :prog-options <prog> <glob> <opts>   — add/replace rule
+#   :prog-options <prog> <glob> --disable — disable prog for matching hosts
+#   :prog-options <prog> <glob>          — remove rule for that pattern
+#   :prog-options <prog>                 — list rules for that program
+#   :prog-options                        — list all rules
+#
+# Options are auto-injected when :mux <prog> is run from a key binding.
 
-:connect-options *-router     -l admin    # Mikrotik routers
-:connect-options *-comm-mod   -l root     # comm modules
-:connect-options *-jetson     -l jetson   # Jetson boards
-:connect-options *-nuc        -l dev      # NUC devices
-:connect-options *-ps*        -l dev      # power supplies
+:prog-options ssh *-router     -l admin    # Mikrotik routers
+:prog-options ssh *-comm-mod   -l root     # comm modules
+:prog-options ssh *-jetson     -l jetson   # Jetson boards
+:prog-options ssh *-nuc        -l dev      # NUC devices
+:prog-options ssh *-ps*        -l dev      # power supplies
+:prog-options ssh *.internal.example.com -o ProxyJump=bastion
 
-# Disable connect for public services — no SSH makes sense here
-:connect-options 1.1.1.1      -
-:connect-options 8.8.8.8      -
-:connect-options 1.0.0.1      -
+# Disable SSH connect for public services — no SSH makes sense here
+:prog-options ssh 1.1.1.1      --disable
+:prog-options ssh 8.8.8.8      --disable
+:prog-options ssh 1.0.0.1      --disable
+
+# Disable connect entirely for a specific restricted host
+:prog-options ssh restricted.example.com --disable
 
 # ── Key bindings ──────────────────────────────────────────────────────────
 # :bindkey assigns a command (or chain of commands) to a key sequence.
@@ -185,15 +195,30 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # Multi-key sequences work naturally: za, gg, gt, etc.
 #
 # Variable expansion at keypress time:
-#   %h  — selected host name     %i  — selected host IP
-#   %H  — all hosts in section   %p  — port (TCP monitors only)
-#   %j  — jump host (SSH only)   %s  — section title
+#   %h  — selected host display name  %i  — selected host IP (resolved)
+#   %r  — connectable target: static :resolv IP if set, else hostname
+#   %d  — SSH destination (SshPingMonitor only, e.g. user@gateway)
+#   %j  — jump host(s) (SshPingMonitor only, from -J flags)
+#   %H  — all hosts in section        %R  — section hosts (%r logic)
+#   %p  — port (TCP monitors only)    %s  — section title
 #   %%  — literal %
 #
 # Custom separator: %{H:,} = comma-separated,  %{H:\n} = newline-separated.
+# Same syntax for lists: %{j: -J } joins jump hosts with ' -J ' between items.
+#
+# Conditional expansion: %{var?template}
+#   Expands 'template' when var is set, otherwise empty string.
+#   Inner % vars are also expanded.  Useful for optional SSH flags:
+#     %{j?-J %{j: -J }}  →  "-J host1 -J host2" when jump hosts exist, "" otherwise
 #
 # Append '...' to pre-fill the command line without executing (edit mode):
 #   :bindkey t :mux mtr %i...     — lets user review before Enter
+#
+# Default 'c' binding (built-in, shown here for reference / override):
+#   SSH-proxied hosts (have %d):  :mux ssh%{j? -J %{j: -J }} %d
+#   Plain hosts:                  :mux ssh %r
+# Override example:
+#   :bindkey c :mux ssh -l admin %r
 
 :bindkey t :mux mtr %i
 :bindkey x :set stats down \; :set dns hostname
