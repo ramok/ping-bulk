@@ -95,6 +95,83 @@ class TestProgOptions:
         text = open(cfg).read()
         assert ':prog-options ssh kiosk-* --disable' in text
 
+    def test_saveconfig_no_connect_options(self, app, pb, tmp_path):
+        """:connect-options is NOT written by _save_config."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        open(cfg, 'w').close()
+        app._cmd_prog_options('ssh *.internal -o ProxyJump=gw')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app._save_config()
+        text = open(cfg).read()
+        assert ':connect-options' not in text
+
+    def test_roundtrip_options_rule(self, pb, tmp_path):
+        """save → load round-trip preserves :prog-options rule with options."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        open(cfg, 'w').close()
+
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app1 = pb.Application([('host', '127.0.0.1')])
+        app1._monitoring_started = True
+        app1._cmd_prog_options('ssh *.example.com -o StrictHostKeyChecking=no')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app1._save_config()
+
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app2 = pb.Application([('host', '127.0.0.1')])
+
+        rules = app2.prog_options.get('ssh', [])
+        assert ('*.example.com', '-o StrictHostKeyChecking=no') in rules
+
+    def test_roundtrip_disable_rule(self, pb, tmp_path):
+        """save → load round-trip preserves :prog-options --disable rule."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        open(cfg, 'w').close()
+
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app1 = pb.Application([('host', '127.0.0.1')])
+        app1._monitoring_started = True
+        app1._cmd_prog_options('ssh badhost --disable')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app1._save_config()
+
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app2 = pb.Application([('host', '127.0.0.1')])
+
+        rules = app2.prog_options.get('ssh', [])
+        assert ('badhost', None) in rules
+        disabled, _ = app2._match_prog_options('ssh', 'badhost')
+        assert disabled
+
+    def test_roundtrip_multiple_rules(self, pb, tmp_path):
+        """save → load round-trip preserves multiple :prog-options rules."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        open(cfg, 'w').close()
+
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app1 = pb.Application([('host', '127.0.0.1')])
+        app1._monitoring_started = True
+        app1._cmd_prog_options('ssh *.example.com -o StrictHostKeyChecking=no')
+        app1._cmd_prog_options('ssh badhost --disable')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app1._save_config()
+
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app2 = pb.Application([('host', '127.0.0.1')])
+
+        ssh_rules = app2.prog_options.get('ssh', [])
+        assert ('*.example.com', '-o StrictHostKeyChecking=no') in ssh_rules
+        assert ('badhost', None) in ssh_rules
+
+        _, opts = app2._match_prog_options('ssh', 'host.example.com')
+        assert opts == '-o StrictHostKeyChecking=no'
+        disabled, _ = app2._match_prog_options('ssh', 'badhost')
+        assert disabled
+
 
 # ===========================================================================
 # :mux auto-injection of :prog-options from bindings
