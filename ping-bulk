@@ -143,7 +143,7 @@ class _Binding:
         return f"_Binding({ctx}{self.key_notation!r}, {mode}, {cmds!r}, {self.origin})"
 
 # Valid context guard variables for :bindkey --%x flags.
-_BINDING_CONTEXT_VARS = frozenset('hspj')
+_BINDING_CONTEXT_VARS = frozenset('hsrdjp')
 
 
 class _BindingVarMissing(Exception):
@@ -517,7 +517,8 @@ _FULL_HELP = [
     "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
     "  keys: a-z A-Z 0-9   <CR> <Esc> <Space> <C-x>  <Up>/<Down>/<Left>/<Right>",
     "        <PageUp> <PageDown>  za zc zo …  (arbitrary multi-key sequences)",
-    "  %h = host  %i = IP  %H = section hosts  %p = port  %s = section  %% = literal %",
+    "  %h = host  %i = IP  %r = connectable target  %d = SSH dest  %j = jump hosts",
+  "  %H = section hosts  %p = port  %s = section  %% = literal %",
     "  %{H:,} = custom separator for multi-value variables",
     "  \\\\; separates multiple commands: :bindkey x :set stats down \\\\; :set dns hostname",
 ]
@@ -2541,6 +2542,8 @@ CMD_REGISTRY = [
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
     CmdDef(['connect-options'],  '_cmd_connect_options', None,
            '<glob> <ssh-opts|->', 'set SSH flags for matching hosts; - disables connect'),
+    CmdDef(['prog-options'],     '_cmd_prog_options', None,
+           '<prog> <glob> <opts>', 'per-program options for :mux'),
     CmdDef(['edit'],             '_cmd_edit',       None,
            '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
@@ -2851,6 +2854,7 @@ class Application:
         self.log_file = None        # path to append event log, or None
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.connect_rules: list = []  # [(glob_pattern, ssh_opts | None), ...]; None = disabled
+        self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
         self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
         self.terminal_emulator = 'auto'  # X terminal emulator name ('auto' or binary)
         self.kiosk_mode = False        # set True by --kiosk flag
@@ -3006,6 +3010,13 @@ class Application:
                     f.write("# :log\n")
                 if self.multikey_timeout != 0:
                     f.write(f":set multikey-timeout {self.multikey_timeout}\n")
+                # Per-program option rules
+                for prog, rules in self.prog_options.items():
+                    for pattern, opts in rules:
+                        if opts is None:
+                            f.write(f":prog-options {prog} {pattern} --disable\n")
+                        else:
+                            f.write(f":prog-options {prog} {pattern} {opts}\n")
                 # User key bindings (only non-default)
                 user_bindings = [(keys, b) for keys, b in self._key_trie
                                  if b.origin == 'user']
@@ -3672,9 +3683,9 @@ class Application:
     def _execute_binding(self, binding):
         """Execute a _Binding (one or more commands, or fill command line).
 
-        Variable tokens (%h, %i, %H, %p, %j, %s, %%, %{X:sep}) are expanded
-        from the currently highlighted entry.  If a required variable is
-        unavailable the keypress is silently ignored and a warning logged.
+        Variable tokens (%h, %i, %r, %d, %H, %p, %j, %s, %%, %{X:sep}) are
+        expanded from the currently highlighted entry.  If a required variable
+        is unavailable the keypress is silently ignored and a warning logged.
         """
         commands, warning = self._expand_binding_commands(binding.commands)
         if warning:
@@ -3699,6 +3710,27 @@ class Application:
     _BINDING_VAR_RE = re.compile(
         r'%\{(?P<svar>\w+):(?P<sep>[^}]*)\}|%(?P<var>[a-zA-Z%])')
 
+    # Matches %{var?template} where template contains no literal '}'
+    _COND_RE = re.compile(r'%\{(\w+)\?([^}]*)\}')
+
+    def _expand_conditional(self, s, ctx):
+        """Expand %{var?template} blocks before the main variable pass.
+
+        If *var* is present in *ctx* the inner *template* is expanded using
+        the normal ``_replace_var`` logic.  Any missing variable inside the
+        template (or an absent *var*) causes the whole block to become ``''``.
+        """
+        def replace_cond(m):
+            var, template = m.group(1), m.group(2)
+            if var not in ctx:
+                return ''
+            try:
+                return self._BINDING_VAR_RE.sub(
+                    lambda tm: self._replace_var(tm, ctx), template)
+            except _BindingVarMissing:
+                return ''
+        return self._COND_RE.sub(replace_cond, s)
+
     def _expand_binding_commands(self, commands):
         """Expand %vars in a list of command strings.
 
@@ -3707,13 +3739,25 @@ class Application:
         """
         ctx = self._binding_context()
         try:
+            expanded = [self._expand_conditional(c, ctx) for c in commands]
             return ([self._BINDING_VAR_RE.sub(
-                lambda m: self._replace_var(m, ctx), c) for c in commands], None)
+                lambda m: self._replace_var(m, ctx), c) for c in expanded], None)
         except _BindingVarMissing as e:
             return (commands, str(e))
 
     def _binding_context(self):
-        """Build the variable context dict from current selection."""
+        """Build the variable context dict from current selection.
+
+        Keys and their meaning:
+          h  — entry.host (display name, always set for Monitor entries)
+          i  — resolved IP (DNS or :resolv static)
+          r  — connectable target: static :resolv IP when available, else host
+          d  — SSH destination (SshPingMonitor only: _ssh_dest)
+          j  — jump host list (SshPingMonitor only, from -J flags; list like %H)
+          p  — TCP port number (PortMonitor only)
+          s  — section title (SectionLabel entries)
+          H  — list of hosts in the current section (always a list, like %j)
+        """
         ctx = {}
         entry = None
         if (self.highlighted_index is not None and
@@ -3725,8 +3769,22 @@ class Application:
                 ctx['i'] = entry.resolved_ip
             if isinstance(entry, PortMonitor):
                 ctx['p'] = str(entry.port)
-            if isinstance(entry, SshPingMonitor):
-                ctx['j'] = entry._ssh_dest
+                # %r — static-resolved IP if available, else the ping host
+                ctx['r'] = (entry._ping_host if not (entry.resolv_static and entry.resolved_ip)
+                             else entry.resolved_ip)
+            elif isinstance(entry, SshPingMonitor):
+                # %r — the host being pinged on the remote side
+                ctx['r'] = entry._ping_host
+                # %d — the SSH endpoint being connected to
+                ctx['d'] = entry._ssh_dest
+                # %j — jump host list from -J flags (absent when no jumps)
+                jump_hosts = entry._extract_jump_hosts(entry._ssh_args)
+                if jump_hosts:
+                    ctx['j'] = jump_hosts
+            else:
+                # PingMonitor: %r = static :resolv IP when available, else host
+                ctx['r'] = (entry.resolved_ip if entry.resolv_static and entry.resolved_ip
+                             else entry.host)
         elif isinstance(entry, SectionLabel):
             ctx['s'] = entry.title
         # %H — all hosts in the section containing the selection
@@ -3779,7 +3837,8 @@ class Application:
         :bindkey [--%x] <key> <cmd>  — bind key to command(s) in context
 
         Context flags: --%h (host selected), --%s (section selected),
-        --%p (port monitor), --%j (SSH monitor).  Multiple flags combine
+        --%p (port monitor), --%r (connectable target), --%d (SSH dest),
+        --%j (SSH monitor with jump hosts).  Multiple flags combine
         as AND (all must be present).  Without flags, binding is unconditional.
         """
         if self.kiosk_mode and not getattr(self, '_loading_file', False):
@@ -5739,6 +5798,90 @@ class Application:
         if self._monitoring_started:
             status = 'disabled' if opts is None else f'opts={opts_str!r}'
             self.add_event("cmd", f"connect-options: '{pattern}' → {status}")
+
+    # ── :prog-options ────────────────────────────────────────────────────────
+
+    def _cmd_prog_options(self, args=''):
+        """Manage per-program glob-based option rules for :mux auto-injection.
+
+        :prog-options                          — list all rules
+        :prog-options <prog>                   — list rules for <prog>
+        :prog-options <prog> <glob>            — remove rule for (prog, glob)
+        :prog-options <prog> <glob> <options>  — add/replace rule
+        :prog-options <prog> <glob> --disable  — disable prog for matching hosts
+        """
+        parts = args.split(None, 2)
+        if not parts:
+            # List all rules
+            if not self.prog_options:
+                if self._monitoring_started:
+                    self.add_event("cmd", "prog-options: no rules defined")
+            else:
+                for prog, rules in self.prog_options.items():
+                    for pattern, opts in rules:
+                        status = '--disable' if opts is None else opts
+                        if self._monitoring_started:
+                            self.add_event("cmd",
+                                f"prog-options: {prog} {pattern!r} → {status}")
+            return
+
+        prog = parts[0]
+        if len(parts) == 1:
+            # List rules for this program
+            rules = self.prog_options.get(prog, [])
+            if not rules:
+                if self._monitoring_started:
+                    self.add_event("cmd", f"prog-options: no rules for '{prog}'")
+            else:
+                for pattern, opts in rules:
+                    status = '--disable' if opts is None else opts
+                    if self._monitoring_started:
+                        self.add_event("cmd",
+                            f"prog-options: {prog} {pattern!r} → {status}")
+            return
+
+        pattern = parts[1]
+        if len(parts) == 2:
+            # Remove rule for (prog, glob)
+            rules = self.prog_options.get(prog, [])
+            before = len(rules)
+            rules = [(p, o) for p, o in rules if p != pattern]
+            if rules:
+                self.prog_options[prog] = rules
+            elif prog in self.prog_options:
+                del self.prog_options[prog]
+            if self._monitoring_started:
+                removed = before - len(rules)
+                self.add_event("cmd",
+                    f"prog-options: removed {removed} rule(s) for '{prog}' '{pattern}'")
+            return
+
+        opts_str = parts[2].strip()
+        opts = None if opts_str == '--disable' else opts_str
+        rules = self.prog_options.get(prog, [])
+        rules = [(p, o) for p, o in rules if p != pattern]
+        rules.append((pattern, opts))
+        self.prog_options[prog] = rules
+        if self._monitoring_started:
+            status = '--disable' if opts is None else f'opts={opts_str!r}'
+            self.add_event("cmd", f"prog-options: '{prog}' '{pattern}' → {status}")
+
+    def _match_prog_options(self, prog, host, resolved_hostname=''):
+        """Return (disabled, opts_str) for prog + host by matching prog_options rules.
+
+        Last matching rule wins. Returns (True, '') if disabled, (False, opts) otherwise.
+        """
+        rules = self.prog_options.get(prog, [])
+        matched_opts = ''
+        matched_disabled = False
+        for pattern, opts in rules:
+            if fnmatch.fnmatch(host, pattern) or fnmatch.fnmatch(resolved_hostname, pattern):
+                if opts is None:
+                    matched_disabled = True
+                else:
+                    matched_disabled = False
+                    matched_opts = opts
+        return matched_disabled, matched_opts
 
     # ── :edit ────────────────────────────────────────────────────────────────
 
