@@ -655,6 +655,26 @@ class TestBindingContext:
         ctx = app._binding_context()
         assert ctx['r'] == 'myhost.local'
 
+    def test_r_for_port_monitor_no_resolv_static(self, app, pb):
+        """%r for PortMonitor without resolv_static uses _ping_host."""
+        m = pb.PortMonitor('web.example.com', '80')
+        m.resolved_ip = '93.184.216.34'
+        m.resolv_static = False
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['r'] == 'web.example.com'
+
+    def test_r_for_port_monitor_with_resolv_static(self, app, pb):
+        """%r for PortMonitor with resolv_static=True uses resolved_ip."""
+        m = pb.PortMonitor('web.example.com', '80')
+        m.resolved_ip = '93.184.216.34'
+        m.resolv_static = True
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['r'] == '93.184.216.34'
+
     # ── %d variable ──────────────────────────────────────────────────────────
 
     def test_d_set_for_ssh_monitor(self, app, pb):
@@ -834,6 +854,16 @@ class TestConditionalExpansion:
         result = app._expand_conditional('%{j?-J %{j:,}}', ctx)
         assert result == '-J bastion,gw2'
 
+    def test_conditional_sep_syntax_missing_inner_var(self, app, pb):
+        """%{j?-J %{x:,}} → '' when j is set but %x (sep syntax) is missing."""
+        # j is present (SSH monitor with a jump host) but %x has no value;
+        # the nested %{x:,} raises _BindingVarMissing inside the conditional
+        # template, so the whole block collapses to the empty string.
+        self._make_ssh_entry(pb, app, ['-J', 'bastion', 'user@remote'], ping_host='localhost')
+        result, warning = self._expand(app, '%{j?-J %{x:,}}')
+        assert warning is None
+        assert result == ''
+
 
 # ===========================================================================
 # TestDefaultCBinding — default 'c' key uses :mux ssh with %r/%d/%j
@@ -924,3 +954,14 @@ class TestDefaultCBinding:
         # The SSH binding has context={'d'} (non-None) — it must win
         assert binding is not None
         assert binding.context is not None and 'd' in binding.context
+
+    def test_c_plain_monitor_d_context_guard_inactive(self, app, pb):
+        """For plain PingMonitor 'd' is absent; only the fallback 'c' binding fires."""
+        self._make_ping_entry(pb, app, 'myhost')
+        ctx_keys = set(app._binding_context().keys())
+        assert 'd' not in ctx_keys
+        keys = pb._parse_key_notation('c')
+        binding, _ = app._key_trie.resolve(keys, ctx_keys)
+        assert binding is not None
+        # The resolved binding must be the unconditional fallback (no 'd' guard)
+        assert binding.context is None or 'd' not in binding.context

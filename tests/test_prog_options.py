@@ -263,3 +263,30 @@ class TestMuxProgOptionsInjection:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._execute_binding(binding)
         assert not app._mux_from_binding
+
+    def test_r_expansion_with_prog_options_injection(self, pb, tmp_path):
+        """:mux ssh %r with resolv_static + matching prog-options → opts injected with expanded %r.
+
+        When a host has resolv_static=True the %r variable expands to the
+        resolved IP.  prog-options match uses the display name (entry.host),
+        so the rule must reference the display name.  The final mux command
+        should contain both the injected opts and the resolved IP.
+        """
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        open(cfg, 'w').close()
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app = pb.Application([('host', 'label')])
+        app._monitoring_started = True
+        app.highlighted_index = 0
+        entry = app.entries[0]
+        entry.resolved_ip = '10.0.0.1'
+        entry.resolv_static = True
+        app._cmd_prog_options('ssh label -o StrictHostKeyChecking=no')
+        binding = pb._Binding(commands=[':mux ssh %r'], edit_mode=False)
+        mock_backend = _make_mock_backend()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            app._execute_binding(binding)
+        mock_backend.split.assert_called_once_with(
+            'v', _held(['ssh', '-o', 'StrictHostKeyChecking=no', '10.0.0.1'])
+        )
