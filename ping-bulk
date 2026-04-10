@@ -143,7 +143,7 @@ class _Binding:
         return f"_Binding({ctx}{self.key_notation!r}, {mode}, {cmds!r}, {self.origin})"
 
 # Valid context guard variables for :bindkey --%x flags.
-_BINDING_CONTEXT_VARS = frozenset('hsrdjp')
+_BINDING_CONTEXT_VARS = frozenset('hsrdjpHR')
 
 
 class _BindingVarMissing(Exception):
@@ -2855,6 +2855,7 @@ class Application:
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.connect_rules: list = []  # [(glob_pattern, ssh_opts | None), ...]; None = disabled
         self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
+        self._mux_from_binding = False  # True while executing commands from a key binding
         self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
         self.terminal_emulator = 'auto'  # X terminal emulator name ('auto' or binary)
         self.kiosk_mode = False        # set True by --kiosk flag
@@ -3702,8 +3703,12 @@ class Application:
                 'completions': [], 'comp_idx': -1, 'comp_prefix': '',
             }
         else:
-            for cmd in commands:
-                self._dispatch_cmd(cmd)
+            self._mux_from_binding = True
+            try:
+                for cmd in commands:
+                    self._dispatch_cmd(cmd)
+            finally:
+                self._mux_from_binding = False
 
     # ── Binding variable expansion ────────────────────────────────────────
 
@@ -3757,8 +3762,21 @@ class Application:
           j  — jump host list (SshPingMonitor only, from -J flags; list like %H)
           p  — TCP port number (PortMonitor only)
           s  — section title (SectionLabel entries)
-          H  — list of hosts in the current section (always a list, like %j)
+          H  — list of display names for all hosts in section (always a list)
+          R  — list of connectable targets for all hosts in section (%r logic)
         """
+        def _entry_r(e):
+            """Return the connectable target for a Monitor entry (%r logic)."""
+            if isinstance(e, PortMonitor):
+                return (e._ping_host if not (e.resolv_static and e.resolved_ip)
+                        else e.resolved_ip)
+            elif isinstance(e, SshPingMonitor):
+                return e._ping_host
+            else:
+                # PingMonitor
+                return (e.resolved_ip if e.resolv_static and e.resolved_ip
+                        else e.host)
+
         ctx = {}
         entry = None
         if (self.highlighted_index is not None and
@@ -3770,12 +3788,9 @@ class Application:
                 ctx['i'] = entry.resolved_ip
             if isinstance(entry, PortMonitor):
                 ctx['p'] = str(entry.port)
-                # %r — static-resolved IP if available, else the ping host
-                ctx['r'] = (entry._ping_host if not (entry.resolv_static and entry.resolved_ip)
-                             else entry.resolved_ip)
+                ctx['r'] = _entry_r(entry)
             elif isinstance(entry, SshPingMonitor):
-                # %r — the host being pinged on the remote side
-                ctx['r'] = entry._ping_host
+                ctx['r'] = _entry_r(entry)
                 # %d — the SSH endpoint being connected to
                 ctx['d'] = entry._ssh_dest
                 # %j — jump host list from -J flags (absent when no jumps)
@@ -3783,36 +3798,39 @@ class Application:
                 if jump_hosts:
                     ctx['j'] = jump_hosts
             else:
-                # PingMonitor: %r = static :resolv IP when available, else host
-                ctx['r'] = (entry.resolved_ip if entry.resolv_static and entry.resolved_ip
-                             else entry.host)
+                ctx['r'] = _entry_r(entry)
         elif isinstance(entry, SectionLabel):
             ctx['s'] = entry.title
-        # %H — all hosts in the section containing the selection
+        # %H / %R — all hosts in the section containing the selection
         if entry is not None:
-            section_hosts = self._hosts_in_section(self.highlighted_index)
-            if section_hosts:
-                ctx['H'] = section_hosts
+            section_entries = self._monitors_in_section(self.highlighted_index)
+            if section_entries:
+                ctx['H'] = [e.host for e in section_entries]
+                ctx['R'] = [_entry_r(e) for e in section_entries]
         return ctx
 
     def _hosts_in_section(self, idx):
         """Return list of host names for the section containing *idx*."""
+        return [e.host for e in self._monitors_in_section(idx)]
+
+    def _monitors_in_section(self, idx):
+        """Return list of Monitor objects for the section containing *idx*."""
         # Walk backward to find the enclosing SectionLabel
         si = idx
         while si >= 0 and not isinstance(self.entries[si], SectionLabel):
             si -= 1
         if si < 0:
             # No section — collect all monitors
-            return [e.host for e in self.entries if isinstance(e, Monitor)]
+            return [e for e in self.entries if isinstance(e, Monitor)]
         # Collect monitors until next section at the same or lower level
         level = self.entries[si].level
-        hosts = []
+        monitors = []
         for e in self.entries[si + 1:]:
             if isinstance(e, SectionLabel) and e.level <= level:
                 break
             if isinstance(e, Monitor):
-                hosts.append(e.host)
-        return hosts
+                monitors.append(e)
+        return monitors
 
     @staticmethod
     def _replace_var(m, ctx):
@@ -5605,6 +5623,20 @@ class Application:
                 if isinstance(entry, Monitor):
                     tokens += ['--select', entry.host]
             # fall through to open a split/window with the current invocation
+        elif self._mux_from_binding:
+            # Auto-inject :prog-options when the command came from a key binding.
+            prog = tokens[0]
+            entry = (self.entries[self.highlighted_index]
+                     if self.highlighted_index is not None
+                     and 0 <= self.highlighted_index < len(self.entries)
+                     else None)
+            host = entry.host if isinstance(entry, Monitor) else None
+            resolved_hostname = entry.resolved_hostname if isinstance(entry, Monitor) else ''
+            disabled, opts = self._match_prog_options(prog, host or '', resolved_hostname or '')
+            if disabled:
+                return
+            if opts:
+                tokens = [prog] + shlex.split(opts) + list(tokens[1:])
 
         # Kiosk whitelist: only ssh and login are permitted; X terminal not allowed
         if self.kiosk_mode:

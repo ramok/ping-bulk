@@ -707,6 +707,47 @@ class TestBindingContext:
         ctx = app._binding_context()
         assert ctx['j'] == ['gw1', 'gw2']
 
+    # ── %H and %R variables ───────────────────────────────────────────────────
+
+    def _make_section(self, app, pb, title='Servers', level=1):
+        """Append a SectionLabel to app.entries and return it."""
+        s = pb.SectionLabel(title, level=level)
+        app.entries.append(s)
+        return s
+
+    def test_R_equals_H_for_plain_monitors(self, app, pb):
+        """%R equals %H when no host has resolv_static set."""
+        self._make_section(app, pb)
+        for host in ('alpha', 'beta', 'gamma'):
+            app.entries.append(self._make_ping_monitor(pb, host))
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['H'] == ['alpha', 'beta', 'gamma']
+        assert ctx['R'] == ctx['H'], "%R should equal %H when no resolv_static"
+
+    def test_R_uses_ip_for_resolv_static_host(self, app, pb):
+        """%R returns resolved_ip for the host that has resolv_static=True."""
+        self._make_section(app, pb)
+        app.entries.append(self._make_ping_monitor(pb, 'alpha'))
+        app.entries.append(
+            self._make_ping_monitor(pb, 'beta', resolved_ip='10.0.0.2', resolv_static=True))
+        app.entries.append(self._make_ping_monitor(pb, 'gamma'))
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['H'] == ['alpha', 'beta', 'gamma']
+        assert ctx['R'] == ['alpha', '10.0.0.2', 'gamma']
+
+    def test_R_comma_join(self, app, pb):
+        """%{R:,} joins connectable targets with commas."""
+        self._make_section(app, pb)
+        app.entries.append(self._make_ping_monitor(pb, 'host1'))
+        app.entries.append(
+            self._make_ping_monitor(pb, 'host2', resolved_ip='192.168.1.1', resolv_static=True))
+        app.highlighted_index = len(app.entries) - 1
+        cmds, warning = app._expand_binding_commands(['ping %{R:,}'])
+        assert warning is None
+        assert cmds == ['ping host1,192.168.1.1']
+
 
 
 # ===========================================================================
