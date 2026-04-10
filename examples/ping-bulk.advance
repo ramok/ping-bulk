@@ -179,6 +179,26 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :connect-options 8.8.8.8      -
 :connect-options 1.0.0.1      -
 
+# ── Key bindings ──────────────────────────────────────────────────────────
+# :bindkey assigns a command (or chain of commands) to a key sequence.
+# Vim-like notation: <C-x> = Ctrl+x, <CR> = Enter, <Space>, <Up>, etc.
+# Multi-key sequences work naturally: za, gg, gt, etc.
+#
+# Variable expansion at keypress time:
+#   %h  — selected host name     %i  — selected host IP
+#   %H  — all hosts in section   %p  — port (TCP monitors only)
+#   %j  — jump host (SSH only)   %s  — section title
+#   %%  — literal %
+#
+# Custom separator: %{H:,} = comma-separated,  %{H:\n} = newline-separated.
+#
+# Append '...' to pre-fill the command line without executing (edit mode):
+#   :bindkey t :mux mtr %h...     — lets user review before Enter
+
+:bindkey t :mux mtr %h
+:bindkey x :set stats down \; :set dns hostname
+:bindkey <C-p> :pause
+
 # ── Dynamic Additions ──────────────────────────────────────────────────────
 # You can also dynamically source other config files or add specific hosts
 # directly from within this script or interactively at runtime.

@@ -71,6 +71,9 @@ OPTIONS
 KEYBOARD REFERENCE
 ==================
 
+All keys below are default bindings and can be remapped with
+``:bindkey`` (see **Key bindings** under **COMMANDS**).
+
 Navigation
 ----------
 
@@ -215,8 +218,88 @@ Configuration
 -------------
 
 ``:saveconfig``
-    Save current display settings (dns, stats, sort, history, log) to
-    the XDG config file (``~/.config/ping-bulk/config``).
+    Save current display settings (dns, stats, sort, history, log) and
+    user-defined key bindings to the XDG config file
+    (``~/.config/ping-bulk/config``).  Only bindings that differ from
+    the defaults are saved; unbinds of default keys are also persisted.
+
+Key bindings
+------------
+
+``:bindkey <key> <command>``
+    Bind *key* to *command*.  The key is specified in vim-like notation
+    (see **KEY NOTATION** below).  The command is any ``:``-prefixed
+    command (e.g. ``:quit``, ``:set dns hostname``).
+
+    Multiple commands can be chained with ``\;``::
+
+        :bindkey x :set stats down \; :set dns hostname
+
+    Append ``...`` (three dots) to the command to enter *edit mode*:
+    the command line is pre-filled but not executed, letting the user
+    review and modify it before pressing Enter::
+
+        :bindkey t :mux mtr %h...
+
+``:bindkey <key>``
+    Unbind *key*.  If the key had a default binding, the default is
+    removed and the unbind is tracked by ``:saveconfig``.
+
+``:bindkey``
+    List all user-defined key bindings in the event log.
+
+``:set multikey-timeout <ms>``
+    Set the multi-key timeout in milliseconds (0–2000).
+    Default: ``0`` (wait forever for the next key in a multi-key sequence).
+    When non-zero and a pressed key has both a binding and longer
+    sequences starting with it, wait *ms* milliseconds for a follow-up
+    key; if none arrives, execute the single-key binding.
+
+**Key notation**
+
++-------------------+-----------------------------------+
+| Notation          | Meaning                           |
++===================+===================================+
+| ``a``, ``1``, ``/``  | Single characters              |
+| ``za``, ``gg``    | Multi-key sequences               |
+| ``<C-x>``         | Ctrl+x                           |
+| ``<C-Space>``     | Ctrl+Space                        |
+| ``<CR>``          | Enter                             |
+| ``<Esc>``         | Escape                            |
+| ``<Space>``       | Space bar                         |
+| ``<Tab>``         | Tab                               |
+| ``<BS>``          | Backspace                         |
+| ``<Up>`` ``<Down>``  | Arrow keys                     |
+| ``<Left>`` ``<Right>``  | Arrow keys                  |
+| ``<PageUp>`` ``<PgDn>``  | Page navigation             |
+| ``<Home>`` ``<End>``  | Home / End                     |
++-------------------+-----------------------------------+
+
+**Variable expansion** (expanded at keypress time)
+
++-------------------+-----------------------------------+
+| Token             | Expands to                        |
++===================+===================================+
+| ``%h``            | Selected host display name        |
+| ``%i``            | Selected host IP (resolved)       |
+| ``%H``            | All hosts in section (space-sep)  |
+| ``%p``            | Port number (TCP monitor only)    |
+| ``%j``            | Jump host(s) (SSH monitor only)   |
+| ``%s``            | Section title                     |
+| ``%%``            | Literal ``%``                     |
++-------------------+-----------------------------------+
+
+Custom separator: ``%{H:,}`` for comma, ``%{H:\n}`` for newline.
+
+If a required variable is unavailable (e.g. ``%p`` on an ICMP host),
+the keypress is ignored and a warning is shown in the event log.
+
+Examples::
+
+    :bindkey t :mux mtr %h
+    :bindkey x :set stats down \; :set dns hostname
+    :bindkey gt :select first
+    :bindkey <C-p> :pause
 
 Hosts and DNS
 -------------
@@ -431,7 +514,8 @@ Format
 
 ``:cmd [args]``
     Any command listed under **COMMANDS** above; applied immediately
-    when the file is loaded.
+    when the file is loaded.  This includes ``:bindkey``, so
+    administrators can pre-configure key bindings in a hosts file.
 
 ``:connect-options <glob-pattern> <ssh-opts>``
     Set SSH flags to be prepended when the ``c`` hotkey is used on a host
@@ -835,6 +919,14 @@ Recognised settings
 ``:log /path/to/file``
     Path to stream the event log; omit to disable.
 
+``:set multikey-timeout <ms>``
+    Multi-key sequence timeout in milliseconds (0–2000).  Default: ``0``.
+
+``:bindkey <key> <command>``
+    User key bindings.  Only bindings that differ from the defaults
+    are saved.  Unbinds of default keys are stored as bare
+    ``:bindkey <key>`` lines.
+
 Example::
 
     # ping-bulk configuration
@@ -843,6 +935,8 @@ Example::
     :set sort status
     :set ping-view scaled
     :log /var/log/ping-bulk.log
+    :bindkey t :mux mtr %h
+    :bindkey x :set stats down \; :set dns hostname
 
 
 EVENT LOG
