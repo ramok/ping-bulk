@@ -1,6 +1,8 @@
 #!/bin/sh
-# \
-    exec ping-bulk -f "$0" "$@"
+# polyglot: sh executes the lines below
+# ping-bulk joins them as one comment via '\' continuation \
+    command -v ping-bulk >/dev/null 2>&1 && exec ping-bulk -f "$0" "$@"; \
+    exec "$(dirname "$0")/ping-bulk" -f "$0" "$@"
 
 # Full-featured example showing sections, brace expansion, static DNS
 # overrides, :for loops, and SSH-based remote monitoring.
