@@ -115,7 +115,6 @@ class TestOptionalHostApplication:
         app.details_open   = False
         app.details_monitor = None
         app.details_scroll = 0
-        app.pending_key    = None
         app.running        = True
         app.threads        = []
         app._start_time    = None

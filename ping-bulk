@@ -112,10 +112,186 @@ SET_PARAMS = [
     SetParam('terminal', '_cmd_set_terminal',
              lambda: ['auto'] + [b for b, _ in _XTERM_CANDIDATES],
              'X/Wayland terminal emulator for :term (auto = x-terminal-emulator, fallback xterm)'),
+    SetParam('multikey-timeout', '_cmd_multikey_timeout',
+             ['0', '200', '500', '1000'],
+             'ms to wait for follow-up key in multi-key binding (0 = wait forever)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
 _SET_PARAM_MAP: dict = {p.name: p for p in SET_PARAMS}
+
+# ── Key binding infrastructure ───────────────────────────────────────────────
+
+class _Binding:
+    """A key binding: one or more commands to execute on keypress."""
+    __slots__ = ('commands', 'edit_mode', 'key_notation', 'origin')
+
+    def __init__(self, commands, edit_mode=False, key_notation='', origin='default'):
+        self.commands = commands
+        self.edit_mode = edit_mode
+        self.key_notation = key_notation
+        self.origin = origin
+
+    def __repr__(self):
+        mode = 'edit' if self.edit_mode else 'exec'
+        cmds = ' \\; '.join(self.commands)
+        return f"_Binding({self.key_notation!r}, {mode}, {cmds!r}, {self.origin})"
+
+
+class _BindingVarMissing(Exception):
+    """Raised when a %variable in a binding has no value."""
+
+
+class _KeyTrie:
+    """Prefix tree mapping key-code sequences to bindings."""
+    __slots__ = ('children', 'binding')
+
+    def __init__(self):
+        self.children = {}   # dict[int, _KeyTrie]
+        self.binding = None  # _Binding or None
+
+    def insert(self, keys, binding):
+        """Insert a binding for a sequence of key codes."""
+        node = self
+        for key in keys:
+            if key not in node.children:
+                node.children[key] = _KeyTrie()
+            node = node.children[key]
+        node.binding = binding
+
+    def lookup(self, keys):
+        """Look up a key sequence.  Returns (binding|None, has_children)."""
+        node = self
+        for key in keys:
+            if key not in node.children:
+                return (None, False)
+            node = node.children[key]
+        return (node.binding, bool(node.children))
+
+    def remove(self, keys):
+        """Remove binding at *keys*, pruning empty ancestors.  Returns True if removed."""
+        if not keys:
+            return False
+        path = [self]
+        node = self
+        for key in keys:
+            if key not in node.children:
+                return False
+            node = node.children[key]
+            path.append(node)
+        if node.binding is None:
+            return False
+        node.binding = None
+        for i in range(len(keys) - 1, -1, -1):
+            child = path[i + 1]
+            if child.binding is not None or child.children:
+                break
+            del path[i].children[keys[i]]
+        return True
+
+    def clear_subtree(self, keys):
+        """Remove all children under *keys* (keep the node's own binding)."""
+        node = self
+        for key in keys:
+            if key not in node.children:
+                return
+            node = node.children[key]
+        node.children.clear()
+
+    def __iter__(self):
+        """Yield ``(key_list, binding)`` for every binding (DFS, sorted)."""
+        def _walk(node, prefix):
+            if node.binding is not None:
+                yield (prefix[:], node.binding)
+            for key, child in sorted(node.children.items()):
+                prefix.append(key)
+                yield from _walk(child, prefix)
+                prefix.pop()
+        yield from _walk(self, [])
+
+
+# ── Key notation parser ──────────────────────────────────────────────────────
+
+# Angle-bracket token → curses key code (case-insensitive lookup)
+_KEY_NAME_MAP = {
+    'cr': curses.KEY_ENTER, 'enter': curses.KEY_ENTER,
+    'esc': 27,
+    'space': ord(' '),
+    'tab': ord('\t'),
+    'bs': curses.KEY_BACKSPACE, 'backspace': curses.KEY_BACKSPACE,
+    'up': curses.KEY_UP, 'down': curses.KEY_DOWN,
+    'left': curses.KEY_LEFT, 'right': curses.KEY_RIGHT,
+    'pageup': curses.KEY_PPAGE, 'pgup': curses.KEY_PPAGE,
+    'pagedown': curses.KEY_NPAGE, 'pgdn': curses.KEY_NPAGE,
+    'home': curses.KEY_HOME, 'end': curses.KEY_END,
+    'c-left': curses.KEY_SLEFT, 'c-right': curses.KEY_SRIGHT,
+    'c-space': 0, 'c-[': 27,
+}
+
+# Reverse: curses key code → display name (for _format_key_notation)
+_KEY_CODE_NAMES = {
+    curses.KEY_ENTER: '<CR>',
+    27: '<Esc>',
+    ord(' '): '<Space>',
+    ord('\t'): '<Tab>',
+    curses.KEY_BACKSPACE: '<BS>',
+    curses.KEY_UP: '<Up>', curses.KEY_DOWN: '<Down>',
+    curses.KEY_LEFT: '<Left>', curses.KEY_RIGHT: '<Right>',
+    curses.KEY_SLEFT: '<C-Left>', curses.KEY_SRIGHT: '<C-Right>',
+    curses.KEY_PPAGE: '<PageUp>', curses.KEY_NPAGE: '<PageDown>',
+    curses.KEY_HOME: '<Home>', curses.KEY_END: '<End>',
+    0: '<C-Space>',
+}
+
+
+def _parse_key_notation(notation):
+    """Convert vim-like key notation to a list of curses key codes.
+
+    Examples: ``'a'`` → ``[97]``, ``'za'`` → ``[122, 97]``,
+    ``'<C-x>'`` → ``[24]``, ``'<CR>'`` → ``[KEY_ENTER]``.
+    """
+    result = []
+    i = 0
+    while i < len(notation):
+        if notation[i] == '<':
+            end = notation.find('>', i)
+            if end == -1:
+                raise ValueError(f"unclosed angle bracket in key notation: {notation!r}")
+            token = notation[i + 1:end]
+            token_lower = token.lower()
+            # Ctrl+letter: <C-a> … <C-z>
+            if token_lower.startswith('c-') and len(token) == 3:
+                ch = token[2].lower()
+                if 'a' <= ch <= 'z':
+                    result.append(ord(ch) - ord('a') + 1)
+                    i = end + 1
+                    continue
+            if token_lower in _KEY_NAME_MAP:
+                result.append(_KEY_NAME_MAP[token_lower])
+            else:
+                raise ValueError(f"unrecognized key notation: <{token}>")
+            i = end + 1
+        else:
+            result.append(ord(notation[i]))
+            i += 1
+    if not result:
+        raise ValueError("empty key notation")
+    return result
+
+
+def _format_key_notation(keys):
+    """Convert a list of curses key codes back to human-readable notation."""
+    parts = []
+    for key in keys:
+        if key in _KEY_CODE_NAMES:
+            parts.append(_KEY_CODE_NAMES[key])
+        elif 1 <= key <= 26:
+            parts.append(f'<C-{chr(key - 1 + ord("a"))}>')
+        elif 32 < key <= 126:  # printable ASCII excluding space
+            parts.append(chr(key))
+        else:
+            parts.append(f'<0x{key:02X}>')
+    return ''.join(parts)
 
 
 _FULL_HELP = [
@@ -219,6 +395,18 @@ _FULL_HELP = [
     "  :connect-options       (no args)   clear all rules",
     "  :set mux-split v|h|window          default split direction",
     "  :set terminal auto|xterm             X terminal emulator for :term",
+    "-DIVIDER-",
+    "  Key bindings",
+    "  :bindkey <key> <cmd>      bind key to command  (auto-execute)",
+    "  :bindkey <key> <cmd>...   bind key, fill command line for editing",
+    "  :bindkey <key>            unbind key",
+    "  :bindkey                  list all user bindings",
+    "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
+    "  keys: a-z A-Z 0-9   <CR> <Esc> <Space> <C-x>  <Up>/<Down>/<Left>/<Right>",
+    "        <PageUp> <PageDown>  za zc zo …  (arbitrary multi-key sequences)",
+    "  %h = host  %i = IP  %H = section hosts  %p = port  %s = section  %% = literal %",
+    "  %{H:,} = custom separator for multi-value variables",
+    "  \\\\; separates multiple commands: :bindkey x :set stats down \\\\; :set dns hostname",
 ]
 
 _EXAMPLE_HELP = """\
@@ -2189,6 +2377,9 @@ CMD_REGISTRY = [
            '',                    "insert 'seen' marker in event log"),
     CmdDef(['clear'],            '_cmd_clear',      None,
            '',                    'clear event log'),
+    CmdDef(['clear-prompt'],     '_open_prompt_clear', None,
+           '',                    'clear event log (with confirmation prompt)',
+           completable=False),
     CmdDef(['log'],              '_cmd_log',        None,
            '[file|off]',          'show/set/disable the streaming log file',
            arg_completer=_complete_log_arg,
@@ -2237,6 +2428,23 @@ CMD_REGISTRY = [
            '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
+    CmdDef(['bindkey'],          '_cmd_bindkey',    None,
+           '[key] [command]',    'bind/unbind/list key bindings'),
+    CmdDef(['select'],           '_cmd_select',     ['up', 'down', 'first', 'last', 'none'],
+           '[up|down|first|last|none]', 'navigate or clear host selection'),
+    CmdDef(['details'],          '_cmd_details',    None,
+           '',                    'show detailed stats for highlighted host'),
+    CmdDef(['connect'],          '_cmd_connect',    None,
+           '',                    'SSH connect to highlighted host'),
+    CmdDef(['fold'],             '_cmd_fold',
+           ['toggle', 'toggle-recursive', 'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'],
+           '<action>',            'fold action (toggle, za, zO, zR, zM, …)'),
+    CmdDef(['scroll-history'],   '_cmd_scroll_history', None,
+           '<n|half|-half|full|-full>', 'scroll ping history'),
+    CmdDef(['scroll-log'],       '_cmd_scroll_log', None,
+           '<n|page|-page>',     'scroll event log'),
+    CmdDef(['pause-selected'],   '_cmd_pause_selected', None,
+           '',                    'toggle pause on highlighted host/section'),
 ]
 
 # Flat name/alias → CmdDef lookup used by _dispatch_cmd and _get_completions.
@@ -2532,6 +2740,11 @@ class Application:
         self.startup_select = None     # host name to pre-highlight at startup (--select)
         self.hosts_file = None         # path of the active hosts file (for :edit)
         self._monitoring_started = False  # set True once start_monitoring() is called
+        self._key_trie = _KeyTrie()
+        self._key_seq = []        # accumulated key codes for multi-key lookup
+        self._unbound_defaults = set()  # key notations the user explicitly unbound
+        self.multikey_timeout = 0 # ms; 0 = always wait for next key
+        self._register_default_bindings()
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
             self.log_file = log_file
@@ -2546,7 +2759,6 @@ class Application:
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
         self.details_scroll = 0   # Scroll offset for the host details overlay
-        self.pending_key = None   # Pending multi-key prefix (e.g. 'z' waiting for second key)
         self.running = True
         self.threads = []
         self._start_time = None
@@ -2675,6 +2887,19 @@ class Application:
                     f.write(f":log {self.log_file}\n")
                 else:
                     f.write("# :log\n")
+                if self.multikey_timeout != 0:
+                    f.write(f":set multikey-timeout {self.multikey_timeout}\n")
+                # User key bindings (only non-default)
+                user_bindings = [(keys, b) for keys, b in self._key_trie
+                                 if b.origin == 'user']
+                if user_bindings or self._unbound_defaults:
+                    f.write("# Key bindings\n")
+                    for notation in sorted(self._unbound_defaults):
+                        f.write(f":bindkey {notation}\n")
+                    for keys, b in user_bindings:
+                        cmds = ' \\; '.join(b.commands)
+                        suffix = '...' if b.edit_mode else ''
+                        f.write(f":bindkey {b.key_notation} {cmds}{suffix}\n")
         except OSError as e:
             self.add_event("config", f"error saving config: {e}")
             return False
@@ -3151,6 +3376,372 @@ class Application:
         action = action_map.get(key)
         if action:
             self._do_fold_action(action)
+
+    # ── Bindable command methods ──────────────────────────────────────────────
+
+    def _cmd_select(self, args=''):
+        """Navigate or clear host selection: up/down/first/last/none."""
+        action = (args.strip().lower() or 'none')
+        visible = self._get_visible_entry_indices()
+        if not visible:
+            return
+        if action == 'none':
+            self.highlighted_index = None
+        elif action == 'first':
+            self.highlighted_index = visible[0]
+        elif action == 'last':
+            self.highlighted_index = visible[-1]
+        elif action == 'up':
+            if self.highlighted_index is None:
+                self.highlighted_index = visible[-1]
+            else:
+                try:
+                    pos = visible.index(self.highlighted_index)
+                    self.highlighted_index = visible[(pos - 1) % len(visible)]
+                except ValueError:
+                    self.highlighted_index = visible[-1]
+        elif action == 'down':
+            if self.highlighted_index is None:
+                self.highlighted_index = visible[0]
+            else:
+                try:
+                    pos = visible.index(self.highlighted_index)
+                    self.highlighted_index = visible[(pos + 1) % len(visible)]
+                except ValueError:
+                    self.highlighted_index = visible[0]
+
+    def _cmd_details(self, args=''):
+        """Open details overlay for highlighted host."""
+        if (self.highlighted_index is not None and
+                0 <= self.highlighted_index < len(self.entries)):
+            entry = self.entries[self.highlighted_index]
+            if isinstance(entry, Monitor):
+                self.details_open = True
+                self.details_monitor = entry
+                self.details_scroll = 0
+
+    def _cmd_connect(self, args=''):
+        """SSH connect to highlighted host."""
+        self._connect_to_highlighted()
+
+    def _cmd_fold(self, args=''):
+        """Execute a fold action: toggle, toggle-recursive, or z-action name."""
+        if not args:
+            self.add_event("cmd", "fold: missing action argument")
+            return
+        action = args.strip()
+        fold_map = {'toggle': 'za', 'toggle-recursive': 'zA'}
+        action = fold_map.get(action, action)
+        valid = {'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'}
+        if action in valid:
+            self._do_fold_action(action)
+        else:
+            self.add_event("cmd", f"fold: unknown action '{args}'")
+
+    def _cmd_scroll_history(self, args=''):
+        """Scroll ping history: numeric delta, half/-half, full/-full."""
+        if not args:
+            return
+        a = args.strip()
+        if a == 'half':
+            self.scroll_history(max(1, self._visible_ping_length // 2))
+        elif a == '-half':
+            self.scroll_history(-max(1, self._visible_ping_length // 2))
+        elif a == 'full':
+            self.scroll_history(self._visible_ping_length)
+        elif a == '-full':
+            self.scroll_history(-self._visible_ping_length)
+        else:
+            try:
+                self.scroll_history(int(a))
+            except ValueError:
+                self.add_event("cmd", f"scroll-history: invalid value '{a}'")
+
+    def _cmd_scroll_log(self, args=''):
+        """Scroll event log: numeric delta, page/-page."""
+        if not args:
+            return
+        a = args.strip()
+        page_size = getattr(self, '_log_page_size', 20)
+        if a == 'page':
+            self.scroll_log(page_size)
+        elif a == '-page':
+            self.scroll_log(-page_size)
+        else:
+            try:
+                self.scroll_log(int(a))
+            except ValueError:
+                self.add_event("cmd", f"scroll-log: invalid value '{a}'")
+
+    def _cmd_pause_selected(self, args=''):
+        """Toggle pause on highlighted host/section."""
+        self._apply_pause_toggle(self._get_pause_targets())
+
+    def _cmd_multikey_timeout(self, args=''):
+        """Set the multi-key sequence timeout in ms: :set multikey-timeout <n>."""
+        if not args:
+            self.add_event("multikey-timeout",
+                           f"current multikey-timeout: {self.multikey_timeout}ms")
+            return
+        try:
+            n = int(args)
+            if n < 0 or n > 2000:
+                raise ValueError
+        except ValueError:
+            self.add_event("cmd",
+                           f"multikey-timeout: invalid value '{args}' — 0..2000")
+            return
+        self.multikey_timeout = n
+        if self._monitoring_started:
+            self.add_event("multikey-timeout", f"multikey-timeout set to {n}ms")
+
+    # ── Key binding management ────────────────────────────────────────────────
+
+    def _register_default_bindings(self):
+        """Populate the key trie with default (hardcoded) bindings."""
+        def _b(notation, *commands):
+            keys = _parse_key_notation(notation)
+            self._key_trie.insert(keys, _Binding(
+                list(commands), key_notation=notation, origin='default'))
+
+        # Quit
+        _b('q', ':quit')
+        _b('Q', ':quit')
+        # Display modes
+        _b('D', ':dns')
+        _b('s', ':stats')
+        _b('S', ':sync-history')
+        _b('o', ':sort')
+        _b('O', ':sort reverse')
+        _b('H', ':ping-view')
+        # Pause
+        _b('P', ':pause')
+        _b('p', ':pause-selected')
+        # Actions
+        _b('C', ':clear-prompt')
+        _b('c', ':connect')
+        _b('?', ':help')
+        _b('<Esc>', ':select none')
+        # Selection
+        _b('<Up>', ':select up')
+        _b('<Down>', ':select down')
+        _b('k', ':select up')
+        _b('j', ':select down')
+        # Details — register all Enter variants
+        _b('<CR>', ':details')
+        for code in (ord('\n'), ord('\r')):
+            self._key_trie.insert([code], _Binding(
+                [':details'], key_notation='<CR>', origin='default'))
+        # Fold
+        _b('[', ':fold-all')
+        _b(']', ':unfold-all')
+        _b('<C-Space>', ':fold toggle-recursive')
+        for ch in 'oOcCaArRmM':
+            _b(f'z{ch}', f':fold z{ch}')
+        # History scrolling
+        _b('<Left>', ':scroll-history half')
+        _b('<Right>', ':scroll-history -half')
+        _b('<C-Left>', ':scroll-history full')
+        _b('<C-Right>', ':scroll-history -full')
+        # Log scrolling
+        _b('<PageUp>', ':scroll-log page')
+        _b('<PageDown>', ':scroll-log -page')
+
+    def _execute_binding(self, binding):
+        """Execute a _Binding (one or more commands, or fill command line).
+
+        Variable tokens (%h, %i, %H, %p, %j, %s, %%, %{X:sep}) are expanded
+        from the currently highlighted entry.  If a required variable is
+        unavailable the keypress is silently ignored and a warning logged.
+        """
+        commands, warning = self._expand_binding_commands(binding.commands)
+        if warning:
+            self.add_event("bindkey", warning)
+            return
+
+        if binding.edit_mode:
+            cmd_text = ' \\; '.join(commands)
+            if cmd_text.startswith(':'):
+                cmd_text = cmd_text[1:]
+            self.cmd = {
+                'chars': list(cmd_text), 'cursor': len(cmd_text),
+                'hist_idx': -1, 'saved_line': '',
+                'completions': [], 'comp_idx': -1, 'comp_prefix': '',
+            }
+        else:
+            for cmd in commands:
+                self._dispatch_cmd(cmd)
+
+    # ── Binding variable expansion ────────────────────────────────────────
+
+    _BINDING_VAR_RE = re.compile(
+        r'%\{(?P<svar>\w+):(?P<sep>[^}]*)\}|%(?P<var>[a-zA-Z%])')
+
+    def _expand_binding_commands(self, commands):
+        """Expand %vars in a list of command strings.
+
+        Returns ``(expanded_commands, warning_or_None)``.
+        On missing required variable returns the original commands and a warning.
+        """
+        ctx = self._binding_context()
+        try:
+            return ([self._BINDING_VAR_RE.sub(
+                lambda m: self._replace_var(m, ctx), c) for c in commands], None)
+        except _BindingVarMissing as e:
+            return (commands, str(e))
+
+    def _binding_context(self):
+        """Build the variable context dict from current selection."""
+        ctx = {}
+        entry = None
+        if (self.highlighted_index is not None and
+                0 <= self.highlighted_index < len(self.entries)):
+            entry = self.entries[self.highlighted_index]
+        if isinstance(entry, Monitor):
+            ctx['h'] = entry.host
+            if entry.resolved_ip:
+                ctx['i'] = entry.resolved_ip
+            if isinstance(entry, PortMonitor):
+                ctx['p'] = str(entry.port)
+            if isinstance(entry, SshPingMonitor):
+                ctx['j'] = entry._ssh_dest
+        elif isinstance(entry, SectionLabel):
+            ctx['s'] = entry.title
+        # %H — all hosts in the section containing the selection
+        if entry is not None:
+            section_hosts = self._hosts_in_section(self.highlighted_index)
+            if section_hosts:
+                ctx['H'] = section_hosts
+        return ctx
+
+    def _hosts_in_section(self, idx):
+        """Return list of host names for the section containing *idx*."""
+        # Walk backward to find the enclosing SectionLabel
+        si = idx
+        while si >= 0 and not isinstance(self.entries[si], SectionLabel):
+            si -= 1
+        if si < 0:
+            # No section — collect all monitors
+            return [e.host for e in self.entries if isinstance(e, Monitor)]
+        # Collect monitors until next section at the same or lower level
+        level = self.entries[si].level
+        hosts = []
+        for e in self.entries[si + 1:]:
+            if isinstance(e, SectionLabel) and e.level <= level:
+                break
+            if isinstance(e, Monitor):
+                hosts.append(e.host)
+        return hosts
+
+    @staticmethod
+    def _replace_var(m, ctx):
+        """Regex replacement callback for binding variable expansion."""
+        var = m.group('var') or m.group('svar')
+        sep = m.group('sep')
+        if var == '%':
+            return '%'
+        value = ctx.get(var)
+        if value is None:
+            raise _BindingVarMissing(
+                f"%{var}: no value (nothing selected or wrong host type)")
+        if isinstance(value, list):
+            s = (sep if sep is not None else ' ').replace('\\n', '\n').replace('\\t', '\t')
+            return s.join(value)
+        return value
+
+    def _cmd_bindkey(self, args=''):
+        """Bind, unbind, or list key bindings.
+
+        :bindkey              — list all user bindings
+        :bindkey <key>        — unbind (remove user binding, restore default)
+        :bindkey <key> <cmd>  — bind key to command(s)
+        """
+        if self.kiosk_mode and not getattr(self, '_loading_file', False):
+            self.add_event("cmd", "bindkey: blocked in kiosk mode")
+            return
+
+        args = args.strip()
+        if not args:
+            # List all user bindings
+            user_bindings = [(keys, b) for keys, b in self._key_trie
+                             if b.origin == 'user']
+            if not user_bindings:
+                self.add_event("bindkey", "no user key bindings")
+            else:
+                for keys, b in user_bindings:
+                    cmds = ' \\; '.join(b.commands)
+                    suffix = '...' if b.edit_mode else ''
+                    self.add_event("bindkey",
+                                   f"{b.key_notation}  →  {cmds}{suffix}")
+            return
+
+        # Parse key notation (first token or angle-bracket group)
+        key_str, _, rest = self._split_bindkey_args(args)
+        try:
+            key_codes = _parse_key_notation(key_str)
+        except ValueError as e:
+            self.add_event("cmd", f"bindkey: {e}")
+            return
+
+        if not rest:
+            # Unbind
+            removed = self._key_trie.remove(key_codes)
+            if removed:
+                self._unbound_defaults.add(key_str)
+                self.add_event("bindkey", f"unbound {key_str}")
+            else:
+                self.add_event("bindkey", f"no binding for {key_str}")
+            return
+
+        # Bind: rest is the command(s)
+        edit_mode = rest.endswith('...')
+        cmd_text = rest[:-3].rstrip() if edit_mode else rest
+        # Split on \; for multi-command
+        commands = [c.strip() for c in re.split(r'(?<!\\)\\\;', cmd_text)]
+        commands = [c for c in commands if c]
+        if not commands:
+            self.add_event("cmd", "bindkey: empty command")
+            return
+
+        # If user is rebinding a key that was a prefix, clear its subtree
+        _, has_children = self._key_trie.lookup(key_codes)
+        if has_children:
+            self._key_trie.clear_subtree(key_codes)
+
+        binding = _Binding(commands, edit_mode=edit_mode,
+                           key_notation=key_str, origin='user')
+        self._key_trie.insert(key_codes, binding)
+        self._unbound_defaults.discard(key_str)
+        cmds_display = ' \\; '.join(commands)
+        suffix = '...' if edit_mode else ''
+        self.add_event("bindkey", f"{key_str} → {cmds_display}{suffix}")
+
+    @staticmethod
+    def _split_bindkey_args(args):
+        """Split ':bindkey' args into (key_notation, separator, rest).
+
+        The key is the first whitespace-delimited token unless it starts
+        with '<', in which case it extends to the matching '>'.
+        Multi-char sequences like 'za' are a single token.
+        """
+        args = args.strip()
+        if not args:
+            return ('', '', '')
+        # Consume key notation: angle-bracket groups and bare chars
+        i = 0
+        while i < len(args):
+            if args[i] == '<':
+                end = args.find('>', i)
+                if end == -1:
+                    break
+                i = end + 1
+            elif args[i] in (' ', '\t'):
+                break
+            else:
+                i += 1
+        key_str = args[:i]
+        rest = args[i:].lstrip()
+        return (key_str, ' ' if rest else '', rest)
 
     # ── Section summary helpers ───────────────────────────────────────────────
 
@@ -4122,7 +4713,7 @@ class Application:
             'chars': list(self.log_file) if self.log_file else [],
         }
 
-    def _open_prompt_clear(self):
+    def _open_prompt_clear(self, args=''):
         """Open the clear-log confirmation prompt (non-blocking)."""
         self.prompt = {'type': 'clear', 'chars': []}
 
@@ -5150,11 +5741,14 @@ class Application:
 
 
     def _cmd_sort(self, args=''):
-        """Cycle (no arg) or set sort order."""
+        """Cycle (no arg) or set sort order.  'reverse' cycles backward."""
         sorts = ['none', 'name', 'status', 'latency']
         if args:
-            if args.lower() in sorts:
-                self.sort_by = args.lower()
+            a = args.strip().lower()
+            if a == 'reverse':
+                self.cycle_sort(-1)
+            elif a in sorts:
+                self.sort_by = a
             else:
                 self.add_event("cmd",
                     f"sort: unknown mode '{args}' — choices: {' '.join(sorts)}")
@@ -5917,6 +6511,7 @@ class Application:
                 # Events get whatever space remains between hosts and the menu row
                 section_end = hosts_start + (1 if show_header else 0) + visible_hosts
                 events_start = section_end + 1
+                self._log_page_size = max(1, height - 1 - events_start - 2)
                 show_events = events_start + 2 <= height - 1  # must fit before menu row
 
                 # Draw host list
@@ -5948,8 +6543,8 @@ class Application:
                     curses.curs_set(0)
 
                 # Pending-key indicator — drawn last so nothing overwrites it
-                if self.pending_key:
-                    indicator = f"[{self.pending_key}]"
+                if self._key_seq:
+                    indicator = f"[{_format_key_notation(self._key_seq)}]"
                     try:
                         stdscr.addstr(height - 1, width - len(indicator) - 1,
                                       indicator, curses.A_REVERSE)
@@ -6007,148 +6602,82 @@ class Application:
                     if key != -1:
                         self._handle_prompt_key(key)
                     continue
-                # ── pending z* sequence ────────────────────────────────────
-                if self.pending_key == 'z':
-                    if key != -1:   # real key: complete the sequence
-                        self.pending_key = None
-                        if key != 27:   # ESC just cancels, doesn't dispatch
-                            self._handle_z_sequence(key)
-                    continue         # wait (timeout) or move on after dispatch
+                # ── trie-based key dispatch ────────────────────────────────
                 if key == -1:
-                    continue         # no key pressed this tick
-                if key == ord('q') or key == ord('Q'):
-                    self.running = False
-                    break
-                elif key == 3:  # Ctrl+C — ask for confirmation before quitting
-                    self.prompt = {'type': 'quit_confirm', 'chars': []}
-                elif key == 27:  # Escape — clear host selection
-                    self.highlighted_index = None
-                elif key == ord('D'):
-                    self.cycle_dns(1)
-                elif key == ord('s'):
-                    self.cycle_stats(1)
-                elif key == ord('S'):
-                    self._cmd_sync_history()
-                elif key == ord('o'):
-                    self.cycle_sort(1)
-                elif key == ord('O'):
-                    self.cycle_sort(-1)
-                elif key == ord('p'):
-                    # Per-host/section pause: toggle pause on the selected entry.
-                    # If nothing is selected, p is a no-op (use P for global).
-                    self._apply_pause_toggle(self._get_pause_targets())
-                elif key == ord('P'):
-                    # Global pause: toggle pause on all monitors.
-                    self._apply_pause_toggle(self.monitors)
-                elif key == ord('H'):
-                    self.cycle_history_mode(1)
-                elif key == ord(' '):
-                    # If a section header is highlighted, toggle its folded state (= za).
-                    # If a PingMonitor is highlighted, Space does nothing.
-                    # If nothing is highlighted, insert a 'seen' marker (only if not scrolling log).
-                    if (self.highlighted_index is not None and
-                        0 <= self.highlighted_index < len(self.entries)):
-                        entry = self.entries[self.highlighted_index]
-                        if isinstance(entry, SectionLabel):
-                            self._do_fold_action('za')
-                        # PingMonitor highlighted — no action for Space
-                    else:
-                        if self.log_offset == 0:
-                            self.mark_seen()
-                elif key == 0:  # Ctrl+Space — zA: recursive toggle on highlighted section
-                    self._do_fold_action('zA')
-                elif key == ord('z'):
-                    # Start a z* two-key fold sequence; indicator shown in bottom-right
-                    self.pending_key = 'z'
-                elif key == ord('['):
-                    self._fold_all(True)   # fold all (zM alias)
-                elif key == ord(']'):
-                    self._fold_all(False)  # unfold all (zR alias)
-                elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
-                    if (self.highlighted_index is not None and
-                            0 <= self.highlighted_index < len(self.entries)):
-                        entry = self.entries[self.highlighted_index]
-                        if isinstance(entry, Monitor):
-                            self.details_open = True
-                            self.details_monitor = entry
-                elif key == ord('C'):
-                    self._open_prompt_clear()
-                elif key == ord('c'):
-                    self._connect_to_highlighted()
-                elif key == ord(':'):
+                    # No key pressed — but if we're mid-sequence, keep waiting
+                    if self._key_seq:
+                        # With multikey-timeout > 0 and a partial match that
+                        # also has a binding, the timeout getch already fired.
+                        # A -1 here means the trie wait expired via the normal
+                        # loop timeout; just keep waiting (timeout=0 mode).
+                        pass
+                    continue
+                # Infrastructure keys that always bypass the trie
+                if key == ord(':'):
+                    self._key_seq = []
                     self.cmd = {
                         'chars': [], 'cursor': 0,
                         'hist_idx': -1, 'saved_line': '',
                         'completions': [], 'comp_idx': -1, 'comp_prefix': '',
                     }
-                elif key == ord('?'):
-                    self._cmd_help()
-                elif key == 27:  # ESC — clear host selection
-                    self.highlighted_index = None
-                # History scrolling
-                # The history bar shows newest pings on the RIGHT and oldest on the LEFT.
-                # Arrow keys move through time naturally:
-                #   ← / Ctrl+←  scroll back in time (show older pings, increase offset)
-                #   → / Ctrl+→  scroll forward in time (return toward live, decrease offset)
-                # Left/Right      — half visible width (step)
-                # Ctrl+Left/Right — full visible width (page)
-                elif key == curses.KEY_LEFT:
-                    self.scroll_history(max(1, self._visible_ping_length // 2))
-                elif key == curses.KEY_RIGHT:
-                    self.scroll_history(-max(1, self._visible_ping_length // 2))
-                elif key == curses.KEY_SLEFT:   # Ctrl+Left (see _register_ctrl_arrow_seqs)
-                    self.scroll_history(self._visible_ping_length)
-                elif key == curses.KEY_SRIGHT:  # Ctrl+Right
-                    self.scroll_history(-self._visible_ping_length)
-                # UP/DOWN arrow keys and j/k vim keys: navigate through visible entries only
-                # Auto-initialize selection to first visible entry on first press
-                elif key in (curses.KEY_UP, ord('k')):
-                    if not self.entries:
-                        pass  # no entries to navigate
+                    continue
+                if key == 3:  # Ctrl+C — quit confirmation
+                    self._key_seq = []
+                    self.prompt = {'type': 'quit_confirm', 'chars': []}
+                    continue
+                # Space has dual behavior (fold toggle or seen marker)
+                if key == ord(' ') and not self._key_seq:
+                    binding, has_more = self._key_trie.lookup([key])
+                    if binding and binding.origin == 'user':
+                        self._execute_binding(binding)
                     else:
-                        # Build list of visible entry indices
-                        visible_indices = self._get_visible_entry_indices()
-                        if not visible_indices:
-                            pass  # no visible entries
-                        elif self.highlighted_index is None:
-                            # First navigation: start at the last visible entry
-                            self.highlighted_index = visible_indices[-1]
+                        if (self.highlighted_index is not None and
+                                0 <= self.highlighted_index < len(self.entries)):
+                            entry = self.entries[self.highlighted_index]
+                            if isinstance(entry, SectionLabel):
+                                self._do_fold_action('za')
                         else:
-                            # Find current position in visible list and move up, wrapping
-                            try:
-                                current_pos = visible_indices.index(self.highlighted_index)
-                                self.highlighted_index = visible_indices[(current_pos - 1) % len(visible_indices)]
-                            except ValueError:
-                                # Current highlight is not visible; snap to last visible
-                                self.highlighted_index = visible_indices[-1]
-                elif key in (curses.KEY_DOWN, ord('j')):
-                    if not self.entries:
-                        pass  # no entries to navigate
+                            if self.log_offset == 0:
+                                self.mark_seen()
+                    continue
+                # ── Trie lookup ───────────────────────────────────────────
+                self._key_seq.append(key)
+                binding, has_more = self._key_trie.lookup(self._key_seq)
+
+                if binding and not has_more:
+                    # Exact match, no longer prefixes — execute immediately
+                    self._execute_binding(binding)
+                    self._key_seq = []
+                elif binding and has_more:
+                    # Ambiguous: node has both a binding and children
+                    if self.multikey_timeout > 0:
+                        stdscr.timeout(self.multikey_timeout)
+                        next_key = stdscr.getch()
+                        stdscr.timeout(100)
+                        if next_key == -1:
+                            # Timeout expired, no follow-up key — execute
+                            self._execute_binding(binding)
+                            self._key_seq = []
+                        else:
+                            # Got a follow-up key — continue trie walk
+                            self._key_seq.append(next_key)
                     else:
-                        # Build list of visible entry indices
-                        visible_indices = self._get_visible_entry_indices()
-                        if not visible_indices:
-                            pass  # no visible entries
-                        elif self.highlighted_index is None:
-                            # First navigation: start at the first visible entry
-                            self.highlighted_index = visible_indices[0]
-                        else:
-                            # Find current position in visible list and move down, wrapping
-                            try:
-                                current_pos = visible_indices.index(self.highlighted_index)
-                                self.highlighted_index = visible_indices[(current_pos + 1) % len(visible_indices)]
-                            except ValueError:
-                                # Current highlight is not visible; snap to first visible
-                                self.highlighted_index = visible_indices[0]
-                # PgUp/PgDn: scroll event log only
-                elif key == curses.KEY_PPAGE:   # Page Up — scroll log back
-                    log_page_size = max(1, height - 1 - events_start - 2)
-                    if len(self.events) > log_page_size:
-                        self.scroll_log(log_page_size)
-                elif key == curses.KEY_NPAGE:   # Page Down — scroll log forward
-                    log_page_size = max(1, height - 1 - events_start - 2)
-                    if len(self.events) > log_page_size:
-                        self.scroll_log(-log_page_size)
+                        # timeout=0: always wait for the next key
+                        pass  # _key_seq stays populated → indicator shows
+                elif has_more:
+                    # Prefix of longer sequences, no binding here — wait
+                    pass  # _key_seq stays populated → indicator shows
+                else:
+                    # No match at all
+                    if len(self._key_seq) > 1:
+                        # Bad multi-key sequence — retry the last key alone
+                        last = self._key_seq[-1]
+                        self._key_seq = []
+                        # Re-process as a single key by injecting via ungetch
+                        curses.ungetch(last)
+                    else:
+                        # Single unknown key — ignore
+                        self._key_seq = []
 
         finally:
             for monitor in self.monitors:

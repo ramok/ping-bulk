@@ -108,9 +108,11 @@ class TestGetCompletions:
         )
 
     def test_partial_prefix_s_filters_to_matching_commands(self, app):
-        """'s' prefix must match saveconfig, screen, seen, set, sort, ssh, stats, sync-history (and no others)."""
+        """'s' prefix must match all completable commands starting with 's'."""
         result = app._get_completions('s')
-        assert set(result) == {'saveconfig', 'screen', 'seen', 'set', 'sort', 'source', 'ssh', 'stats', 'sync-history'}, (
+        assert set(result) == {'saveconfig', 'screen', 'scroll-history', 'scroll-log',
+                                'seen', 'select', 'set', 'sort', 'source', 'ssh',
+                                'stats', 'sync-history'}, (
             f"Unexpected results for 's': {sorted(result)}"
         )
 
@@ -320,14 +322,14 @@ class TestTabHandling:
 
     def test_unique_match_appends_trailing_space(self, app):
         """Single candidate: Tab must append a trailing space after the command."""
-        _set_text(app, 'pau')
+        _set_text(app, 'save')
         app._handle_cmd_key(self.TAB)
         text = ''.join(app.cmd['chars'])
-        assert text == 'pause ', f"Expected 'pause ' (with trailing space), got {text!r}"
+        assert text == 'saveconfig ', f"Expected 'saveconfig ' (with trailing space), got {text!r}"
 
     def test_unique_match_no_popup(self, app):
         """Single candidate: the completion popup must be cleared (no list needed)."""
-        _set_text(app, 'pau')
+        _set_text(app, 'save')
         app._handle_cmd_key(self.TAB)
         assert app.cmd['completions'] == [], (
             f"Expected empty completions after unique match, got {app.cmd['completions']}"
@@ -637,15 +639,15 @@ class TestTabHandling:
     def test_shift_tab_unique_match_applies_with_trailing_space(self, app):
         """Shift+Tab on a unique match must apply it immediately with a trailing space.
 
-        'pau' has a single completion: 'pause'.
+        'save' has a single completion: 'saveconfig'.
         Shift+Tab must behave identically to Tab for a unique match:
-        apply 'pause' + trailing space, clear the popup.
+        apply 'saveconfig' + trailing space, clear the popup.
         """
-        _set_text(app, 'pau')
+        _set_text(app, 'save')
         app._handle_cmd_key(self.SHIFT_TAB)
         text = ''.join(app.cmd['chars'])
-        assert text == 'pause ', (
-            f"Expected 'pause ' (with trailing space) after Shift+Tab unique match, "
+        assert text == 'saveconfig ', (
+            f"Expected 'saveconfig ' (with trailing space) after Shift+Tab unique match, "
             f"got {text!r}"
         )
         assert app.cmd['completions'] == [], (

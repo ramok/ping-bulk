@@ -1,0 +1,478 @@
+"""Unit tests for the ping-bulk key binding infrastructure.
+
+Tests cover:
+  - _KeyTrie: prefix tree for key-code sequence lookups
+  - _parse_key_notation() / _format_key_notation(): vim-like key notation parsing
+  - _Binding: container for key binding metadata
+  - :bindkey command: binding, unbinding, listing
+  - Default bindings registration
+  - Config save/load for user bindings
+
+No ping threads are started; Application fixtures use a mocked config path
+so the real user config is never read or written.
+"""
+
+import curses
+import os
+import pytest
+from unittest.mock import patch
+
+
+# ---------------------------------------------------------------------------
+# Fixtures — pb is provided by conftest.py
+# ---------------------------------------------------------------------------
+
+def _make_app(pb, tmp_path):
+    """Return a non-running Application with a blank temp config."""
+    cfg = str(tmp_path / 'ping-bulk' / 'config')
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    with open(cfg, 'w') as f:
+        f.write('')
+    with patch.object(pb, '_config_path', return_value=cfg):
+        app = pb.Application([('host', '127.0.0.1')])
+    app._monitoring_started = True  # Enable event logging
+    return app
+
+
+@pytest.fixture
+def app(pb, tmp_path):
+    """Return a non-running Application with a blank temp config."""
+    return _make_app(pb, tmp_path)
+
+
+# ===========================================================================
+# TestKeyTrie — prefix tree for multi-key sequences
+# ===========================================================================
+
+class TestKeyTrie:
+    """Test _KeyTrie prefix-tree key binding storage."""
+
+    def test_insert_and_lookup_single_key(self, pb):
+        """Insert a single-key binding and verify lookup succeeds."""
+        trie = pb._KeyTrie()
+        binding = pb._Binding([':quit'])
+        trie.insert([ord('q')], binding)
+        result, has_children = trie.lookup([ord('q')])
+        assert result is binding
+        assert not has_children
+
+    def test_lookup_missing_key(self, pb):
+        """Lookup of non-existent key returns (None, False)."""
+        trie = pb._KeyTrie()
+        result, has_children = trie.lookup([ord('x')])
+        assert result is None
+        assert not has_children
+
+    def test_insert_multi_key_sequence(self, pb):
+        """Insert a two-key sequence; verify prefix and full lookup."""
+        trie = pb._KeyTrie()
+        binding = pb._Binding([':fold za'])
+        trie.insert([ord('z'), ord('a')], binding)
+        # Prefix lookup: 'z' alone has no binding but has children
+        result_z, has_children_z = trie.lookup([ord('z')])
+        assert result_z is None
+        assert has_children_z
+        # Full sequence lookup: 'za' returns the binding
+        result_za, has_children_za = trie.lookup([ord('z'), ord('a')])
+        assert result_za is binding
+        assert not has_children_za
+
+    def test_remove_single_key(self, pb):
+        """Remove a single-key binding; verify it's gone."""
+        trie = pb._KeyTrie()
+        binding = pb._Binding([':quit'])
+        trie.insert([ord('q')], binding)
+        removed = trie.remove([ord('q')])
+        assert removed is True
+        result, _ = trie.lookup([ord('q')])
+        assert result is None
+
+    def test_remove_prunes_empty_ancestors(self, pb):
+        """Removing a leaf node prunes intermediate empty nodes."""
+        trie = pb._KeyTrie()
+        binding = pb._Binding([':fold za'])
+        trie.insert([ord('z'), ord('a')], binding)
+        removed = trie.remove([ord('z'), ord('a')])
+        assert removed is True
+        # After removal, even 'z' prefix should be gone (no children left)
+        result_z, has_children_z = trie.lookup([ord('z')])
+        assert result_z is None
+        assert not has_children_z
+
+    def test_remove_preserves_siblings(self, pb):
+        """Removing one child doesn't affect siblings."""
+        trie = pb._KeyTrie()
+        binding_a = pb._Binding([':fold za'])
+        binding_o = pb._Binding([':fold zo'])
+        trie.insert([ord('z'), ord('a')], binding_a)
+        trie.insert([ord('z'), ord('o')], binding_o)
+        # Remove 'za'
+        trie.remove([ord('z'), ord('a')])
+        # 'z' prefix still exists (has 'zo' child)
+        result_z, has_children_z = trie.lookup([ord('z')])
+        assert result_z is None
+        assert has_children_z
+        # 'zo' still accessible
+        result_zo, _ = trie.lookup([ord('z'), ord('o')])
+        assert result_zo is binding_o
+
+    def test_clear_subtree(self, pb):
+        """clear_subtree removes all children but keeps own binding."""
+        trie = pb._KeyTrie()
+        binding_z = pb._Binding([':something'])
+        binding_za = pb._Binding([':fold za'])
+        binding_zo = pb._Binding([':fold zo'])
+        # Bind 'z' and its children 'za', 'zo'
+        trie.insert([ord('z')], binding_z)
+        trie.insert([ord('z'), ord('a')], binding_za)
+        trie.insert([ord('z'), ord('o')], binding_zo)
+        # Clear subtree under 'z'
+        trie.clear_subtree([ord('z')])
+        # 'z' binding still exists
+        result_z, has_children = trie.lookup([ord('z')])
+        assert result_z is binding_z
+        assert not has_children
+        # Children are gone
+        result_za, _ = trie.lookup([ord('z'), ord('a')])
+        assert result_za is None
+
+    def test_iterate(self, pb):
+        """__iter__ yields all (keys, binding) pairs sorted by key codes."""
+        trie = pb._KeyTrie()
+        binding_q = pb._Binding([':quit'])
+        binding_za = pb._Binding([':fold za'])
+        binding_zo = pb._Binding([':fold zo'])
+        trie.insert([ord('q')], binding_q)
+        trie.insert([ord('z'), ord('a')], binding_za)
+        trie.insert([ord('z'), ord('o')], binding_zo)
+        items = list(trie)
+        assert len(items) == 3
+        # Sorted by key codes: 'q' (113), 'za' (122, 97), 'zo' (122, 111)
+        assert items[0] == ([ord('q')], binding_q)
+        assert items[1] == ([ord('z'), ord('a')], binding_za)
+        assert items[2] == ([ord('z'), ord('o')], binding_zo)
+
+    def test_iterate_empty(self, pb):
+        """Empty trie yields nothing."""
+        trie = pb._KeyTrie()
+        items = list(trie)
+        assert items == []
+
+    def test_remove_nonexistent_returns_false(self, pb):
+        """Removing a non-existent key returns False."""
+        trie = pb._KeyTrie()
+        removed = trie.remove([ord('x')])
+        assert removed is False
+
+
+# ===========================================================================
+# TestKeyNotation — parsing and formatting key notation
+# ===========================================================================
+
+class TestKeyNotation:
+    """Test _parse_key_notation() and _format_key_notation()."""
+
+    def test_parse_single_char(self, pb):
+        """'a' parses to [97]."""
+        result = pb._parse_key_notation('a')
+        assert result == [ord('a')]
+
+    def test_parse_multi_char_sequence(self, pb):
+        """'za' parses to [122, 97]."""
+        result = pb._parse_key_notation('za')
+        assert result == [ord('z'), ord('a')]
+
+    def test_parse_angle_bracket_cr(self, pb):
+        """'<CR>' parses to KEY_ENTER."""
+        result = pb._parse_key_notation('<CR>')
+        assert result == [curses.KEY_ENTER]
+
+    def test_parse_angle_bracket_esc(self, pb):
+        """'<Esc>' parses to 27."""
+        result = pb._parse_key_notation('<Esc>')
+        assert result == [27]
+
+    def test_parse_angle_bracket_space(self, pb):
+        """'<Space>' parses to 32."""
+        result = pb._parse_key_notation('<Space>')
+        assert result == [ord(' ')]
+
+    def test_parse_ctrl_letter(self, pb):
+        """'<C-x>' parses to [24]."""
+        result = pb._parse_key_notation('<C-x>')
+        assert result == [24]
+
+    def test_parse_ctrl_space(self, pb):
+        """'<C-Space>' parses to [0]."""
+        result = pb._parse_key_notation('<C-Space>')
+        assert result == [0]
+
+    def test_parse_arrows(self, pb):
+        """Arrow keys parse to correct curses constants."""
+        assert pb._parse_key_notation('<Up>') == [curses.KEY_UP]
+        assert pb._parse_key_notation('<Down>') == [curses.KEY_DOWN]
+        assert pb._parse_key_notation('<Left>') == [curses.KEY_LEFT]
+        assert pb._parse_key_notation('<Right>') == [curses.KEY_RIGHT]
+
+    def test_parse_page_keys(self, pb):
+        """<PageUp>, <PgDn> parse to curses.KEY_PPAGE, KEY_NPAGE."""
+        assert pb._parse_key_notation('<PageUp>') == [curses.KEY_PPAGE]
+        assert pb._parse_key_notation('<PgDn>') == [curses.KEY_NPAGE]
+
+    def test_parse_case_insensitive(self, pb):
+        """'<cr>' is equivalent to '<CR>'."""
+        assert pb._parse_key_notation('<cr>') == pb._parse_key_notation('<CR>')
+        assert pb._parse_key_notation('<esc>') == pb._parse_key_notation('<Esc>')
+
+    def test_parse_mixed(self, pb):
+        """'z<CR>' parses to [ord('z'), KEY_ENTER]."""
+        result = pb._parse_key_notation('z<CR>')
+        assert result == [ord('z'), curses.KEY_ENTER]
+
+    def test_parse_empty_raises(self, pb):
+        """Empty string raises ValueError."""
+        with pytest.raises(ValueError, match="empty key notation"):
+            pb._parse_key_notation('')
+
+    def test_parse_unknown_raises(self, pb):
+        """Unknown angle-bracket token raises ValueError."""
+        with pytest.raises(ValueError, match="unrecognized key notation"):
+            pb._parse_key_notation('<INVALID>')
+
+    def test_parse_unclosed_raises(self, pb):
+        """Unclosed angle bracket raises ValueError."""
+        with pytest.raises(ValueError, match="unclosed angle bracket"):
+            pb._parse_key_notation('<Up')
+
+    def test_format_single_char(self, pb):
+        """[97] formats to 'a'."""
+        result = pb._format_key_notation([ord('a')])
+        assert result == 'a'
+
+    def test_format_multi_key(self, pb):
+        """[122, 97] formats to 'za'."""
+        result = pb._format_key_notation([ord('z'), ord('a')])
+        assert result == 'za'
+
+    def test_format_special_keys(self, pb):
+        """Special keys format to angle-bracket notation."""
+        assert pb._format_key_notation([curses.KEY_ENTER]) == '<CR>'
+        assert pb._format_key_notation([27]) == '<Esc>'
+        assert pb._format_key_notation([ord(' ')]) == '<Space>'
+
+    def test_format_ctrl_letter(self, pb):
+        """[24] (Ctrl-X) formats to '<C-x>'."""
+        result = pb._format_key_notation([24])
+        assert result == '<C-x>'
+
+    def test_format_unknown_hex(self, pb):
+        """Unknown key code formats to hex notation."""
+        result = pb._format_key_notation([9999])
+        assert result == '<0x270F>'
+
+    def test_roundtrip(self, pb):
+        """Parse then format then parse should give same result."""
+        notations = ['a', 'za', '<CR>', '<Esc>', '<C-x>', '<Up>', 'z<CR>']
+        for notation in notations:
+            codes = pb._parse_key_notation(notation)
+            formatted = pb._format_key_notation(codes)
+            codes_again = pb._parse_key_notation(formatted)
+            assert codes == codes_again, f"Roundtrip failed for {notation!r}"
+
+
+# ===========================================================================
+# TestBinding — _Binding container
+# ===========================================================================
+
+class TestBinding:
+    """Test _Binding container for key binding metadata."""
+
+    def test_binding_creation(self, pb):
+        """Create a binding with commands, edit_mode, key_notation, origin."""
+        binding = pb._Binding(
+            [':set dns hostname', ':set stats down'],
+            edit_mode=True,
+            key_notation='<C-d>',
+            origin='user'
+        )
+        assert binding.commands == [':set dns hostname', ':set stats down']
+        assert binding.edit_mode is True
+        assert binding.key_notation == '<C-d>'
+        assert binding.origin == 'user'
+
+    def test_binding_default_origin(self, pb):
+        """Default origin is 'default'."""
+        binding = pb._Binding([':quit'])
+        assert binding.origin == 'default'
+
+    def test_binding_repr(self, pb):
+        """__repr__ produces readable output."""
+        binding = pb._Binding([':quit', ':clear'], edit_mode=False,
+                              key_notation='q', origin='default')
+        r = repr(binding)
+        assert 'q' in r
+        assert 'exec' in r
+        assert ':quit' in r and ':clear' in r
+
+
+# ===========================================================================
+# TestBindkeyCommand — :bindkey command
+# ===========================================================================
+
+class TestBindkeyCommand:
+    """Test :bindkey command for binding, unbinding, listing."""
+
+    def test_bindkey_bind_key(self, app, pb):
+        """':bindkey t :mux mtr' creates a binding."""
+        app._cmd_bindkey('t :mux mtr')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.lookup(keys)
+        assert binding is not None
+        assert binding.commands == [':mux mtr']
+        assert binding.origin == 'user'
+        assert binding.key_notation == 't'
+
+    def test_bindkey_unbind_key(self, app, pb):
+        """After binding, ':bindkey t' (no cmd) removes the binding."""
+        app._cmd_bindkey('t :mux mtr')
+        app._cmd_bindkey('t')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.lookup(keys)
+        assert binding is None
+        # Event log should mention unbinding
+        assert any('unbound t' in e for e in app.events)
+
+    def test_bindkey_list_empty(self, app):
+        """':bindkey' with no user bindings logs 'no user key bindings'."""
+        app.events.clear()
+        app._cmd_bindkey()
+        assert any('no user key bindings' in e for e in app.events)
+
+    def test_bindkey_list_shows_user_bindings(self, app):
+        """After binding, ':bindkey' lists it in events."""
+        app._cmd_bindkey('t :mux mtr')
+        app.events.clear()
+        app._cmd_bindkey()
+        # Should list the binding
+        assert any('t' in e and ':mux mtr' in e for e in app.events)
+
+    def test_bindkey_multi_command(self, app, pb):
+        """':bindkey t :set stats down \\; :set dns hostname' creates multi-cmd binding."""
+        app._cmd_bindkey(r't :set stats down \; :set dns hostname')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.lookup(keys)
+        assert binding is not None
+        assert binding.commands == [':set stats down', ':set dns hostname']
+
+    def test_bindkey_edit_mode(self, app, pb):
+        """':bindkey t :mux mtr %h...' sets edit_mode=True."""
+        app._cmd_bindkey('t :mux mtr %h...')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.lookup(keys)
+        assert binding is not None
+        assert binding.edit_mode is True
+        assert binding.commands == [':mux mtr %h']
+
+    def test_bindkey_overrides_default(self, app, pb):
+        """Binding 'q' to something else replaces the default :quit binding."""
+        # Default 'q' is :quit
+        keys_q = pb._parse_key_notation('q')
+        binding_before, _ = app._key_trie.lookup(keys_q)
+        assert binding_before.commands == [':quit']
+        assert binding_before.origin == 'default'
+        # Rebind 'q' to :help
+        app._cmd_bindkey('q :help')
+        binding_after, _ = app._key_trie.lookup(keys_q)
+        assert binding_after.commands == [':help']
+        assert binding_after.origin == 'user'
+
+    def test_bindkey_multi_key_sequence(self, app, pb):
+        """':bindkey gt :select first' binds 'g' then 't' sequence."""
+        app._cmd_bindkey('gt :select first')
+        keys_gt = pb._parse_key_notation('gt')
+        binding, _ = app._key_trie.lookup(keys_gt)
+        assert binding is not None
+        assert binding.commands == [':select first']
+        # 'g' alone should have no binding but children
+        keys_g = pb._parse_key_notation('g')
+        binding_g, has_children_g = app._key_trie.lookup(keys_g)
+        assert binding_g is None
+        assert has_children_g
+
+
+# ===========================================================================
+# TestDefaultBindings — verify default bindings are registered
+# ===========================================================================
+
+class TestDefaultBindings:
+    """Test that default bindings are registered correctly."""
+
+    def test_default_quit_bound(self, app, pb):
+        """'q' is bound to ':quit'."""
+        keys = pb._parse_key_notation('q')
+        binding, _ = app._key_trie.lookup(keys)
+        assert binding is not None
+        assert binding.commands == [':quit']
+        assert binding.origin == 'default'
+
+    def test_default_z_sequences(self, app, pb):
+        """'za' is bound to ':fold za'."""
+        keys = pb._parse_key_notation('za')
+        binding, _ = app._key_trie.lookup(keys)
+        assert binding is not None
+        assert binding.commands == [':fold za']
+        assert binding.origin == 'default'
+
+    def test_default_arrows(self, app, pb):
+        """'<Up>' is bound to ':select up'."""
+        keys = pb._parse_key_notation('<Up>')
+        binding, _ = app._key_trie.lookup(keys)
+        assert binding is not None
+        assert binding.commands == [':select up']
+        assert binding.origin == 'default'
+
+    def test_default_cr_bound(self, app, pb):
+        """'<CR>' is bound to ':details'."""
+        keys = pb._parse_key_notation('<CR>')
+        binding, _ = app._key_trie.lookup(keys)
+        assert binding is not None
+        assert binding.commands == [':details']
+        assert binding.origin == 'default'
+
+
+# ===========================================================================
+# TestSaveConfigBindings — config persistence
+# ===========================================================================
+
+class TestSaveConfigBindings:
+    """Test that _save_config includes/excludes bindings correctly."""
+
+    def test_saveconfig_includes_user_bindings(self, app, pb):
+        """After binding a key, _save_config output contains :bindkey ..."""
+        app._cmd_bindkey('t :mux mtr')
+        success = app._save_config()
+        assert success is True
+        cfg = pb._config_path()
+        config_text = open(cfg).read()
+        assert ':bindkey t :mux mtr' in config_text
+
+    def test_saveconfig_excludes_default_bindings(self, app, pb):
+        """Default bindings are not in save output."""
+        success = app._save_config()
+        assert success is True
+        cfg = pb._config_path()
+        config_text = open(cfg).read()
+        # Default binding like 'q :quit' should NOT be in config
+        assert ':bindkey q :quit' not in config_text
+
+    def test_saveconfig_includes_unbinds(self, app, pb):
+        """After unbinding a default key, save output contains bare :bindkey <key>."""
+        # Unbind 'q' (a default binding)
+        app._cmd_bindkey('q')
+        success = app._save_config()
+        assert success is True
+        cfg = pb._config_path()
+        config_text = open(cfg).read()
+        # Should have ':bindkey q' (without a command) to unbind it
+        lines = [line.strip() for line in config_text.splitlines()]
+        assert ':bindkey q' in lines
