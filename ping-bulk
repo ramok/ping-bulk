@@ -6890,15 +6890,25 @@ class Application:
                                ord('q'), ord('Q'), 27, 3):
                         self.details_open = False
                         self.details_monitor = None
+                        continue
                     elif key == curses.KEY_UP:
                         self.details_scroll = max(0, self.details_scroll - 1)
+                        continue
                     elif key == curses.KEY_DOWN:
                         self.details_scroll += 1
+                        continue
                     elif key == curses.KEY_PPAGE:
                         self.details_scroll = max(0, self.details_scroll - 10)
+                        continue
                     elif key == curses.KEY_NPAGE:
                         self.details_scroll += 10
-                    continue
+                        continue
+                    elif key == ord('c'):
+                        self.details_open = False
+                        self.details_monitor = None
+                        # fall through to trie dispatch so user-defined bindings fire
+                    else:
+                        continue
                 if self.cmd is not None:
                     if key != -1:
                         self._handle_cmd_key(key)
