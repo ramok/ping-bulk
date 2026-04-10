@@ -1836,6 +1836,24 @@ class _HostsParser:
         # Phase 2: split on ;, strip whitespace, strip inline comments
         result = []
         for raw in raw_lines:
+            raw_stripped = raw.strip()
+            if not raw_stripped:
+                continue
+            # Pure comment lines (# but not ## section headers) are never
+            # split on ; — the entire joined line is the comment.  This
+            # preserves the polyglot bootstrap idiom where a ; may appear
+            # inside a \-continuation-joined comment:
+            #   # \
+            #   exec cmd "$@"; \
+            #   exec fallback "$@"
+            # After joining, the result is a # line containing ";", which
+            # must remain a single comment and not have its tail split off
+            # as a spurious host entry.
+            if raw_stripped.startswith('#') and not raw_stripped.startswith('##'):
+                text, comment = _strip_inline_comment(raw_stripped)
+                if text:
+                    result.append((text, comment))
+                continue
             for segment in raw.split(';'):
                 segment = segment.strip()
                 if not segment:

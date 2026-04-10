@@ -140,6 +140,33 @@ class TestBackslashContinuation:
             ('cmd',     ':resolv 10.0.0.1 router1'),
         ], f"Normal-line parsing changed unexpectedly; got {entries!r}"
 
+    # ------------------------------------------------------------------
+    # 8. Semicolon inside continuation-joined comment is not a separator
+    # ------------------------------------------------------------------
+
+    def test_semicolon_in_continued_comment_ignored(self, pb, tmp_path):
+        """A ; that ends up inside a joined comment line must not split it.
+
+        The advanced polyglot bootstrap uses a two-branch fallback:
+            # \\
+            exec ping-bulk "$@"; \\
+            exec fallback "$@"
+
+        After \\ joining the whole thing becomes one # comment line that
+        happens to contain a semicolon.  The parser must treat the entire
+        result as a comment and not surface the text after the ; as a host.
+        """
+        content = textwrap.dedent("""\
+            # \\
+            exec ping-bulk -f "$0" "$@"; \\
+            exec ./ping-bulk -f "$0" "$@"
+            8.8.8.8
+        """)
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [('host', '8.8.8.8')], (
+            f"Semicolon inside continued comment must not produce extra entries; got {entries!r}"
+        )
+
 
 # ===========================================================================
 # TestInlineComment
