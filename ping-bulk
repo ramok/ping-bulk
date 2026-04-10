@@ -3710,8 +3710,9 @@ class Application:
     _BINDING_VAR_RE = re.compile(
         r'%\{(?P<svar>\w+):(?P<sep>[^}]*)\}|%(?P<var>[a-zA-Z%])')
 
-    # Matches %{var?template} where template contains no literal '}'
-    _COND_RE = re.compile(r'%\{(\w+)\?([^}]*)\}')
+    # Matches %{var?template} where template may contain one level of nested {…}
+    # (to support patterns like %{j?-J %{j:,}}).
+    _COND_RE = re.compile(r'%\{(\w+)\?([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}')
 
     def _expand_conditional(self, s, ctx):
         """Expand %{var?template} blocks before the main variable pass.

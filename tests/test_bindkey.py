@@ -626,3 +626,169 @@ class TestBindingContext:
         cmds, warning = app._expand_binding_commands(binding.commands)
         assert warning is None
         assert cmds == [':mux mtr 10.1.2.3']
+
+    # ── %r variable ──────────────────────────────────────────────────────────
+
+    def test_r_uses_host_for_plain_monitor(self, app, pb):
+        """%r falls back to host when no :resolv static mapping."""
+        m = self._make_ping_monitor(pb, 'myhost.example.com')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['r'] == 'myhost.example.com'
+
+    def test_r_uses_ip_when_resolv_static(self, app, pb):
+        """%r returns the resolved_ip when resolv_static is set."""
+        m = self._make_ping_monitor(pb, 'label', resolved_ip='10.0.0.1',
+                                    resolv_static=True)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['r'] == '10.0.0.1'
+
+    def test_r_not_affected_by_dns_resolved(self, app, pb):
+        """%r stays as host when resolved_ip comes from DNS (not :resolv)."""
+        m = self._make_ping_monitor(pb, 'myhost.local', resolved_ip='192.168.1.5',
+                                    resolv_static=False)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['r'] == 'myhost.local'
+
+    # ── %d variable ──────────────────────────────────────────────────────────
+
+    def test_d_set_for_ssh_monitor(self, app, pb):
+        """%d is the SSH destination for SshPingMonitor entries."""
+        m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], ping_host='localhost')
+        m.resolved_ip = None
+        m.resolv_static = False
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['d'] == 'user@remote'
+
+    def test_d_not_set_for_plain_monitor(self, app, pb):
+        """%d is absent for plain PingMonitor entries."""
+        m = self._make_ping_monitor(pb, 'myhost.local')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert 'd' not in ctx
+
+    # ── %j variable ──────────────────────────────────────────────────────────
+
+    def test_j_is_jump_host_list(self, app, pb):
+        """%j holds jump host list from -J flag."""
+        m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], ping_host='localhost')
+        m.resolved_ip = None
+        m.resolv_static = False
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['j'] == ['bastion']
+
+    def test_j_not_set_when_no_jumps(self, app, pb):
+        """%j is absent when SshPingMonitor has no -J flags."""
+        m = pb.SshPingMonitor(['user@remote'], ping_host='localhost')
+        m.resolved_ip = None
+        m.resolv_static = False
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert 'j' not in ctx
+
+    def test_j_multiple_jump_hosts(self, app, pb):
+        """%j holds multiple comma-separated jump hosts from -J flag."""
+        m = pb.SshPingMonitor(['-J', 'gw1,gw2', 'user@remote'], ping_host='localhost')
+        m.resolved_ip = None
+        m.resolv_static = False
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['j'] == ['gw1', 'gw2']
+
+
+
+# ===========================================================================
+# TestConditionalExpansion — %{var?template} syntax
+# ===========================================================================
+
+class TestConditionalExpansion:
+    """Test %{var?template} conditional expansion."""
+
+    def _make_ping_entry(self, pb, app, host, resolved_ip=None):
+        m = pb.PingMonitor(host)
+        m.resolved_ip = resolved_ip
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        return m
+
+    def _make_ssh_entry(self, pb, app, ssh_args, ping_host='localhost'):
+        m = pb.SshPingMonitor(ssh_args, ping_host=ping_host)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        return m
+
+    def _expand(self, app, command):
+        """Expand a single command string and return (result, warning)."""
+        cmds, warning = app._expand_binding_commands([command])
+        return cmds[0], warning
+
+    def test_conditional_expands_when_var_set(self, app, pb):
+        """%{j?-J %j} expands to '-J bastion' when j is present."""
+        self._make_ssh_entry(pb, app, ['-J', 'bastion', 'user@remote'], ping_host='localhost')
+        result, warning = self._expand(app, '%{j?-J %j}')
+        assert warning is None
+        assert result == '-J bastion'
+
+    def test_conditional_empty_when_var_missing(self, app, pb):
+        """%{j?-J %j} expands to '' when j is absent (plain PingMonitor)."""
+        self._make_ping_entry(pb, app, 'myhost.local')
+        result, warning = self._expand(app, '%{j?-J %j}')
+        assert warning is None
+        assert result == ''
+
+    def test_conditional_empty_when_inner_var_missing(self, app, pb):
+        """%{j?-J %x} expands to '' when j is present but %x is not in ctx."""
+        self._make_ssh_entry(pb, app, ['-J', 'bastion', 'user@remote'], ping_host='localhost')
+        result, warning = self._expand(app, '%{j?-J %x}')
+        assert warning is None
+        assert result == ''
+
+    def test_conditional_multiple_in_command(self, app, pb):
+        """%{j?-J %j} %h expands with both conditional and regular vars."""
+        m = self._make_ssh_entry(pb, app, ['-J', 'bastion', 'user@remote'], ping_host='localhost')
+        m.host = 'myhost'
+        result, warning = self._expand(app, '%{j?-J %j} %h')
+        assert warning is None
+        assert result == '-J bastion myhost'
+
+    def test_conditional_wraps_literal_text(self, app, pb):
+        """%{h?host=%h} expands to 'host=myhost' when h is present."""
+        self._make_ping_entry(pb, app, 'myhost')
+        result, warning = self._expand(app, '%{h?host=%h}')
+        assert warning is None
+        assert result == 'host=myhost'
+
+    def test_conditional_var_present_but_inner_missing(self, app, pb):
+        """%{h?host=%h path=%x} → '' because %x is missing."""
+        self._make_ping_entry(pb, app, 'myhost')
+        result, warning = self._expand(app, '%{h?host=%h path=%x}')
+        assert warning is None
+        assert result == ''
+
+    def test_no_conditional_passthrough(self, app, pb):
+        """Commands without %{?} still expand normally."""
+        self._make_ping_entry(pb, app, 'myhost', resolved_ip='10.0.0.1')
+        result, warning = self._expand(app, 'ping %h %i')
+        assert warning is None
+        assert result == 'ping myhost 10.0.0.1'
+
+    def test_conditional_sep_expansion_in_template(self, app, pb):
+        """%{j?-J %{j:,}} works when j is a list (multi-hop jumps)."""
+        m = self._make_ssh_entry(pb, app, ['bastion'], ping_host='localhost')
+        # Simulate companion task: j is a list of jump hosts
+        ctx = app._binding_context()
+        ctx['j'] = ['bastion', 'gw2']
+        result = app._expand_conditional('%{j?-J %{j:,}}', ctx)
+        assert result == '-J bastion,gw2'
