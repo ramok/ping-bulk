@@ -712,6 +712,62 @@ class TestForLoopMixed:
             f"Expected single host; got {entries!r}"
         )
 
+    def test_for_pattern_let_var_expansion(self, pb, tmp_path):
+        """:let variable in :for pattern is expanded before brace expansion.
+
+        Regression test: previously the :for branch skipped variable expansion,
+        so ':let x {1..3}; :for host-$x' would iterate once over the literal
+        string 'host-{1..3}' instead of three times.
+        """
+        content = """\
+            :let x {1..3}
+            :for host-$x
+            node$1
+            :done
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        host_entries = [v for k, v in entries if k == 'host']
+        assert host_entries == ['node1', 'node2', 'node3'], (
+            f"Expected 3 hosts from let-expanded :for pattern; got {host_entries!r}"
+        )
+
+    def test_for_pattern_let_var_dash_range(self, pb, tmp_path):
+        """:let variable with dash-range syntax {n-m} expands correctly in :for.
+
+        Regression test for the sensor-station use-case: ':let sh_num {1-4}'
+        then ':for sensor-hub-$sh_num' with body 'sh$1-router' should produce
+        four hosts (sh1-router through sh4-router).
+        """
+        content = """\
+            :let sh_num {1-4}
+            :for sensor-hub-$sh_num
+            sh$1-router
+            :done
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        host_entries = [v for k, v in entries if k == 'host']
+        assert host_entries == [
+            'sh1-router', 'sh2-router', 'sh3-router', 'sh4-router',
+        ], (
+            f"Expected 4 hosts from dash-range let-expanded :for pattern; "
+            f"got {host_entries!r}"
+        )
+
+    def test_for_pattern_let_var_multiple_bodies(self, pb, tmp_path):
+        """Multiple hosts in :for body all get back-reference substitution."""
+        content = """\
+            :let nums {1,2}
+            :for hub-$nums
+            $1-router
+            $1-switch
+            :done
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        host_entries = [v for k, v in entries if k == 'host']
+        assert host_entries == [
+            '1-router', '1-switch', '2-router', '2-switch',
+        ], f"Unexpected hosts: {host_entries!r}"
+
     def test_ssh_host_and_plain_host_not_cross_deduped(self, pb, tmp_path):
         """The same hostname used as a plain host and as an SSH ping-target
         are NOT considered duplicates (different dedup keys)."""

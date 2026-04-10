@@ -2202,7 +2202,11 @@ class _HostsParser:
                 if cmd_word == 'for':
                     body, for_errors, i = self._collect_for_body(lines, i)
                     entries.extend(for_errors)
-                    entries.extend(self._process_for(args, body, ssh_args))
+                    # Expand variables in the :for pattern so that
+                    # :let-defined names (e.g. $sh_num) are substituted
+                    # before brace-expansion and back-reference extraction.
+                    expanded_args = _expand_let_vars(args, self.variables)
+                    entries.extend(self._process_for(expanded_args, body, ssh_args))
                     continue
 
                 # Variable-expand the whole directive line, then re-dispatch.

@@ -518,31 +518,45 @@ class TestDefaultBindings:
 class TestSaveConfigBindings:
     """Test that _save_config includes/excludes bindings correctly."""
 
-    def test_saveconfig_includes_user_bindings(self, app, pb):
+    @pytest.fixture
+    def app_with_cfg(self, pb, tmp_path):
+        """Return (app, cfg_path) with _config_path patched for the whole test."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        open(cfg, 'w').close()
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app = pb.Application([('host', '127.0.0.1')])
+            app._monitoring_started = True
+            yield app, cfg
+
+    def test_saveconfig_includes_user_bindings(self, app_with_cfg, pb):
         """After binding a key, _save_config output contains :bindkey ..."""
+        app, cfg = app_with_cfg
         app._cmd_bindkey('t :mux mtr')
-        success = app._save_config()
+        with patch.object(pb, '_config_path', return_value=cfg):
+            success = app._save_config()
         assert success is True
-        cfg = pb._config_path()
         config_text = open(cfg).read()
         assert ':bindkey t :mux mtr' in config_text
 
-    def test_saveconfig_excludes_default_bindings(self, app, pb):
+    def test_saveconfig_excludes_default_bindings(self, app_with_cfg, pb):
         """Default bindings are not in save output."""
-        success = app._save_config()
+        app, cfg = app_with_cfg
+        with patch.object(pb, '_config_path', return_value=cfg):
+            success = app._save_config()
         assert success is True
-        cfg = pb._config_path()
         config_text = open(cfg).read()
         # Default binding like 'q :quit' should NOT be in config
         assert ':bindkey q :quit' not in config_text
 
-    def test_saveconfig_includes_unbinds(self, app, pb):
+    def test_saveconfig_includes_unbinds(self, app_with_cfg, pb):
         """After unbinding a default key, save output contains bare :bindkey <key>."""
+        app, cfg = app_with_cfg
         # Unbind 'q' (a default binding)
         app._cmd_bindkey('q')
-        success = app._save_config()
+        with patch.object(pb, '_config_path', return_value=cfg):
+            success = app._save_config()
         assert success is True
-        cfg = pb._config_path()
         config_text = open(cfg).read()
         # Should have ':bindkey q' (without a command) to unbind it
         lines = [line.strip() for line in config_text.splitlines()]
