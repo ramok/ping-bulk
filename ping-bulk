@@ -5634,19 +5634,12 @@ class Application:
             # Reuse the existing SSH args (jump hosts, user, etc.) from the monitor
             ssh_parts = list(monitor._original_ssh_args)
         else:
-            # Plain PingMonitor or PortMonitor
+            # Plain PingMonitor or PortMonitor: prefer resolved_ip so that
+            # display-only labels (:resolv) and DNS-resolved names both work.
             if isinstance(monitor, PortMonitor):
-                if monitor.resolv_static and monitor.resolved_ip:
-                    target = monitor.resolved_ip
-                else:
-                    target = monitor._ping_host
+                target = monitor.resolved_ip or monitor._ping_host
             else:
-                # Use the static-resolved IP when a :resolv mapping is in place;
-                # the display name (monitor.host) may not be DNS-resolvable by SSH.
-                if monitor.resolv_static and monitor.resolved_ip:
-                    target = monitor.resolved_ip
-                else:
-                    target = monitor.host
+                target = monitor.resolved_ip or monitor.host
             ssh_parts = [target]
 
         # Append connect-options flags after the target so the user sees

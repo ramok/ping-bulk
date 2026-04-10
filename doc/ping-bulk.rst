@@ -239,7 +239,7 @@ Key bindings
     the command line is pre-filled but not executed, letting the user
     review and modify it before pressing Enter::
 
-        :bindkey t :mux mtr %h...
+        :bindkey t :mux mtr %i...
 
 ``:bindkey <key>``
     Unbind *key*.  If the key had a default binding, the default is
@@ -296,7 +296,7 @@ the keypress is ignored and a warning is shown in the event log.
 
 Examples::
 
-    :bindkey t :mux mtr %h
+    :bindkey t :mux mtr %i
     :bindkey x :set stats down \; :set dns hostname
     :bindkey gt :select first
     :bindkey <C-p> :pause
@@ -935,7 +935,7 @@ Example::
     :set sort status
     :set ping-view scaled
     :log /var/log/ping-bulk.log
-    :bindkey t :mux mtr %h
+    :bindkey t :mux mtr %i
     :bindkey x :set stats down \; :set dns hostname
 
 

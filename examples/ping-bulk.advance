@@ -193,9 +193,9 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # Custom separator: %{H:,} = comma-separated,  %{H:\n} = newline-separated.
 #
 # Append '...' to pre-fill the command line without executing (edit mode):
-#   :bindkey t :mux mtr %h...     — lets user review before Enter
+#   :bindkey t :mux mtr %i...     — lets user review before Enter
 
-:bindkey t :mux mtr %h
+:bindkey t :mux mtr %i
 :bindkey x :set stats down \; :set dns hostname
 :bindkey <C-p> :pause
 

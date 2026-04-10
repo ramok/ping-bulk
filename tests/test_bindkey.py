@@ -561,3 +561,68 @@ class TestSaveConfigBindings:
         # Should have ':bindkey q' (without a command) to unbind it
         lines = [line.strip() for line in config_text.splitlines()]
         assert ':bindkey q' in lines
+
+
+# ===========================================================================
+# TestBindingContext — _binding_context() and %h resolv_static behaviour
+# ===========================================================================
+
+class TestBindingContext:
+    """Test that _binding_context() builds the correct variable dict,
+    especially the %h resolv_static → IP substitution."""
+
+    def _make_ping_monitor(self, pb, host, resolved_ip=None, resolv_static=False):
+        m = pb.PingMonitor(host)
+        m.resolved_ip = resolved_ip
+        m.resolv_static = resolv_static
+        return m
+
+    def test_h_uses_host_always(self, app, pb):
+        """%h always returns entry.host regardless of :resolv mapping."""
+        m = self._make_ping_monitor(pb, 'sensor-hub-1', resolved_ip='10.0.0.1',
+                                    resolv_static=True)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['h'] == 'sensor-hub-1', (
+            "%h should always be the display name; use %i for the IP"
+        )
+
+    def test_h_uses_host_without_resolv(self, app, pb):
+        """%h returns entry.host when no :resolv mapping and no resolved_ip."""
+        m = self._make_ping_monitor(pb, 'myhost.local')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx['h'] == 'myhost.local'
+
+    def test_i_set_when_resolv_static(self, app, pb):
+        """%i is the resolved_ip when resolv_static; use %i for network tools."""
+        m = self._make_ping_monitor(pb, 'sensor-hub-1', resolved_ip='10.0.0.1',
+                                    resolv_static=True)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx.get('i') == '10.0.0.1'
+
+    def test_i_set_when_dns_resolved(self, app, pb):
+        """%i is set for DNS-resolved IPs too (not only :resolv static)."""
+        m = self._make_ping_monitor(pb, 'myhost.local', resolved_ip='192.168.1.5',
+                                    resolv_static=False)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = app._binding_context()
+        assert ctx.get('i') == '192.168.1.5'
+
+    def test_i_expansion_for_mtr(self, app, pb):
+        """End-to-end: ':mux mtr %i' expands to resolved_ip (replaces old %h usage)."""
+        m = self._make_ping_monitor(pb, 'label-only', resolved_ip='10.1.2.3',
+                                    resolv_static=True)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        app._cmd_bindkey('t :mux mtr %i')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        cmds, warning = app._expand_binding_commands(binding.commands)
+        assert warning is None
+        assert cmds == [':mux mtr 10.1.2.3']
