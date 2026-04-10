@@ -1,16 +1,10 @@
-"""Unit tests for :mux, :connect-options, _build_connect_cmd, and related features.
+"""Unit tests for :mux and related features.
 
 Covers:
-  - _cmd_connect_options: add rule, disable rule ('-'), remove pattern, clear all
-  - _build_connect_cmd: no rules, matching opts rule, matching disable rule,
-    SshPingMonitor reuses ssh_args, kiosk mode injects isolation flags
   - _cmd_mux: kiosk whitelist (ssh/login allowed, others blocked), direction parsing,
     no-backend error, invalid direction
   - _cmd_mux_split: valid values, cycling, invalid value
-  - _connect_to_highlighted: no selection, section highlighted, disabled host,
-    no backend → prompt
   - _open_cmd_prefill: opens cmd mode with correct pre-fill
-  - :connect-options in parse_hosts_file: emitted as ('cmd', ...) and dispatched
 """
 
 import os
@@ -35,13 +29,6 @@ def _make_app(pb, tmp_path, entries=None):
     return app
 
 
-def _make_app_with_rules(pb, tmp_path, rules):
-    """Return app pre-loaded with connect_rules list."""
-    app = _make_app(pb, tmp_path)
-    app.connect_rules = list(rules)
-    return app
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -49,128 +36,6 @@ def _make_app_with_rules(pb, tmp_path, rules):
 @pytest.fixture
 def app(pb, tmp_path):
     return _make_app(pb, tmp_path)
-
-
-# ===========================================================================
-# _cmd_connect_options
-# ===========================================================================
-
-class TestCmdConnectOptions:
-
-    def test_add_rule(self, app):
-        app._cmd_connect_options('*-router -l admin')
-        assert app.connect_rules == [('*-router', '-l admin')]
-
-    def test_add_disable_rule(self, app):
-        """'-' as opts stores None (disabled)."""
-        app._cmd_connect_options('1.1.1.1 -')
-        assert app.connect_rules == [('1.1.1.1', None)]
-
-    def test_add_multiple_rules(self, app):
-        app._cmd_connect_options('*-router -l admin')
-        app._cmd_connect_options('1.1.1.1 -')
-        assert app.connect_rules == [('*-router', '-l admin'), ('1.1.1.1', None)]
-
-    def test_replace_existing_pattern(self, app):
-        """Adding a rule for a pattern that already exists replaces it."""
-        app._cmd_connect_options('*-router -l admin')
-        app._cmd_connect_options('*-router -l root')
-        assert app.connect_rules == [('*-router', '-l root')]
-
-    def test_remove_pattern(self, app):
-        """Single-arg form removes that pattern's rule."""
-        app._cmd_connect_options('*-router -l admin')
-        app._cmd_connect_options('1.1.1.1 -')
-        app._cmd_connect_options('1.1.1.1')  # remove
-        assert app.connect_rules == [('*-router', '-l admin')]
-
-    def test_clear_all(self, app):
-        """No-arg form clears all rules."""
-        app._cmd_connect_options('*-router -l admin')
-        app._cmd_connect_options('1.1.1.1 -')
-        app._cmd_connect_options('')
-        assert app.connect_rules == []
-
-    def test_clear_whitespace(self, app):
-        """Whitespace-only arg also clears all rules."""
-        app._cmd_connect_options('*-router -l admin')
-        app._cmd_connect_options('   ')
-        assert app.connect_rules == []
-
-
-# ===========================================================================
-# _build_connect_cmd
-# ===========================================================================
-
-class TestBuildConnectCmd:
-
-    def test_no_rules_returns_plain_host(self, app):
-        monitor = app.entries[0]  # 127.0.0.1
-        disabled, cmd = app._build_connect_cmd(monitor)
-        assert not disabled
-        assert cmd == ['ssh', '127.0.0.1']
-
-    def test_matching_opts_rule(self, app):
-        app.connect_rules = [('127.*', '-l admin')]
-        monitor = app.entries[0]
-        disabled, cmd = app._build_connect_cmd(monitor)
-        assert not disabled
-        assert cmd == ['ssh', '127.0.0.1', '-l', 'admin']
-
-    def test_matching_disable_rule(self, app):
-        app.connect_rules = [('127.*', None)]
-        monitor = app.entries[0]
-        disabled, cmd = app._build_connect_cmd(monitor)
-        assert disabled
-        assert cmd == []
-
-    def test_last_match_wins_enable_after_disable(self, app):
-        """Enable rule after disable rule → not disabled."""
-        app.connect_rules = [('127.*', None), ('127.0.0.1', '-l ops')]
-        monitor = app.entries[0]
-        disabled, cmd = app._build_connect_cmd(monitor)
-        assert not disabled
-        assert '-l' in cmd
-
-    def test_last_match_wins_disable_after_enable(self, app):
-        """Disable rule after enable rule → disabled."""
-        app.connect_rules = [('127.0.0.1', '-l ops'), ('127.*', None)]
-        monitor = app.entries[0]
-        disabled, cmd = app._build_connect_cmd(monitor)
-        assert disabled
-
-    def test_no_match_returns_plain_host(self, app):
-        app.connect_rules = [('10.*', '-l admin')]
-        monitor = app.entries[0]
-        disabled, cmd = app._build_connect_cmd(monitor)
-        assert not disabled
-        assert cmd == ['ssh', '127.0.0.1']
-
-    def test_kiosk_mode_injects_isolation_flags(self, app):
-        """_build_connect_cmd returns a clean command in kiosk mode; flags are
-        injected later by _cmd_mux so the user cannot edit them."""
-        app.kiosk_mode = True
-        monitor = app.entries[0]
-        disabled, cmd = app._build_connect_cmd(monitor)
-        assert not disabled
-        # No kiosk flags in the returned (user-editable) command
-        assert '-F' not in cmd
-        assert 'IdentityFile=none' not in cmd
-        # Host still present
-        assert '127.0.0.1' in cmd
-
-    def test_kiosk_mode_with_matching_opts(self, app):
-        """connect-options follow the host; kiosk flags are NOT in the prefill."""
-        app.kiosk_mode = True
-        app.connect_rules = [('127.*', '-l admin')]
-        monitor = app.entries[0]
-        disabled, cmd = app._build_connect_cmd(monitor)
-        assert not disabled
-        # -l admin follows the host; no kiosk isolation flags
-        host_idx = cmd.index('127.0.0.1')
-        l_idx = cmd.index('-l')
-        assert host_idx < l_idx
-        assert '-F' not in cmd
 
 
 # ===========================================================================
@@ -354,106 +219,6 @@ class TestOpenCmdPrefill:
         app._open_cmd_prefill('')
         assert app.cmd['chars'] == []
         assert app.cmd['cursor'] == 0
-
-
-# ===========================================================================
-# _connect_to_highlighted
-# ===========================================================================
-
-class TestConnectToHighlighted:
-
-    def test_no_selection_logs_message(self, app):
-        app.highlighted_index = None
-        before = len(app.events)
-        app._connect_to_highlighted()
-        assert len(app.events) > before
-
-    def test_section_highlighted_logs_message(self, pb, tmp_path):
-        """Highlighting a section header should not open cmd mode."""
-        app = _make_app(pb, tmp_path, entries=[
-            ('section', 'Group', 1, False),
-            ('host', '10.0.0.1'),
-        ])
-        app.highlighted_index = 0  # SectionLabel
-        before = len(app.events)
-        app._connect_to_highlighted()
-        assert len(app.events) > before
-        assert app.cmd is None
-
-    def test_disabled_host_logs_message(self, pb, tmp_path):
-        """Connect-disabled host should flash a message, not open cmd mode."""
-        app = _make_app(pb, tmp_path, entries=[('host', '1.1.1.1')])
-        app.connect_rules = [('1.1.1.1', None)]
-        app.highlighted_index = 0
-        before = len(app.events)
-        app._connect_to_highlighted()
-        assert len(app.events) > before
-        assert app.cmd is None
-
-    def test_no_backend_opens_prompt(self, pb, tmp_path):
-        """When not in a multiplexer, a mux_relaunch prompt is opened."""
-        app = _make_app(pb, tmp_path)
-        app.highlighted_index = 0
-        mock_none = MagicMock()
-        mock_none.is_inside.return_value = False
-        mock_none.available.return_value = False
-        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_none, 'screen': mock_none,
-                                            'terminal': mock_none}):
-            app._connect_to_highlighted()
-        assert app.prompt is not None
-        assert app.prompt['type'] == 'mux_relaunch'
-
-    def test_connected_host_opens_cmd_prefill(self, pb, tmp_path):
-        """When backend is available, cmd mode opens with ssh prefill."""
-        app = _make_app(pb, tmp_path)
-        app.highlighted_index = 0
-        mock_backend = MagicMock()
-        mock_backend.is_inside.return_value = True
-        mock_backend.available.return_value = True
-        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
-            app._connect_to_highlighted()
-        assert app.cmd is not None
-        prefill = ''.join(app.cmd['chars'])
-        assert prefill.startswith('mux ssh')
-        assert '127.0.0.1' in prefill
-
-    def test_connect_options_opts_in_prefill(self, pb, tmp_path):
-        """connect-options SSH flags appear in the pre-filled command."""
-        app = _make_app(pb, tmp_path)
-        app.connect_rules = [('127.*', '-l admin')]
-        app.highlighted_index = 0
-        mock_backend = MagicMock()
-        mock_backend.is_inside.return_value = True
-        mock_backend.available.return_value = True
-        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
-            app._connect_to_highlighted()
-        prefill = ''.join(app.cmd['chars'])
-        assert '-l' in prefill
-        assert 'admin' in prefill
-
-
-# ===========================================================================
-# :connect-options in parse_hosts_file → dispatched at init
-# ===========================================================================
-
-class TestConnectOptionsInHostsFile:
-
-    def test_parsed_and_applied(self, pb, tmp_path):
-        """':connect-options' in hosts file is dispatched at Application init."""
-        hosts_file = tmp_path / 'hosts.txt'
-        hosts_file.write_text(
-            ':connect-options *-router -l admin\n'
-            ':connect-options 1.1.1.1 -\n'
-            '127.0.0.1\n'
-        )
-        cfg = str(tmp_path / 'ping-bulk' / 'config')
-        os.makedirs(os.path.dirname(cfg), exist_ok=True)
-        open(cfg, 'w').close()
-        with patch.object(pb, '_config_path', return_value=cfg):
-            entries = pb.parse_hosts_file(str(hosts_file))
-            app = pb.Application(entries)
-        assert ('*-router', '-l admin') in app.connect_rules
-        assert ('1.1.1.1', None) in app.connect_rules
 
 
 # ===========================================================================

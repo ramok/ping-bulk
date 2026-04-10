@@ -95,8 +95,8 @@ class TestProgOptions:
         text = open(cfg).read()
         assert ':prog-options ssh kiosk-* --disable' in text
 
-    def test_saveconfig_no_connect_options(self, app, pb, tmp_path):
-        """:connect-options is NOT written by _save_config."""
+    def test_saveconfig_only_prog_options(self, app, pb, tmp_path):
+        """_save_config writes :prog-options rules and nothing else for options."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         os.makedirs(os.path.dirname(cfg), exist_ok=True)
         open(cfg, 'w').close()
@@ -104,7 +104,7 @@ class TestProgOptions:
         with patch.object(pb, '_config_path', return_value=cfg):
             app._save_config()
         text = open(cfg).read()
-        assert ':connect-options' not in text
+        assert ':prog-options ssh *.internal' in text
 
     def test_roundtrip_options_rule(self, pb, tmp_path):
         """save → load round-trip preserves :prog-options rule with options."""

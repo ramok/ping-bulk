@@ -499,13 +499,10 @@ _FULL_HELP = [
     "-DIVIDER-",
     "  SSH connect  (requires tmux or screen)",
     "  [c]            connect to highlighted host via SSH in a new pane/window",
-    "                 pre-fills :mux ssh <host> \\[opts from :connect-options]",
+    "                 pre-fills :mux ssh <host> \\[opts from :prog-options ssh]",
     "  :mux \\[-v|-h|-w] \\[cmd]  run cmd in split pane; no cmd = relaunch self in mux",
     "  :tmux / :screen        same as :mux; name hints at preferred backend",
     "  :term / :terminal      same as :mux but forces X/Wayland terminal window",
-    "  :connect-options <pat> <ssh-opts>  set SSH flags for hosts matching glob",
-    "  :connect-options <pat> -           disable connect for matching hosts",
-    "  :connect-options       (no args)   clear all rules",
     "  :set mux-split v|h|window          default split direction",
     "  :set terminal auto|xterm             X terminal emulator for :term",
     "-DIVIDER-",
@@ -2540,8 +2537,6 @@ CMD_REGISTRY = [
            '[-v|-h|-w] [command...]', 'run command in tmux/screen pane; no command = relaunch self (-v below, -h right, -w window)'),
     CmdDef(['term', 'terminal', 'xterm'], '_cmd_mux', None,
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
-    CmdDef(['connect-options'],  '_cmd_connect_options', None,
-           '<glob> <ssh-opts|->', 'set SSH flags for matching hosts; - disables connect'),
     CmdDef(['prog-options'],     '_cmd_prog_options', None,
            '<prog> <glob> <opts>', 'per-program options for :mux'),
     CmdDef(['edit'],             '_cmd_edit',       None,
@@ -2554,8 +2549,6 @@ CMD_REGISTRY = [
            '[up|down|first|last|none]', 'navigate or clear host selection'),
     CmdDef(['details'],          '_cmd_details',    None,
            '',                    'show detailed stats for highlighted host'),
-    CmdDef(['connect'],          '_cmd_connect',    None,
-           '',                    'SSH connect to highlighted host'),
     CmdDef(['fold'],             '_cmd_fold',
            ['toggle', 'toggle-recursive', 'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'],
            '<action>',            'fold action (toggle, za, zO, zR, zM, …)'),
@@ -2853,7 +2846,6 @@ class Application:
         self.highlighted_index = None  # None = no selection; int = index in self.entries
         self.log_file = None        # path to append event log, or None
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
-        self.connect_rules: list = []  # [(glob_pattern, ssh_opts | None), ...]; None = disabled
         self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
         self._mux_from_binding = False  # True while executing commands from a key binding
         self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
@@ -3549,10 +3541,6 @@ class Application:
                 self.details_open = True
                 self.details_monitor = entry
                 self.details_scroll = 0
-
-    def _cmd_connect(self, args=''):
-        """SSH connect to highlighted host."""
-        self._connect_to_highlighted()
 
     def _cmd_fold(self, args=''):
         """Execute a fold action: toggle, toggle-recursive, or z-action name."""
@@ -4381,7 +4369,9 @@ class Application:
                         hist_suffix += " [↑↓/jk navigate] [ENTER details] [p pause host] [ESC clear]"
                         # Show connect hint if connect is not disabled for this host
                         if isinstance(entry, Monitor):
-                            disabled, _ = self._build_connect_cmd(entry)
+                            disabled, _ = self._match_prog_options(
+                                'ssh', entry.host,
+                                getattr(entry, 'resolved_hostname', None) or '')
                             if not disabled:
                                 hist_suffix += " [c connect]"
                 if any(isinstance(e, SectionLabel) for e in self.entries):
@@ -5700,52 +5690,6 @@ class Application:
         except RuntimeError as e:
             self.add_event("cmd", f"mux: {e}")
 
-    def _build_connect_cmd(self, monitor) -> tuple:
-        """Return (disabled: bool, ssh_cmd: list) for the 'c' hotkey.
-
-        Iterates connect_rules with fnmatch (last-match wins).  Returns
-        (True, []) if a disable rule matched, or (False, ssh_cmd_tokens) otherwise.
-        """
-        host = getattr(monitor, 'host', '')
-        resolved = getattr(monitor, 'resolved_hostname', '') or ''
-
-        matched_opts = ''
-        matched_disabled = False
-        for pattern, opts in self.connect_rules:
-            if fnmatch.fnmatch(host, pattern) or fnmatch.fnmatch(resolved, pattern):
-                if opts is None:
-                    matched_disabled = True
-                else:
-                    matched_disabled = False
-                    matched_opts = opts
-
-        if matched_disabled:
-            return True, []
-
-        # Build ssh command tokens
-        if isinstance(monitor, SshPingMonitor):
-            # Reuse the existing SSH args (jump hosts, user, etc.) from the monitor
-            ssh_parts = list(monitor._original_ssh_args)
-        else:
-            # Plain PingMonitor or PortMonitor: prefer resolved_ip so that
-            # display-only labels (:resolv) and DNS-resolved names both work.
-            if isinstance(monitor, PortMonitor):
-                target = monitor.resolved_ip or monitor._ping_host
-            else:
-                target = monitor.resolved_ip or monitor.host
-            ssh_parts = [target]
-
-        # Append connect-options flags after the target so the user sees
-        # the destination first and can easily edit the options.
-        if matched_opts:
-            try:
-                opt_tokens = shlex.split(matched_opts)
-            except ValueError:
-                opt_tokens = matched_opts.split()
-            ssh_parts = ssh_parts + opt_tokens
-
-        return False, ['ssh'] + ssh_parts
-
     def _open_cmd_prefill(self, text: str):
         """Open command mode with the given text pre-filled and cursor at the end."""
         self.cmd = {
@@ -5755,83 +5699,6 @@ class Application:
             'saved_line': '',
             'completions': [], 'comp_idx': -1, 'comp_prefix': '',
         }
-
-    def _connect_to_highlighted(self):
-        """Handle the 'c' hotkey: build an SSH command for the highlighted host
-        and open command mode pre-filled with 'mux ssh <cmd>'.
-
-        If not inside any multiplexer and not in kiosk mode, offer to relaunch.
-        If the host has a disable rule in connect_rules, flash a message instead.
-        """
-        if self.highlighted_index is None or \
-                not (0 <= self.highlighted_index < len(self.entries)):
-            self.add_event("cmd", "c: select a host first (\u2191/\u2193 to navigate)")
-            return
-
-        entry = self.entries[self.highlighted_index]
-        if not isinstance(entry, Monitor):
-            self.add_event("cmd", "c: select a host line (not a section header)")
-            return
-
-        backend = _resolve_mux_backend()
-        if backend is None:
-            if self.kiosk_mode:
-                self.add_event("cmd", "c: no terminal multiplexer (install tmux)")
-                return
-            # Build the SSH command now so it can be restored after relaunch.
-            disabled, ssh_cmd = self._build_connect_cmd(entry)
-            pending_cmd = ('mux ' + shlex.join(ssh_cmd)) if not disabled else None
-            self.prompt = {
-                'type': 'mux_relaunch', 'chars': [],
-                'pending_host': entry.host,
-                'pending_cmd': pending_cmd,
-            }
-            return
-
-        disabled, ssh_cmd = self._build_connect_cmd(entry)
-        if disabled:
-            self.add_event("cmd", f"c: connect disabled for {entry.host}")
-            return
-
-        prefill = 'mux ' + shlex.join(ssh_cmd)
-        self._open_cmd_prefill(prefill)
-
-    # ── :connect-options ────────────────────────────────────────────────────
-
-    def _cmd_connect_options(self, args=''):
-        """Manage glob-based SSH connect rules.
-
-        :connect-options <glob> <ssh-opts>  — add/replace rule (opts='-' to disable)
-        :connect-options <glob>             — remove rule for that pattern
-        :connect-options                    — clear all rules
-        """
-        if not args.strip():
-            self.connect_rules.clear()
-            if self._monitoring_started:
-                self.add_event("cmd", "connect-options: all rules cleared")
-            return
-
-        parts = args.split(None, 1)
-        pattern = parts[0]
-        if len(parts) == 1:
-            # Remove the rule for this pattern
-            before = len(self.connect_rules)
-            self.connect_rules = [(p, o) for p, o in self.connect_rules if p != pattern]
-            if self._monitoring_started:
-                removed = before - len(self.connect_rules)
-                self.add_event("cmd",
-                    f"connect-options: removed {removed} rule(s) for '{pattern}'")
-            return
-
-        opts_str = parts[1].strip()
-        # '-' is the special disable marker -> store as None
-        opts = None if opts_str == '-' else opts_str
-        # Replace existing rule for the same pattern
-        self.connect_rules = [(p, o) for p, o in self.connect_rules if p != pattern]
-        self.connect_rules.append((pattern, opts))
-        if self._monitoring_started:
-            status = 'disabled' if opts is None else f'opts={opts_str!r}'
-            self.add_event("cmd", f"connect-options: '{pattern}' → {status}")
 
     # ── :prog-options ────────────────────────────────────────────────────────
 
@@ -6570,18 +6437,17 @@ class Application:
         else:
             lines.append(f"  Cmd:  -")
 
-        # Connect-options status for this host
-        conn_disabled, conn_ssh = self._build_connect_cmd(monitor)
+        # Connect status for this host (via :prog-options ssh rules)
+        conn_disabled, conn_opts = self._match_prog_options(
+            'ssh', monitor.host,
+            getattr(monitor, 'resolved_hostname', None) or '')
         if conn_disabled:
             lines.append(f"  Connect: disabled")
         else:
-            # In kiosk mode show the full command including isolation flags so
-            # the operator can verify what will actually be executed.
-            if self.kiosk_mode and conn_ssh and conn_ssh[0] == 'ssh':
-                display_ssh = ['ssh'] + _kiosk_ssh_flags() + conn_ssh[1:]
-            else:
-                display_ssh = conn_ssh
-            conn_str = shlex.join(display_ssh) if display_ssh else '-'
+            r = (monitor.resolved_ip
+                 if getattr(monitor, 'resolv_static', False) and monitor.resolved_ip
+                 else monitor.host)
+            conn_str = f"ssh {conn_opts + ' ' if conn_opts else ''}{r}"
             conn_wrap_w = max(10, inner_w - 12)
             wrapped_conn = textwrap.wrap(conn_str, width=conn_wrap_w)
             lines.append(f"  Connect: {wrapped_conn[0] if wrapped_conn else '-'}")
