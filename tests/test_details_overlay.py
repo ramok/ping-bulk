@@ -7,7 +7,7 @@ import re
 import time
 
 
-DETAILS_MARKER = '[Enter / q / Esc] Close'
+DETAILS_MARKER = '[Enter/q/Esc] Close'
 
 
 def _open_details(pane, wait_sec=1.0):
