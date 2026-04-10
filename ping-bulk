@@ -3650,7 +3650,7 @@ class Application:
         _b('p', ':pause-selected')
         # Actions
         _b('C', ':clear-prompt')
-        _b('c', ':mux ssh %{j?-J %{j: -J }} %d', context=frozenset('d'))
+        _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'))
         _b('c', ':mux ssh %r')
         _b('?', ':help')
         _b('<Esc>', ':select none')

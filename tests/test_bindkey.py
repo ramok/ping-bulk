@@ -833,3 +833,94 @@ class TestConditionalExpansion:
         ctx['j'] = ['bastion', 'gw2']
         result = app._expand_conditional('%{j?-J %{j:,}}', ctx)
         assert result == '-J bastion,gw2'
+
+
+# ===========================================================================
+# TestDefaultCBinding — default 'c' key uses :mux ssh with %r/%d/%j
+# ===========================================================================
+
+class TestDefaultCBinding:
+    """Verify the default 'c' binding expands via %r/%d/%j instead of :connect."""
+
+    def _make_ping_entry(self, pb, app, host, resolved_ip=None, resolv_static=False):
+        m = pb.PingMonitor(host)
+        m.resolved_ip = resolved_ip
+        m.resolv_static = resolv_static
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        return m
+
+    def _make_ssh_entry(self, pb, app, ssh_args, ping_host='localhost'):
+        m = pb.SshPingMonitor(ssh_args, ping_host=ping_host)
+        m.resolved_ip = None
+        m.resolv_static = False
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        return m
+
+    def _resolve_c_binding(self, app, pb):
+        """Resolve the 'c' key binding against the current app context."""
+        ctx_keys = set(app._binding_context().keys())
+        keys = pb._parse_key_notation('c')
+        binding, _ = app._key_trie.resolve(keys, ctx_keys)
+        return binding
+
+    def test_c_default_not_connect(self, app, pb):
+        """Default 'c' binding must not be ':connect'."""
+        self._make_ping_entry(pb, app, 'myhost')
+        binding = self._resolve_c_binding(app, pb)
+        assert binding is not None
+        assert ':connect' not in binding.commands
+
+    def test_c_plain_host_expands_to_ssh_r(self, app, pb):
+        """For PingMonitor, 'c' expands to ':mux ssh <host>'."""
+        self._make_ping_entry(pb, app, 'myhost.example.com')
+        binding = self._resolve_c_binding(app, pb)
+        assert binding is not None
+        cmds, warning = app._expand_binding_commands(binding.commands)
+        assert warning is None
+        assert cmds == [':mux ssh myhost.example.com']
+
+    def test_c_plain_host_resolv_static_uses_ip(self, app, pb):
+        """For PingMonitor with :resolv, 'c' expands to ':mux ssh <resolved_ip>'."""
+        self._make_ping_entry(pb, app, 'label', resolved_ip='10.0.0.5', resolv_static=True)
+        binding = self._resolve_c_binding(app, pb)
+        assert binding is not None
+        cmds, warning = app._expand_binding_commands(binding.commands)
+        assert warning is None
+        assert cmds == [':mux ssh 10.0.0.5']
+
+    def test_c_ssh_monitor_with_jump_expands_to_mux_j_d(self, app, pb):
+        """For SshPingMonitor with jump host, 'c' expands to ':mux ssh -J <jump> <dest>'."""
+        self._make_ssh_entry(pb, app, ['-J', 'bastion', 'user@remote'])
+        binding = self._resolve_c_binding(app, pb)
+        assert binding is not None
+        cmds, warning = app._expand_binding_commands(binding.commands)
+        assert warning is None
+        assert cmds == [':mux ssh -J bastion user@remote']
+
+    def test_c_ssh_monitor_no_jump_expands_to_mux_d(self, app, pb):
+        """For SshPingMonitor without jump hosts, 'c' expands to ':mux ssh <dest>'."""
+        self._make_ssh_entry(pb, app, ['user@remote'])
+        binding = self._resolve_c_binding(app, pb)
+        assert binding is not None
+        cmds, warning = app._expand_binding_commands(binding.commands)
+        assert warning is None
+        assert cmds == [':mux ssh user@remote']
+
+    def test_c_ssh_monitor_multi_jump_expands_all(self, app, pb):
+        """For SshPingMonitor with multiple jump hosts, all -J flags appear."""
+        self._make_ssh_entry(pb, app, ['-J', 'gw1', '-J', 'gw2', 'user@remote'])
+        binding = self._resolve_c_binding(app, pb)
+        assert binding is not None
+        cmds, warning = app._expand_binding_commands(binding.commands)
+        assert warning is None
+        assert cmds == [':mux ssh -J gw1 -J gw2 user@remote']
+
+    def test_c_ssh_context_guard_wins_over_fallback(self, app, pb):
+        """Context-guarded --%d binding beats the plain fallback for SSH monitors."""
+        self._make_ssh_entry(pb, app, ['-J', 'bastion', 'user@remote'])
+        binding = self._resolve_c_binding(app, pb)
+        # The SSH binding has context={'d'} (non-None) — it must win
+        assert binding is not None
+        assert binding.context is not None and 'd' in binding.context
