@@ -124,18 +124,26 @@ _SET_PARAM_MAP: dict = {p.name: p for p in SET_PARAMS}
 
 class _Binding:
     """A key binding: one or more commands to execute on keypress."""
-    __slots__ = ('commands', 'edit_mode', 'key_notation', 'origin')
+    __slots__ = ('commands', 'edit_mode', 'key_notation', 'origin', 'context')
 
-    def __init__(self, commands, edit_mode=False, key_notation='', origin='default'):
+    def __init__(self, commands, edit_mode=False, key_notation='',
+                 origin='default', context=None):
         self.commands = commands
         self.edit_mode = edit_mode
         self.key_notation = key_notation
         self.origin = origin
+        self.context = context  # frozenset of required vars or None
 
     def __repr__(self):
         mode = 'edit' if self.edit_mode else 'exec'
         cmds = ' \\; '.join(self.commands)
-        return f"_Binding({self.key_notation!r}, {mode}, {cmds!r}, {self.origin})"
+        ctx = ''
+        if self.context:
+            ctx = ' '.join(f'--%{v}' for v in sorted(self.context)) + ' '
+        return f"_Binding({ctx}{self.key_notation!r}, {mode}, {cmds!r}, {self.origin})"
+
+# Valid context guard variables for :bindkey --%x flags.
+_BINDING_CONTEXT_VARS = frozenset('hspj')
 
 
 class _BindingVarMissing(Exception):
@@ -143,12 +151,18 @@ class _BindingVarMissing(Exception):
 
 
 class _KeyTrie:
-    """Prefix tree mapping key-code sequences to bindings."""
-    __slots__ = ('children', 'binding')
+    """Prefix tree mapping key-code sequences to context-aware bindings.
+
+    Each node stores a dict ``bindings`` mapping context keys to _Binding
+    objects.  A ``None`` key is the unconditional (fallback) binding; a
+    frozenset key restricts the binding to states where all listed context
+    variables are available.
+    """
+    __slots__ = ('children', 'bindings')
 
     def __init__(self):
         self.children = {}   # dict[int, _KeyTrie]
-        self.binding = None  # _Binding or None
+        self.bindings = {}   # dict[frozenset|None, _Binding]
 
     def insert(self, keys, binding):
         """Insert a binding for a sequence of key codes."""
@@ -157,19 +171,40 @@ class _KeyTrie:
             if key not in node.children:
                 node.children[key] = _KeyTrie()
             node = node.children[key]
-        node.binding = binding
+        node.bindings[binding.context] = binding
 
     def lookup(self, keys):
-        """Look up a key sequence.  Returns (binding|None, has_children)."""
+        """Look up a key sequence.
+
+        Returns ``(bindings_dict, has_children)`` where *bindings_dict* maps
+        context keys to _Binding objects (empty dict when no bindings exist).
+        """
         node = self
         for key in keys:
             if key not in node.children:
-                return (None, False)
+                return ({}, False)
             node = node.children[key]
-        return (node.binding, bool(node.children))
+        return (node.bindings, bool(node.children))
 
-    def remove(self, keys):
-        """Remove binding at *keys*, pruning empty ancestors.  Returns True if removed."""
+    def resolve(self, keys, ctx_keys):
+        """Look up a key sequence and resolve the best matching binding.
+
+        *ctx_keys* is a set of available context variable names (e.g.
+        ``{'h', 'i'}`` when a host is selected).
+
+        Returns ``(binding|None, has_children)``.  The most-specific
+        matching context wins (largest subset of *ctx_keys*); ``None``
+        context is the fallback.
+        """
+        bindings, has_children = self.lookup(keys)
+        binding = _resolve_binding(bindings, ctx_keys)
+        return (binding, has_children)
+
+    def remove(self, keys, context=None):
+        """Remove binding at *keys* for *context*, pruning empty ancestors.
+
+        Returns True if a binding was removed.
+        """
         if not keys:
             return False
         path = [self]
@@ -179,18 +214,43 @@ class _KeyTrie:
                 return False
             node = node.children[key]
             path.append(node)
-        if node.binding is None:
+        if context not in node.bindings:
             return False
-        node.binding = None
+        del node.bindings[context]
+        # Prune empty ancestors
         for i in range(len(keys) - 1, -1, -1):
             child = path[i + 1]
-            if child.binding is not None or child.children:
+            if child.bindings or child.children:
+                break
+            del path[i].children[keys[i]]
+        return True
+
+    def remove_all(self, keys):
+        """Remove ALL context bindings at *keys*, pruning empty ancestors.
+
+        Returns True if any binding was removed.
+        """
+        if not keys:
+            return False
+        path = [self]
+        node = self
+        for key in keys:
+            if key not in node.children:
+                return False
+            node = node.children[key]
+            path.append(node)
+        if not node.bindings:
+            return False
+        node.bindings.clear()
+        for i in range(len(keys) - 1, -1, -1):
+            child = path[i + 1]
+            if child.bindings or child.children:
                 break
             del path[i].children[keys[i]]
         return True
 
     def clear_subtree(self, keys):
-        """Remove all children under *keys* (keep the node's own binding)."""
+        """Remove all children under *keys* (keep the node's own bindings)."""
         node = self
         for key in keys:
             if key not in node.children:
@@ -199,15 +259,40 @@ class _KeyTrie:
         node.children.clear()
 
     def __iter__(self):
-        """Yield ``(key_list, binding)`` for every binding (DFS, sorted)."""
+        """Yield ``(key_list, binding)`` for every binding (DFS, sorted).
+
+        Nodes with multiple context bindings yield one tuple per binding.
+        """
         def _walk(node, prefix):
-            if node.binding is not None:
-                yield (prefix[:], node.binding)
+            for ctx in sorted(node.bindings, key=lambda c: (c is not None, c or frozenset())):
+                yield (prefix[:], node.bindings[ctx])
             for key, child in sorted(node.children.items()):
                 prefix.append(key)
                 yield from _walk(child, prefix)
                 prefix.pop()
         yield from _walk(self, [])
+
+
+def _resolve_binding(bindings, ctx_keys):
+    """Pick the best _Binding from *bindings* dict for *ctx_keys*.
+
+    Most-specific context (largest matching frozenset) wins.
+    ``None`` context is the fallback.
+    """
+    if not bindings:
+        return None
+    best = None
+    best_size = -1
+    for ctx, b in bindings.items():
+        if ctx is None:
+            if best_size < 0:
+                best = b
+                best_size = 0
+        elif ctx <= ctx_keys:
+            if len(ctx) > best_size:
+                best = b
+                best_size = len(ctx)
+    return best
 
 
 # ── Key notation parser ──────────────────────────────────────────────────────
@@ -292,6 +377,34 @@ def _format_key_notation(keys):
         else:
             parts.append(f'<0x{key:02X}>')
     return ''.join(parts)
+
+
+def _parse_context_flags(args):
+    """Parse --%x context flags from the beginning of a :bindkey argument string.
+
+    Returns ``(context, remaining_args)`` where *context* is a frozenset of
+    variable names (e.g. ``frozenset({'h', 'p'})``) or ``None`` for
+    unconditional bindings.  On error returns ``(False, error_message)``.
+    """
+    ctx_vars = set()
+    while args.startswith('--%'):
+        var = ''
+        i = 3
+        while i < len(args) and args[i] not in (' ', '\t'):
+            var += args[i]
+            i += 1
+        if not var or var not in _BINDING_CONTEXT_VARS:
+            return (False, f"unknown context flag --%{var}")
+        ctx_vars.add(var)
+        args = args[i:].lstrip()
+    return (frozenset(ctx_vars) if ctx_vars else None, args)
+
+
+def _format_context(context):
+    """Format a context frozenset as '--%x --%y ' prefix, or '' for None."""
+    if not context:
+        return ''
+    return ' '.join(f'--%{v}' for v in sorted(context)) + ' '
 
 
 _FULL_HELP = [
@@ -2899,7 +3012,8 @@ class Application:
                     for keys, b in user_bindings:
                         cmds = ' \\; '.join(b.commands)
                         suffix = '...' if b.edit_mode else ''
-                        f.write(f":bindkey {b.key_notation} {cmds}{suffix}\n")
+                        ctx_str = _format_context(b.context)
+                        f.write(f":bindkey {ctx_str}{b.key_notation} {cmds}{suffix}\n")
         except OSError as e:
             self.add_event("config", f"error saving config: {e}")
             return False
@@ -3499,10 +3613,11 @@ class Application:
 
     def _register_default_bindings(self):
         """Populate the key trie with default (hardcoded) bindings."""
-        def _b(notation, *commands):
+        def _b(notation, *commands, context=None):
             keys = _parse_key_notation(notation)
             self._key_trie.insert(keys, _Binding(
-                list(commands), key_notation=notation, origin='default'))
+                list(commands), key_notation=notation, origin='default',
+                context=context))
 
         # Quit
         _b('q', ':quit')
@@ -3532,6 +3647,9 @@ class Application:
         for code in (ord('\n'), ord('\r')):
             self._key_trie.insert([code], _Binding(
                 [':details'], key_notation='<CR>', origin='default'))
+        # Space — context-aware: fold when section selected, seen otherwise
+        _b('<Space>', ':fold toggle', context=frozenset('s'))
+        _b('<Space>', ':seen')
         # Fold
         _b('[', ':fold-all')
         _b(']', ':unfold-all')
@@ -3652,9 +3770,13 @@ class Application:
     def _cmd_bindkey(self, args=''):
         """Bind, unbind, or list key bindings.
 
-        :bindkey              — list all user bindings
-        :bindkey <key>        — unbind (remove user binding, restore default)
-        :bindkey <key> <cmd>  — bind key to command(s)
+        :bindkey                     — list all user bindings
+        :bindkey [--%x] <key>        — unbind (remove binding for context)
+        :bindkey [--%x] <key> <cmd>  — bind key to command(s) in context
+
+        Context flags: --%h (host selected), --%s (section selected),
+        --%p (port monitor), --%j (SSH monitor).  Multiple flags combine
+        as AND (all must be present).  Without flags, binding is unconditional.
         """
         if self.kiosk_mode and not getattr(self, '_loading_file', False):
             self.add_event("cmd", "bindkey: blocked in kiosk mode")
@@ -3671,8 +3793,19 @@ class Application:
                 for keys, b in user_bindings:
                     cmds = ' \\; '.join(b.commands)
                     suffix = '...' if b.edit_mode else ''
+                    ctx_str = _format_context(b.context)
                     self.add_event("bindkey",
-                                   f"{b.key_notation}  →  {cmds}{suffix}")
+                                   f"{ctx_str}{b.key_notation}  →  {cmds}{suffix}")
+            return
+
+        # Parse context flags (--%h, --%s, --%p, --%j)
+        context, args = _parse_context_flags(args)
+        if context is False:
+            self.add_event("cmd", f"bindkey: {args}")  # args holds error msg
+            return
+        args = args.strip()
+        if not args:
+            self.add_event("cmd", "bindkey: missing key notation")
             return
 
         # Parse key notation (first token or angle-bracket group)
@@ -3685,10 +3818,11 @@ class Application:
 
         if not rest:
             # Unbind
-            removed = self._key_trie.remove(key_codes)
+            removed = self._key_trie.remove(key_codes, context)
             if removed:
-                self._unbound_defaults.add(key_str)
-                self.add_event("bindkey", f"unbound {key_str}")
+                ctx_str = _format_context(context)
+                self._unbound_defaults.add(f"{ctx_str}{key_str}")
+                self.add_event("bindkey", f"unbound {ctx_str}{key_str}")
             else:
                 self.add_event("bindkey", f"no binding for {key_str}")
             return
@@ -3704,17 +3838,19 @@ class Application:
             return
 
         # If user is rebinding a key that was a prefix, clear its subtree
-        _, has_children = self._key_trie.lookup(key_codes)
-        if has_children:
+        bindings_dict, has_children = self._key_trie.lookup(key_codes)
+        if has_children and not bindings_dict:
             self._key_trie.clear_subtree(key_codes)
 
         binding = _Binding(commands, edit_mode=edit_mode,
-                           key_notation=key_str, origin='user')
+                           key_notation=key_str, origin='user',
+                           context=context)
         self._key_trie.insert(key_codes, binding)
-        self._unbound_defaults.discard(key_str)
+        ctx_str = _format_context(context)
+        self._unbound_defaults.discard(f"{ctx_str}{key_str}")
         cmds_display = ' \\; '.join(commands)
         suffix = '...' if edit_mode else ''
-        self.add_event("bindkey", f"{key_str} → {cmds_display}{suffix}")
+        self.add_event("bindkey", f"{ctx_str}{key_str} → {cmds_display}{suffix}")
 
     @staticmethod
     def _split_bindkey_args(args):
@@ -6606,10 +6742,6 @@ class Application:
                 if key == -1:
                     # No key pressed — but if we're mid-sequence, keep waiting
                     if self._key_seq:
-                        # With multikey-timeout > 0 and a partial match that
-                        # also has a binding, the timeout getch already fired.
-                        # A -1 here means the trie wait expired via the normal
-                        # loop timeout; just keep waiting (timeout=0 mode).
                         pass
                     continue
                 # Infrastructure keys that always bypass the trie
@@ -6625,24 +6757,11 @@ class Application:
                     self._key_seq = []
                     self.prompt = {'type': 'quit_confirm', 'chars': []}
                     continue
-                # Space has dual behavior (fold toggle or seen marker)
-                if key == ord(' ') and not self._key_seq:
-                    binding, has_more = self._key_trie.lookup([key])
-                    if binding and binding.origin == 'user':
-                        self._execute_binding(binding)
-                    else:
-                        if (self.highlighted_index is not None and
-                                0 <= self.highlighted_index < len(self.entries)):
-                            entry = self.entries[self.highlighted_index]
-                            if isinstance(entry, SectionLabel):
-                                self._do_fold_action('za')
-                        else:
-                            if self.log_offset == 0:
-                                self.mark_seen()
-                    continue
-                # ── Trie lookup ───────────────────────────────────────────
+                # ── Trie lookup with context resolution ───────────────────
+                ctx_keys = set(self._binding_context().keys())
                 self._key_seq.append(key)
-                binding, has_more = self._key_trie.lookup(self._key_seq)
+                binding, has_more = self._key_trie.resolve(
+                    self._key_seq, ctx_keys)
 
                 if binding and not has_more:
                     # Exact match, no longer prefixes — execute immediately

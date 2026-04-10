@@ -48,32 +48,32 @@ class TestKeyTrie:
     """Test _KeyTrie prefix-tree key binding storage."""
 
     def test_insert_and_lookup_single_key(self, pb):
-        """Insert a single-key binding and verify lookup succeeds."""
+        """Insert a single-key binding and verify resolve finds it."""
         trie = pb._KeyTrie()
         binding = pb._Binding([':quit'])
         trie.insert([ord('q')], binding)
-        result, has_children = trie.lookup([ord('q')])
+        result, has_children = trie.resolve([ord('q')], set())
         assert result is binding
         assert not has_children
 
     def test_lookup_missing_key(self, pb):
-        """Lookup of non-existent key returns (None, False)."""
+        """Resolve of non-existent key returns (None, False)."""
         trie = pb._KeyTrie()
-        result, has_children = trie.lookup([ord('x')])
+        result, has_children = trie.resolve([ord('x')], set())
         assert result is None
         assert not has_children
 
     def test_insert_multi_key_sequence(self, pb):
-        """Insert a two-key sequence; verify prefix and full lookup."""
+        """Insert a two-key sequence; verify prefix and full resolve."""
         trie = pb._KeyTrie()
         binding = pb._Binding([':fold za'])
         trie.insert([ord('z'), ord('a')], binding)
-        # Prefix lookup: 'z' alone has no binding but has children
-        result_z, has_children_z = trie.lookup([ord('z')])
+        # Prefix: 'z' alone has no binding but has children
+        result_z, has_children_z = trie.resolve([ord('z')], set())
         assert result_z is None
         assert has_children_z
-        # Full sequence lookup: 'za' returns the binding
-        result_za, has_children_za = trie.lookup([ord('z'), ord('a')])
+        # Full sequence: 'za' returns the binding
+        result_za, has_children_za = trie.resolve([ord('z'), ord('a')], set())
         assert result_za is binding
         assert not has_children_za
 
@@ -84,7 +84,7 @@ class TestKeyTrie:
         trie.insert([ord('q')], binding)
         removed = trie.remove([ord('q')])
         assert removed is True
-        result, _ = trie.lookup([ord('q')])
+        result, _ = trie.resolve([ord('q')], set())
         assert result is None
 
     def test_remove_prunes_empty_ancestors(self, pb):
@@ -94,8 +94,7 @@ class TestKeyTrie:
         trie.insert([ord('z'), ord('a')], binding)
         removed = trie.remove([ord('z'), ord('a')])
         assert removed is True
-        # After removal, even 'z' prefix should be gone (no children left)
-        result_z, has_children_z = trie.lookup([ord('z')])
+        result_z, has_children_z = trie.resolve([ord('z')], set())
         assert result_z is None
         assert not has_children_z
 
@@ -106,34 +105,31 @@ class TestKeyTrie:
         binding_o = pb._Binding([':fold zo'])
         trie.insert([ord('z'), ord('a')], binding_a)
         trie.insert([ord('z'), ord('o')], binding_o)
-        # Remove 'za'
         trie.remove([ord('z'), ord('a')])
         # 'z' prefix still exists (has 'zo' child)
-        result_z, has_children_z = trie.lookup([ord('z')])
+        result_z, has_children_z = trie.resolve([ord('z')], set())
         assert result_z is None
         assert has_children_z
         # 'zo' still accessible
-        result_zo, _ = trie.lookup([ord('z'), ord('o')])
+        result_zo, _ = trie.resolve([ord('z'), ord('o')], set())
         assert result_zo is binding_o
 
     def test_clear_subtree(self, pb):
-        """clear_subtree removes all children but keeps own binding."""
+        """clear_subtree removes all children but keeps own bindings."""
         trie = pb._KeyTrie()
         binding_z = pb._Binding([':something'])
         binding_za = pb._Binding([':fold za'])
         binding_zo = pb._Binding([':fold zo'])
-        # Bind 'z' and its children 'za', 'zo'
         trie.insert([ord('z')], binding_z)
         trie.insert([ord('z'), ord('a')], binding_za)
         trie.insert([ord('z'), ord('o')], binding_zo)
-        # Clear subtree under 'z'
         trie.clear_subtree([ord('z')])
         # 'z' binding still exists
-        result_z, has_children = trie.lookup([ord('z')])
+        result_z, has_children = trie.resolve([ord('z')], set())
         assert result_z is binding_z
         assert not has_children
         # Children are gone
-        result_za, _ = trie.lookup([ord('z'), ord('a')])
+        result_za, _ = trie.resolve([ord('z'), ord('a')], set())
         assert result_za is None
 
     def test_iterate(self, pb):
@@ -147,7 +143,6 @@ class TestKeyTrie:
         trie.insert([ord('z'), ord('o')], binding_zo)
         items = list(trie)
         assert len(items) == 3
-        # Sorted by key codes: 'q' (113), 'za' (122, 97), 'zo' (122, 111)
         assert items[0] == ([ord('q')], binding_q)
         assert items[1] == ([ord('z'), ord('a')], binding_za)
         assert items[2] == ([ord('z'), ord('o')], binding_zo)
@@ -163,6 +158,34 @@ class TestKeyTrie:
         trie = pb._KeyTrie()
         removed = trie.remove([ord('x')])
         assert removed is False
+
+    def test_context_resolve_most_specific_wins(self, pb):
+        """resolve() picks the most-specific matching context binding."""
+        trie = pb._KeyTrie()
+        b_default = pb._Binding([':seen'])
+        b_host = pb._Binding([':nop'], context=frozenset('h'))
+        b_section = pb._Binding([':fold toggle'], context=frozenset('s'))
+        trie.insert([ord(' ')], b_default)
+        trie.insert([ord(' ')], b_host)
+        trie.insert([ord(' ')], b_section)
+        # No context → fallback
+        r, _ = trie.resolve([ord(' ')], set())
+        assert r is b_default
+        # Host selected → --%h binding
+        r, _ = trie.resolve([ord(' ')], {'h', 'i'})
+        assert r is b_host
+        # Section selected → --%s binding
+        r, _ = trie.resolve([ord(' ')], {'s', 'H'})
+        assert r is b_section
+
+    def test_context_fallback_to_unconditional(self, pb):
+        """When no context binding matches, resolve falls back to None."""
+        trie = pb._KeyTrie()
+        b_default = pb._Binding([':quit'])
+        trie.insert([ord('q')], b_default)
+        # Even with context keys, unconditional binding matches
+        r, _ = trie.resolve([ord('q')], {'h', 'i', 'p'})
+        assert r is b_default
 
 
 # ===========================================================================
@@ -326,7 +349,7 @@ class TestBindkeyCommand:
         """':bindkey t :mux mtr' creates a binding."""
         app._cmd_bindkey('t :mux mtr')
         keys = pb._parse_key_notation('t')
-        binding, _ = app._key_trie.lookup(keys)
+        binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
         assert binding.commands == [':mux mtr']
         assert binding.origin == 'user'
@@ -337,9 +360,8 @@ class TestBindkeyCommand:
         app._cmd_bindkey('t :mux mtr')
         app._cmd_bindkey('t')
         keys = pb._parse_key_notation('t')
-        binding, _ = app._key_trie.lookup(keys)
+        binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
-        # Event log should mention unbinding
         assert any('unbound t' in e for e in app.events)
 
     def test_bindkey_list_empty(self, app):
@@ -353,14 +375,13 @@ class TestBindkeyCommand:
         app._cmd_bindkey('t :mux mtr')
         app.events.clear()
         app._cmd_bindkey()
-        # Should list the binding
         assert any('t' in e and ':mux mtr' in e for e in app.events)
 
     def test_bindkey_multi_command(self, app, pb):
         """':bindkey t :set stats down \\; :set dns hostname' creates multi-cmd binding."""
         app._cmd_bindkey(r't :set stats down \; :set dns hostname')
         keys = pb._parse_key_notation('t')
-        binding, _ = app._key_trie.lookup(keys)
+        binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
         assert binding.commands == [':set stats down', ':set dns hostname']
 
@@ -368,21 +389,19 @@ class TestBindkeyCommand:
         """':bindkey t :mux mtr %h...' sets edit_mode=True."""
         app._cmd_bindkey('t :mux mtr %h...')
         keys = pb._parse_key_notation('t')
-        binding, _ = app._key_trie.lookup(keys)
+        binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
         assert binding.edit_mode is True
         assert binding.commands == [':mux mtr %h']
 
     def test_bindkey_overrides_default(self, app, pb):
         """Binding 'q' to something else replaces the default :quit binding."""
-        # Default 'q' is :quit
         keys_q = pb._parse_key_notation('q')
-        binding_before, _ = app._key_trie.lookup(keys_q)
+        binding_before, _ = app._key_trie.resolve(keys_q, set())
         assert binding_before.commands == [':quit']
         assert binding_before.origin == 'default'
-        # Rebind 'q' to :help
         app._cmd_bindkey('q :help')
-        binding_after, _ = app._key_trie.lookup(keys_q)
+        binding_after, _ = app._key_trie.resolve(keys_q, set())
         assert binding_after.commands == [':help']
         assert binding_after.origin == 'user'
 
@@ -390,14 +409,53 @@ class TestBindkeyCommand:
         """':bindkey gt :select first' binds 'g' then 't' sequence."""
         app._cmd_bindkey('gt :select first')
         keys_gt = pb._parse_key_notation('gt')
-        binding, _ = app._key_trie.lookup(keys_gt)
+        binding, _ = app._key_trie.resolve(keys_gt, set())
         assert binding is not None
         assert binding.commands == [':select first']
-        # 'g' alone should have no binding but children
         keys_g = pb._parse_key_notation('g')
-        binding_g, has_children_g = app._key_trie.lookup(keys_g)
+        binding_g, has_children_g = app._key_trie.resolve(keys_g, set())
         assert binding_g is None
         assert has_children_g
+
+    def test_bindkey_context_flag(self, app, pb):
+        """':bindkey --%h t :mux mtr' creates a context-aware binding."""
+        app._cmd_bindkey('--%h t :mux mtr')
+        keys = pb._parse_key_notation('t')
+        # Without host context → no match (no unconditional fallback)
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is None
+        # With host context → match
+        binding, _ = app._key_trie.resolve(keys, {'h', 'i'})
+        assert binding is not None
+        assert binding.commands == [':mux mtr']
+        assert binding.context == frozenset({'h'})
+
+    def test_bindkey_context_with_fallback(self, app, pb):
+        """Context binding coexists with unconditional fallback."""
+        app._cmd_bindkey('--%s t :fold toggle')
+        app._cmd_bindkey('t :seen')
+        keys = pb._parse_key_notation('t')
+        # Section context → context binding wins
+        r, _ = app._key_trie.resolve(keys, {'s', 'H'})
+        assert r.commands == [':fold toggle']
+        # No context → fallback
+        r, _ = app._key_trie.resolve(keys, set())
+        assert r.commands == [':seen']
+        # Host context → fallback (no --%h binding)
+        r, _ = app._key_trie.resolve(keys, {'h', 'i'})
+        assert r.commands == [':seen']
+
+    def test_bindkey_context_unbind(self, app, pb):
+        """':bindkey --%s <Space>' unbinds only the section-context binding."""
+        # Default Space has --%s :fold toggle and fallback :seen
+        keys = pb._parse_key_notation('<Space>')
+        r_section, _ = app._key_trie.resolve(keys, {'s'})
+        assert r_section.commands == [':fold toggle']
+        # Unbind only the section context
+        app._cmd_bindkey('--%s <Space>')
+        r_section, _ = app._key_trie.resolve(keys, {'s'})
+        # Now falls back to :seen
+        assert r_section.commands == [':seen']
 
 
 # ===========================================================================
@@ -410,7 +468,7 @@ class TestDefaultBindings:
     def test_default_quit_bound(self, app, pb):
         """'q' is bound to ':quit'."""
         keys = pb._parse_key_notation('q')
-        binding, _ = app._key_trie.lookup(keys)
+        binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
         assert binding.commands == [':quit']
         assert binding.origin == 'default'
@@ -418,7 +476,7 @@ class TestDefaultBindings:
     def test_default_z_sequences(self, app, pb):
         """'za' is bound to ':fold za'."""
         keys = pb._parse_key_notation('za')
-        binding, _ = app._key_trie.lookup(keys)
+        binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
         assert binding.commands == [':fold za']
         assert binding.origin == 'default'
@@ -426,7 +484,7 @@ class TestDefaultBindings:
     def test_default_arrows(self, app, pb):
         """'<Up>' is bound to ':select up'."""
         keys = pb._parse_key_notation('<Up>')
-        binding, _ = app._key_trie.lookup(keys)
+        binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
         assert binding.commands == [':select up']
         assert binding.origin == 'default'
@@ -434,10 +492,23 @@ class TestDefaultBindings:
     def test_default_cr_bound(self, app, pb):
         """'<CR>' is bound to ':details'."""
         keys = pb._parse_key_notation('<CR>')
-        binding, _ = app._key_trie.lookup(keys)
+        binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
         assert binding.commands == [':details']
         assert binding.origin == 'default'
+
+    def test_default_space_context_aware(self, app, pb):
+        """Space has context-aware bindings: fold for sections, seen for fallback."""
+        keys = pb._parse_key_notation('<Space>')
+        # Section context → fold toggle
+        r, _ = app._key_trie.resolve(keys, {'s', 'H'})
+        assert r.commands == [':fold toggle']
+        # No context → seen
+        r, _ = app._key_trie.resolve(keys, set())
+        assert r.commands == [':seen']
+        # Host context → falls back to seen
+        r, _ = app._key_trie.resolve(keys, {'h', 'i'})
+        assert r.commands == [':seen']
 
 
 # ===========================================================================
