@@ -273,8 +273,9 @@ class TestCmdMuxDirection:
         script = (
             shlex.join(tokens)
             + '; _rc=$?;'
+              ' if [ "$_rc" -ne 0 ]; then'
               ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
-              ' read _ignored'
+              ' read _ignored; fi'
         )
         return ['sh', '-c', script]
 
