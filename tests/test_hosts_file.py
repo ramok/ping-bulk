@@ -273,3 +273,87 @@ class TestInlineCommentBackref:
             ('host', '172.16.0.1'),
         ], f"Plain IP with literal comment failed; got {entries!r}"
 
+
+
+# ===========================================================================
+# TestSemicolonSeparator
+# ===========================================================================
+
+class TestSemicolonSeparator:
+    """Tests for the semicolon (;) statement separator in hosts files.
+
+    A semicolon on a logical line acts exactly like a newline: it splits the
+    line into multiple independent statements that are parsed sequentially.
+    """
+
+    def test_two_hosts_on_one_line(self, pb, tmp_path):
+        """Two hosts separated by ; produce two host entries."""
+        content = "host1; host2\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [('host', 'host1'), ('host', 'host2')], (
+            f"expected two host entries from semicolon-separated line; got {entries!r}"
+        )
+
+    def test_three_hosts_on_one_line(self, pb, tmp_path):
+        """Three hosts on one line, separated by semicolons."""
+        content = "alpha; beta; gamma\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('host', 'alpha'), ('host', 'beta'), ('host', 'gamma'),
+        ], f"three-host ; line failed; got {entries!r}"
+
+    def test_directive_and_host_on_one_line(self, pb, tmp_path):
+        """:let directive followed by a host on the same physical line."""
+        content = ":let gw 10.0.0.1; $gw\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [('host', '10.0.0.1')], (
+            f":let; host on same line failed; got {entries!r}"
+        )
+
+    def test_section_header_and_hosts(self, pb, tmp_path):
+        """Section header followed by hosts on the same line."""
+        content = ":title My Section; host1; host2\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('section', 'My Section', 1, False),
+            ('host', 'host1'),
+            ('host', 'host2'),
+        ], f"section + hosts on same line failed; got {entries!r}"
+
+    def test_for_loop_body_on_one_line(self, pb, tmp_path):
+        """:for header, body, and :done all on one physical line via semicolons."""
+        content = ":for {1..3}; 10.0.0.$1; :done\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('host', '10.0.0.1'),
+            ('host', '10.0.0.2'),
+            ('host', '10.0.0.3'),
+        ], f":for one-liner via ; failed; got {entries!r}"
+
+    def test_semicolon_before_inline_comment(self, pb, tmp_path):
+        """A host with a ## inline label followed by ; and another host."""
+        content = "10.0.0.1 ## router; 10.0.0.2\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('cmd', ':resolv 10.0.0.1 router'),
+            ('host', '10.0.0.1'),
+            ('host', '10.0.0.2'),
+        ], f"## label ; host failed; got {entries!r}"
+
+    def test_semicolons_with_brace_expansion(self, pb, tmp_path):
+        """Brace expansion still works when hosts are semicolon-separated."""
+        content = "10.0.0.{1,2}; 10.0.1.1\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [
+            ('host', '10.0.0.1'),
+            ('host', '10.0.0.2'),
+            ('host', '10.0.1.1'),
+        ], f"brace expansion with ; failed; got {entries!r}"
+
+    def test_semicolon_no_spurious_empty_entry(self, pb, tmp_path):
+        """Trailing semicolon or double semicolon produces no extra entries."""
+        content = "host1;; host2;\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        assert entries == [('host', 'host1'), ('host', 'host2')], (
+            f"trailing/double ; produced unexpected entries; got {entries!r}"
+        )

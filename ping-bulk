@@ -1758,6 +1758,287 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
     return entries
 
 
+class _HostsParser:
+    """Lexer + callback-based parser for ping-bulk hosts files.
+
+    Replaces the monolithic ``parse_hosts_file`` with a clean separation
+    between *lexing* (continuation joining, ``;`` splitting, inline comment
+    stripping) and *parsing* (directive dispatch, variable expansion,
+    ``:for`` body collection).
+
+    All expansion helpers (``_expand_*``, ``_apply_backref``, …) and
+    ``_process_for_loop`` remain unchanged and are called from within.
+
+    Public interface::
+
+        parser = _HostsParser(variables={'x': '1'})
+        entries = parser.parse_file('/path/to/hosts')
+        # or, for tests / :source from a string:
+        entries = parser.parse('host1\\nhost2\\n')
+    """
+
+    def __init__(self, variables=None, seen_hosts=None):
+        self.variables = dict(variables) if variables else {}
+        self.seen_hosts = seen_hosts if seen_hosts is not None else set()
+
+    # ── Public entry points ───────────────────────────────────────────────
+
+    def parse_file(self, filename):
+        """Open *filename* and parse it, returning a list of entry tuples."""
+        with open(filename) as f:
+            return self.parse(f.read())
+
+    def parse(self, src):
+        """Parse hosts file source text, returning a list of entry tuples."""
+        return self._parse_lines(self._preprocess(src))
+
+    # ── Preprocessing (lexer) ─────────────────────────────────────────────
+
+    def _preprocess(self, src):
+        r"""Return a list of ``(text, comment)`` logical-line pairs.
+
+        Steps applied to the raw source:
+
+        1. Join ``\``-continuation lines: a physical line ending with ``\``
+           is concatenated with the next (``\`` removed, no separator
+           inserted).  This implements the portable self-executing idiom::
+
+               # \
+               exec ping-bulk -f "$0" "$@"
+
+           Shell treats ``# \`` as a comment and runs the ``exec``; ping-bulk
+           joins the two physical lines into ``# exec ping-bulk …`` and then
+           skips the whole thing as a comment.
+
+        2. Split each result on ``;`` — enabling multiple statements on a
+           single physical line (e.g. ``host1; host2``).  The split happens
+           *before* inline-comment stripping, so each segment is treated as an
+           independent logical line.
+
+        3. Strip leading/trailing whitespace; discard blank segments.
+
+        4. Strip inline comments via :func:`_strip_inline_comment` from each
+           segment, yielding ``(text, comment)`` pairs.
+        """
+        # Phase 1: join \ continuations
+        raw_lines = []
+        buf = ''
+        for raw in src.splitlines(keepends=True):
+            stripped = raw.rstrip('\n')
+            if stripped.endswith('\\'):
+                buf += stripped[:-1]
+            else:
+                raw_lines.append(buf + stripped)
+                buf = ''
+        if buf:
+            raw_lines.append(buf)
+
+        # Phase 2: split on ;, strip whitespace, strip inline comments
+        result = []
+        for raw in raw_lines:
+            for segment in raw.split(';'):
+                segment = segment.strip()
+                if not segment:
+                    continue
+                text, comment = _strip_inline_comment(segment)
+                if text:
+                    result.append((text, comment))
+        return result
+
+    # ── Main parse loop ───────────────────────────────────────────────────
+
+    def _parse_lines(self, lines):
+        """Process a list of ``(text, comment)`` pairs into entry tuples."""
+        entries = []
+        ssh_args = None  # :ssh-begin context; None = not in a block
+
+        i = 0
+        while i < len(lines):
+            text, comment = lines[i]
+            i += 1
+
+            # Plain comment line (but not ## section header)
+            if text.startswith('#') and not text.startswith('##'):
+                continue
+
+            # ── Section header ##[#…] ─────────────────────────────────────
+            if text.startswith('##'):
+                entries.append(self._parse_section(text))
+                continue
+
+            # ── Directive :… ──────────────────────────────────────────────
+            if text.startswith(':'):
+                parts = text.split(None, 1)
+                cmd_word = parts[0][1:].lower()
+                args = parts[1].strip() if len(parts) > 1 else ''
+
+                # :let is handled eagerly before variable expansion so that
+                # subsequent lines on the same logical-line group (after ;)
+                # already see the new binding.
+                if cmd_word == 'let':
+                    self._process_let(args, entries)
+                    continue
+
+                # :for: collect body lines, then expand.
+                if cmd_word == 'for':
+                    body, for_errors, i = self._collect_for_body(lines, i)
+                    entries.extend(for_errors)
+                    entries.extend(self._process_for(args, body, ssh_args))
+                    continue
+
+                # Variable-expand the whole directive line, then re-dispatch.
+                text = _expand_let_vars(text, self.variables)
+                if not text.strip():
+                    continue
+                parts = text.split(None, 1)
+                cmd_word = parts[0][1:].lower()
+                args = parts[1].strip() if len(parts) > 1 else ''
+
+                m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
+                if m_title:
+                    level = int(m_title.group(1)) if m_title.group(1) else 1
+                    folded = m_title.group(2) == '-'
+                    entries.append(('section', args, level, folded))
+                elif cmd_word == 'ssh-begin':
+                    ssh_args = args
+                elif cmd_word == 'ssh-end':
+                    ssh_args = None
+                elif cmd_word == 'done':
+                    entries.append(('error', ':done without :for'))
+                elif cmd_word == 'ssh' and ssh_args is not None:
+                    # Nested :ssh inside :ssh-begin → chain jump hosts.
+                    entries.append(('cmd', f':ssh -J {ssh_args} {args}'))
+                else:
+                    entries.append(('cmd', text))
+                continue
+
+            # ── Host line ─────────────────────────────────────────────────
+            text = _expand_let_vars(text, self.variables)
+            if not text.strip():
+                continue
+            entries.extend(self._parse_host(text, comment, ssh_args))
+
+        return entries
+
+    # ── :for body collection ──────────────────────────────────────────────
+
+    def _collect_for_body(self, lines, start):
+        """Collect body lines from *start* until ``:done`` or EOF.
+
+        Returns ``(body_lines, errors, next_index)``:
+
+        * *body_lines* — list of raw text strings (inline comments stripped).
+        * *errors* — ``('error', …)`` entries for illegal nested directives
+          (``:for``, ``:ssh-begin``, ``:ssh-end``).
+        * *next_index* — index of the first line after ``:done``.
+
+        ``## …`` section headers inside the body are kept unchanged.
+        Plain ``#`` comment lines are discarded.
+        If the file ends without a matching ``:done`` an implicit ``:done`` is
+        applied at EOF (useful for ``:source``'d files).
+        """
+        body = []
+        errors = []
+        i = start
+        while i < len(lines):
+            text, _ = lines[i]
+            i += 1
+            if text.startswith('#') and not text.startswith('##'):
+                continue
+            if text.startswith(':'):
+                parts = text.split(None, 1)
+                cmd = parts[0][1:].lower()
+                if cmd == 'done':
+                    return body, errors, i
+                if cmd == 'for':
+                    errors.append(('error', "nested :for is not supported"))
+                    continue
+                if cmd == 'ssh-begin':
+                    errors.append(('error', ":ssh-begin inside :for is not supported"))
+                    continue
+                if cmd == 'ssh-end':
+                    errors.append(('error', ":ssh-end inside :for is not supported"))
+                    continue
+            body.append(text)
+        return body, errors, i  # implicit :done at EOF
+
+    # ── :for execution ────────────────────────────────────────────────────
+
+    def _process_for(self, args, body_lines, ssh_args):
+        """Expand a ``:for`` directive and return its entries."""
+        var_names = None
+        if ' in ' in args:
+            var_part, pattern = args.split(' in ', 1)
+            var_names = [v.strip() for v in var_part.split(',')]
+            pattern = pattern.strip()
+        else:
+            pattern = args.strip()
+        return _process_for_loop(
+            pattern, body_lines, self.seen_hosts, ssh_args,
+            var_names=var_names, variables=self.variables,
+        )
+
+    # ── :let variable assignment ──────────────────────────────────────────
+
+    def _process_let(self, args, entries):
+        """:let name [value] — define or redefine a variable eagerly."""
+        let_parts = args.split(None, 1)
+        if not let_parts:
+            entries.append(('error', ':let: missing variable name'))
+            return
+        name_tmpl = let_parts[0]
+        val_tmpl = let_parts[1] if len(let_parts) > 1 else ''
+        try:
+            name_rows = _expand_host_with_captures(name_tmpl)
+        except ValueError as e:
+            entries.append(('error', f':let name expansion error: {e}'))
+            return
+        for exp_name, name_caps in name_rows:
+            exp_val = _apply_backref(val_tmpl, name_caps, val_tmpl)
+            self.variables[exp_name] = exp_val
+
+    # ── Section-header parser ─────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_section(line):
+        """Parse a ``##[#…]`` line into a ``('section', …)`` tuple."""
+        n_hashes = len(line) - len(line.lstrip('#'))
+        rest = line[n_hashes:]
+        folded = rest.startswith('-')
+        if folded:
+            rest = rest[1:]
+        return ('section', rest.strip(), n_hashes - 1, folded)
+
+    # ── Host-line parser ──────────────────────────────────────────────────
+
+    def _parse_host(self, line, inline_comment, ssh_args):
+        """Expand *line* as a host entry, returning a list of entry tuples."""
+        entries = []
+        optional = line.startswith('?')
+        host_line = line[1:] if optional else line
+        # Use _expand_host_with_captures so that back-references in the
+        # inline ## comment (e.g. '10.0.0.{1..4} ## host$1') are resolved
+        # to the value each brace group contributed for that row.
+        try:
+            expanded = _expand_host_with_captures(host_line)
+        except ValueError as e:
+            return [('error', str(e))]
+        for host, captures in expanded:
+            key = (ssh_args, host)
+            if key in self.seen_hosts:
+                entries.append(('warn', f'duplicate host ignored: {host}'))
+                continue
+            self.seen_hosts.add(key)
+            if ssh_args is not None:
+                entries.append(('cmd', f':ssh {ssh_args} {host}'))
+            else:
+                if inline_comment and _is_ip(host):
+                    resolved = _apply_backref(inline_comment, captures, host)
+                    entries.append(('cmd', f':resolv {host} {resolved}'))
+                entries.append(('optional_host' if optional else 'host', host))
+        return entries
+
+
 def parse_hosts_file(filename, variables=None):
     """Parse a hosts file and return an ordered list of entry tuples.
 
@@ -1788,223 +2069,12 @@ def parse_hosts_file(filename, variables=None):
       :cmd [args]     — any other ':'-prefixed line is treated as a startup command
                         (same syntax as the interactive ':' command line)
       # ...           — comment line; ignored entirely
+      host1; host2    — semicolons may separate multiple entries on one line
       (empty)         — blank line; ignored
       anything else   — treated as a host/IP address to ping (or, inside an
                         :ssh-begin block, expanded to an :ssh command)
     """
-    if variables is None:
-        variables = {}
-    entries = []
-    ssh_block_args = None  # None = not inside an :ssh-begin block; str = SSH args
-
-    # Global dedup: (ssh_block_args_or_None, host) → already seen.
-    seen_hosts = set()
-
-    # :for loop state
-    for_loop_pattern = None   # None = not inside a :for loop; str = loop pattern
-    for_loop_var_name = None  # None = legacy mode; str = named variable (e.g. 'x' from ':for x in pattern')
-    for_loop_body = []        # body lines collected between :for and :done
-    for_loop_ssh_args = None  # ssh_block_args captured when :for was opened
-
-    with open(filename) as f:
-        # Pre-process: join continuation lines (a line ending with '\' is
-        # concatenated with the next line, with the backslash removed).
-        # This enables the portable self-executing hosts-file idiom:
-        #   # \
-        #   exec ping-bulk -f "$0" "$@"
-        # Shell ignores '# \' as a comment and runs the exec; ping-bulk joins
-        # the two lines into '# exec ping-bulk …' which it then skips as a comment.
-        raw_lines = []
-        buf = ''
-        for raw in f:
-            stripped = raw.rstrip('\n')
-            if stripped.endswith('\\'):
-                buf += stripped[:-1]
-            else:
-                raw_lines.append(buf + stripped)
-                buf = ''
-        if buf:
-            raw_lines.append(buf)
-
-        for line in raw_lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Strip inline comments: '## label' on host lines, ' # comment' on any line.
-            # Section-header lines (starting with '##') are left untouched.
-            line, inline_comment = _strip_inline_comment(line)
-            if not line:
-                continue
-
-            # ── :for body collection ───────────────────────────────────────
-            if for_loop_pattern is not None:
-                # Skip comments inside the body (but keep ## section headers).
-                if line.startswith('#') and not line.startswith('##'):
-                    continue
-                if line.startswith(':'):
-                    parts = line.split(None, 1)
-                    cmd_word = parts[0][1:].lower()
-                    if cmd_word == 'done':
-                        # End of loop — process the collected body.
-                        entries.extend(_process_for_loop(
-                            for_loop_pattern, for_loop_body,
-                            seen_hosts, for_loop_ssh_args,
-                            var_names=for_loop_var_name,
-                            variables=variables,
-                        ))
-                        for_loop_pattern = None
-                        for_loop_body = []
-                        for_loop_ssh_args = None
-                        continue
-                    elif cmd_word == 'for':
-                        entries.append(('error', "nested :for is not supported"))
-                        continue
-                    elif cmd_word == 'ssh-begin':
-                        entries.append(('error', ":ssh-begin inside :for is not supported"))
-                        continue
-                    elif cmd_word == 'ssh-end':
-                        entries.append(('error', ":ssh-end inside :for is not supported"))
-                        continue
-                for_loop_body.append(line)
-                continue
-
-            # ── Normal line processing (outside a :for loop) ───────────────
-            if line.startswith('##'):
-                n_hashes = len(line) - len(line.lstrip('#'))
-                rest = line[n_hashes:]
-                folded_default = rest.startswith('-')
-                if folded_default:
-                    rest = rest[1:]
-                title = rest.strip()
-                entries.append(('section', title, n_hashes - 1, folded_default))
-            elif line.startswith('#'):
-                continue  # comment — skip
-            elif line.startswith(':'):
-                parts = line.split(None, 1)
-                cmd_word = parts[0][1:].lower()  # strip leading ':'
-                if cmd_word == 'let':
-                    # :let name [value]  — define or redefine a variable.
-                    # The name itself may contain brace expansion; $N in the value is
-                    # eagerly expanded once per brace-index iteration.
-                    let_rest = parts[1].strip() if len(parts) > 1 else ''
-                    let_parts = let_rest.split(None, 1)
-                    if not let_parts:
-                        entries.append(('error', ':let: missing variable name'))
-                    else:
-                        let_name_tmpl = let_parts[0]
-                        let_val_tmpl  = let_parts[1] if len(let_parts) > 1 else ''
-                        try:
-                            name_rows = _expand_host_with_captures(let_name_tmpl)
-                        except ValueError as e:
-                            entries.append(('error', f':let name expansion error: {e}'))
-                            name_rows = []
-                        for exp_name, name_caps in name_rows:
-                            exp_val = _apply_backref(let_val_tmpl, name_caps, let_val_tmpl)
-                            variables[exp_name] = exp_val
-                    continue
-                # Apply variable expansion to all other :-directives before parsing them.
-                line = _expand_let_vars(line, variables)
-                if not line.strip():
-                    continue
-                parts = line.split(None, 1)
-                cmd_word = parts[0][1:].lower()  # re-parse after expansion
-                m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
-                if m_title:
-                    level = int(m_title.group(1)) if m_title.group(1) else 1
-                    folded_default = m_title.group(2) == '-'
-                    title = parts[1].strip() if len(parts) > 1 else ''
-                    entries.append(('section', title, level, folded_default))
-                elif cmd_word == 'ssh-begin':
-                    # Start SSH block — remainder of line is the SSH args (opts + dest)
-                    ssh_block_args = parts[1].strip() if len(parts) > 1 else ''
-                elif cmd_word == 'ssh-end':
-                    ssh_block_args = None
-                elif cmd_word == 'for':
-                    # Start :for loop — capture pattern and current SSH context.
-                    # Support both syntaxes:
-                    #   :for pattern              → numbered backrefs ($1, $2, ...)
-                    #   :for x,y in pattern       → named backrefs ($x, $y, ...)
-                    for_args = parts[1].strip() if len(parts) > 1 else ''
-                    if ' in ' in for_args:
-                        var_part, pattern_part = for_args.split(' in ', 1)
-                        var_names = [v.strip() for v in var_part.split(',')]
-                        for_loop_pattern = pattern_part.strip()
-                        for_loop_var_name = var_names  # store as list for processing
-                    else:
-                        for_loop_pattern = for_args
-                        for_loop_var_name = None
-                    for_loop_body = []
-                    for_loop_ssh_args = ssh_block_args
-                elif cmd_word == 'done':
-                    entries.append(('error', ":done without :for"))
-                elif cmd_word == 'ssh' and ssh_block_args is not None:
-                    # Nested :ssh inside :ssh-begin — chain the jump hosts
-                    # :ssh-begin user1@host1 + :ssh user2@host2 target
-                    # becomes: :ssh -J user1@host1 user2@host2 target
-                    inner_ssh_args = parts[1].strip() if len(parts) > 1 else ''
-                    chained_cmd = f':ssh -J {ssh_block_args} {inner_ssh_args}'
-                    entries.append(('cmd', chained_cmd))
-                else:
-                    entries.append(('cmd', line))
-            else:
-                # Apply variable expansion before processing host lines.
-                line = _expand_let_vars(line, variables)
-                if not line.strip():
-                    continue
-                if ssh_block_args is not None:
-                    # Inside an :ssh-begin block — expand each host and emit an :ssh command.
-                    try:
-                        expanded = _expand_host(line)
-                    except ValueError as e:
-                        entries.append(('error', str(e)))
-                    else:
-                        for host in expanded:
-                            key = (ssh_block_args, host)
-                            if key in seen_hosts:
-                                entries.append(('warn', f"duplicate host ignored: {host}"))
-                            else:
-                                seen_hosts.add(key)
-                                entries.append(('cmd', f':ssh {ssh_block_args} {host}'))
-                else:
-                    # Plain host line — expand brace notation into individual entries.
-                    # A leading '?' marks the host as optional: silently skip at init
-                    # time if no :resolv mapping has been registered for the expanded name.
-                    optional = line.startswith('?')
-                    host_line = line[1:] if optional else line
-                    # Use _expand_host_with_captures so that back-references in the
-                    # inline ## comment (e.g. '10.0.0.{1..4} ## host$1') are resolved
-                    # to the value each brace group contributed for that row.
-                    try:
-                        expanded = _expand_host_with_captures(host_line)
-                    except ValueError as e:
-                        entries.append(('error', str(e)))
-                    else:
-                        for host, captures in expanded:
-                            key = (None, host)
-                            if key in seen_hosts:
-                                entries.append(('warn', f"duplicate host ignored: {host}"))
-                            else:
-                                seen_hosts.add(key)
-                                if inline_comment and _is_ip(host):
-                                    resolved_comment = _apply_backref(
-                                        inline_comment, captures, host
-                                    )
-                                    entries.append(('cmd', f':resolv {host} {resolved_comment}'))
-                                entries.append(('optional_host' if optional else 'host', host))
-
-    # EOF while inside a :for loop — treat as implicit :done so that files
-    # ending with a :for block (no trailing :done) work correctly, including
-    # when loaded interactively via :source.
-    if for_loop_pattern is not None:
-        entries.extend(_process_for_loop(
-            for_loop_pattern, for_loop_body,
-            seen_hosts, for_loop_ssh_args,
-            var_names=for_loop_var_name,
-            variables=variables,
-        ))
-
-    return entries
+    return _HostsParser(variables=variables).parse_file(filename)
 
 
 class CmdDef:

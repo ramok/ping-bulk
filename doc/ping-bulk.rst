@@ -312,6 +312,16 @@ Format
 (empty line)
     Ignored.
 
+``entry1; entry2; …``
+    Semicolons may be used as statement separators within a single physical
+    line, equivalent to placing each entry on its own line.  For example::
+
+        :title Gateways; 10.0.0.1; 10.0.0.2
+
+    is identical to writing three separate lines.  The separator is applied
+    *before* inline-comment stripping, so a ``## label`` only covers the
+    segment it appears in.
+
 ``## Title`` or ``:title Title``
     Insert a level-1 section-header row in the display (display only;
     not pinged).
@@ -364,12 +374,6 @@ Format
     brace group *N* of the expanded pattern.  ``$0`` / ``${0}`` is the
     entire expanded string.  Body lines without any back-reference are
     included only once.  ``:for`` may appear inside an ``:ssh-begin`` block.
-
-``:done``
-    Close the current ``:for`` loop.  If the file ends without a ``:done``
-    (e.g. the ``:for`` block is the last thing in the file), an implicit
-    ``:done`` is applied at EOF so the loop still produces its entries.
-    This also applies when a file is loaded interactively via ``:source``.
 
 ``:done``
     Close the current ``:for`` loop.  If the file ends without a ``:done``
