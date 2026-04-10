@@ -472,10 +472,19 @@ a host is highlighted and connect is not disabled.  The host details
 overlay (``Enter``) also shows the effective connect command and allows
 pressing ``c`` directly.
 
-``:mux [-v|-h|-w] <command…>``
+``:mux [-v|-h|-w] [command…]``
     Run *command* in a new tmux or screen pane/window.  Also available
     as ``:tmux`` and ``:screen``; the command name serves as a preference
     hint for which backend to use.
+
+    When called **without a command**:
+
+    - If already inside a tmux or screen session, opens a new split/window
+      running the current ping-bulk invocation (same arguments).  If a host
+      is highlighted, ``--select <host>`` is appended so the new instance
+      starts with that host pre-selected.
+    - If **not** inside any multiplexer, offers to relaunch the current
+      process inside tmux (same as the automatic relaunch prompt).
 
     Split options override the ``:set mux-split`` default for that call:
 
@@ -514,7 +523,11 @@ controlled by systemd.
 When ``--kiosk`` is active and ping-bulk is **not** already inside a
 terminal multiplexer, it automatically executes::
 
-    tmux -f /etc/ping-bulk/kiosk.tmux.conf new -As ping-bulk -- <argv>
+    tmux -f /etc/ping-bulk/kiosk.tmux.conf new -As <session-name> -- <argv>
+
+The session name is derived from the loaded hosts file: ``-`` and ``.``
+are replaced with ``_`` (e.g. ``ping-bulk.evo-lan`` → ``ping_bulk_evo_lan``).
+When no hosts file is used, the session is named ``ping_bulk``.
 
 The hardened tmux configuration (``kiosk/ping-bulk-kiosk.tmux.conf``
 in the repository) removes all tmux key bindings (``unbind-key -a``) and

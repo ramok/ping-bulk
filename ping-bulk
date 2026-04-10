@@ -211,7 +211,7 @@ _FULL_HELP = [
     "  SSH connect  (requires tmux or screen)",
     "  [c]            connect to highlighted host via SSH in a new pane/window",
     "                 pre-fills :mux ssh <host> \\[opts from :connect-options]",
-    "  :mux \\[-v|-h|-w] <cmd>  run cmd in split pane (v=below h=right w=window)",
+    "  :mux \\[-v|-h|-w] \\[cmd]  run cmd in split pane; no cmd = relaunch self in mux",
     "  :tmux / :screen        same as :mux; name hints at preferred backend",
     "  :term / :terminal      same as :mux but forces X/Wayland terminal window",
     "  :connect-options <pat> <ssh-opts>  set SSH flags for hosts matching glob",
@@ -2140,7 +2140,7 @@ CMD_REGISTRY = [
     CmdDef(['let'],              '_cmd_let',        None,
            '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
     CmdDef(['mux', 'tmux', 'screen'], '_cmd_mux', None,
-           '[-v|-h|-w] <command...>', 'run command in tmux/screen pane (-v below, -h right, -w window)'),
+           '[-v|-h|-w] [command...]', 'run command in tmux/screen pane; no command = relaunch self (-v below, -h right, -w window)'),
     CmdDef(['term', 'terminal', 'xterm'], '_cmd_mux', None,
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
     CmdDef(['connect-options'],  '_cmd_connect_options', None,
@@ -2183,32 +2183,23 @@ class TerminalBackend(ABC):
         """Open command in a new window."""
 
     @abstractmethod
-    def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
-        """Return argv to relaunch inside this backend."""
+    def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
+        """Return argv to relaunch inside this backend.
+
+        hosts_file — path of the active hosts file, used to derive the session name.
+        """
 
 
-def _session_name_from_argv(argv: list) -> str:
-    """Derive a mux session name from the last -f/--file argument in argv.
+def _session_name_from_hosts_file(hosts_file: str) -> str:
+    """Derive a mux session name from the hosts file path.
 
-    Uses the basename (without extension) of the last -f value given.
-    Falls back to 'ping-bulk' when no -f argument is present.
+    Uses the basename (without extension) of the hosts file, replacing '-' and '.' with '_'.
+    Falls back to 'ping_bulk' when not set.
     """
-    last_f = None
-    it = iter(argv[1:])
-    for tok in it:
-        if tok in ('-f', '--file'):
-            try:
-                last_f = next(it)
-            except StopIteration:
-                pass
-        elif tok.startswith('-f') and not tok.startswith('--'):
-            last_f = tok[2:]
-        elif tok.startswith('--file='):
-            last_f = tok[len('--file='):]
-    if last_f:
-        name = os.path.splitext(os.path.basename(last_f))[0]
-        return name or 'ping-bulk'
-    return 'ping-bulk'
+    if hosts_file:
+        name = os.path.basename(hosts_file).replace('-', '_').replace('.', '_')
+        return name or 'ping_bulk'
+    return 'ping_bulk'
 
 
 class TmuxBackend(TerminalBackend):
@@ -2234,11 +2225,11 @@ class TmuxBackend(TerminalBackend):
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
 
-    def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
+    def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
         cmd = ['tmux']
         if kiosk_conf and os.path.exists(kiosk_conf):
             cmd += ['-f', kiosk_conf]
-        cmd += ['new', '-As', _session_name_from_argv(argv), '--']
+        cmd += ['new', '-As', _session_name_from_hosts_file(hosts_file), '--']
         cmd += argv
         return cmd
 
@@ -2284,11 +2275,11 @@ class ScreenBackend(TerminalBackend):
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"screen exited {r.returncode}")
 
-    def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
+    def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
         cmd = ['screen']
         if kiosk_conf and os.path.exists(kiosk_conf):
             cmd += ['-c', kiosk_conf]
-        cmd += ['-d', '-RR', '-S', _session_name_from_argv(argv)] + argv
+        cmd += ['-d', '-RR', '-S', _session_name_from_hosts_file(hosts_file)] + argv
         return cmd
 
 
@@ -2357,7 +2348,7 @@ class XTermBackend(TerminalBackend):
         except subprocess.TimeoutExpired:
             pass  # still running — opened successfully
 
-    def relaunch_cmd(self, argv: list, kiosk_conf: str = None) -> list:
+    def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
         return argv  # not applicable for terminal emulators
 
 
@@ -4151,7 +4142,7 @@ class Application:
                         extra += ['--select', p['pending_host']]
                     if p.get('pending_cmd'):
                         extra += [':' + p['pending_cmd']]
-                    cmd = backend.relaunch_cmd(sys.argv + extra)
+                    cmd = backend.relaunch_cmd(sys.argv + extra, hosts_file=self.hosts_file)
                     self.prompt = None
                     curses.endwin()
                     os.execvp(cmd[0], cmd)
@@ -4720,8 +4711,21 @@ class Application:
             direction = {'-v': 'v', '-h': 'h', '-w': 'window'}.get(flag, flag[1:])
 
         if not tokens:
-            self.add_event("cmd", "mux: usage: :mux [-v|-h|-w] <command...>")
-            return
+            # No command given: relaunch self.
+            # If already inside a multiplexer, open a duplicate in a split/window.
+            # If not inside one, offer to relaunch the whole process inside tmux/screen.
+            backend = _resolve_mux_backend(preference)
+            is_in_mux = backend is not None and not isinstance(backend, XTermBackend)
+            if not is_in_mux:
+                self.prompt = self._mux_relaunch_prompt([])
+                return
+            tokens = list(sys.argv)
+            if (self.highlighted_index is not None
+                    and 0 <= self.highlighted_index < len(self.entries)):
+                entry = self.entries[self.highlighted_index]
+                if isinstance(entry, Monitor):
+                    tokens += ['--select', entry.host]
+            # fall through to open a split/window with the current invocation
 
         # Kiosk whitelist: only ssh and login are permitted; X terminal not allowed
         if self.kiosk_mode:
@@ -6191,10 +6195,10 @@ if __name__ == "__main__":
         _screen = ScreenBackend()
         if not _tmux.is_inside() and not _screen.is_inside():
             if _tmux.available():
-                _cmd = _tmux.relaunch_cmd(sys.argv, kiosk_conf=_KIOSK_TMUX_CONF)
+                _cmd = _tmux.relaunch_cmd(sys.argv, hosts_file=_args.file[-1] if _args.file else None, kiosk_conf=_KIOSK_TMUX_CONF)
                 os.execvp(_cmd[0], _cmd)
             elif _screen.available():
-                _cmd = _screen.relaunch_cmd(sys.argv)
+                _cmd = _screen.relaunch_cmd(sys.argv, hosts_file=_args.file[-1] if _args.file else None)
                 os.execvp(_cmd[0], _cmd)
             # If neither available, fall through and run directly
     curses.wrapper(main, _args)

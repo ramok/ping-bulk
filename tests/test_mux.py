@@ -322,11 +322,17 @@ class TestCmdMuxDirection:
             app._cmd_mux('ssh host')
         assert len(app.events) > before
 
-    def test_empty_command_logs_usage(self, pb, tmp_path):
+    def test_empty_command_no_mux_opens_relaunch_prompt(self, pb, tmp_path):
+        """No-command :mux when not inside any mux → relaunch prompt."""
         app = _make_app(pb, tmp_path)
-        before = len(app.events)
-        app._cmd_mux('')
-        assert len(app.events) > before
+        mock_none = MagicMock()
+        mock_none.is_inside.return_value = False
+        mock_none.available.return_value = False
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_none, 'screen': mock_none,
+                                            'terminal': mock_none}):
+            app._cmd_mux('')
+        assert app.prompt is not None
+        assert app.prompt['type'] == 'mux_relaunch'
 
 
 # ===========================================================================
@@ -447,3 +453,148 @@ class TestConnectOptionsInHostsFile:
             app = pb.Application(entries)
         assert ('*-router', '-l admin') in app.connect_rules
         assert ('1.1.1.1', None) in app.connect_rules
+
+
+# ===========================================================================
+# _session_name_from_hosts_file
+# ===========================================================================
+
+class TestSessionNameFromHostsFile:
+
+    def test_simple_name(self, pb):
+        assert pb._session_name_from_hosts_file('hosts') == 'hosts'
+
+    def test_dashes_replaced(self, pb):
+        assert pb._session_name_from_hosts_file('ping-bulk.evo-lan') == 'ping_bulk_evo_lan'
+
+    def test_dots_replaced(self, pb):
+        assert pb._session_name_from_hosts_file('hosts.txt') == 'hosts_txt'
+
+    def test_with_directory_prefix(self, pb):
+        assert pb._session_name_from_hosts_file('/etc/ping-bulk/office.lan') == 'office_lan'
+
+    def test_none_falls_back(self, pb):
+        assert pb._session_name_from_hosts_file(None) == 'ping_bulk'
+
+    def test_empty_string_falls_back(self, pb):
+        assert pb._session_name_from_hosts_file('') == 'ping_bulk'
+
+
+# ===========================================================================
+# TmuxBackend.relaunch_cmd / ScreenBackend.relaunch_cmd
+# ===========================================================================
+
+class TestRelaunchCmd:
+
+    def test_tmux_session_name_from_hosts_file(self, pb):
+        backend = pb.TmuxBackend()
+        cmd = backend.relaunch_cmd(['./ping-bulk', '-f', 'sensor-station'],
+                                   hosts_file='sensor-station')
+        # session name is the 4th token after 'new -As <name>'
+        new_idx = cmd.index('new')
+        assert cmd[new_idx + 1] == '-As'
+        assert cmd[new_idx + 2] == 'sensor_station'
+
+    def test_tmux_session_name_with_dashes_and_dots(self, pb):
+        backend = pb.TmuxBackend()
+        cmd = backend.relaunch_cmd(['./ping-bulk', '-f', 'ping-bulk.evo-lan'],
+                                   hosts_file='ping-bulk.evo-lan')
+        new_idx = cmd.index('new')
+        assert cmd[new_idx + 2] == 'ping_bulk_evo_lan'
+
+    def test_tmux_session_name_fallback_when_no_hosts_file(self, pb):
+        backend = pb.TmuxBackend()
+        cmd = backend.relaunch_cmd(['./ping-bulk', '8.8.8.8'])
+        new_idx = cmd.index('new')
+        assert cmd[new_idx + 2] == 'ping_bulk'
+
+    def test_screen_session_name_from_hosts_file(self, pb):
+        backend = pb.ScreenBackend()
+        cmd = backend.relaunch_cmd(['./ping-bulk', '-f', 'my-hosts.txt'],
+                                   hosts_file='my-hosts.txt')
+        s_idx = cmd.index('-S')
+        assert cmd[s_idx + 1] == 'my_hosts_txt'
+
+    def test_screen_session_name_fallback(self, pb):
+        backend = pb.ScreenBackend()
+        cmd = backend.relaunch_cmd(['./ping-bulk', '8.8.8.8'])
+        s_idx = cmd.index('-S')
+        assert cmd[s_idx + 1] == 'ping_bulk'
+
+
+# ===========================================================================
+# _cmd_mux — no command (self-relaunch)
+# ===========================================================================
+
+class TestCmdMuxNoCommand:
+
+    def _mock_in_mux(self):
+        mock = MagicMock()
+        mock.is_inside.return_value = True
+        mock.available.return_value = True
+        return mock
+
+    def _mock_not_in_mux(self):
+        mock = MagicMock()
+        mock.is_inside.return_value = False
+        mock.available.return_value = False
+        return mock
+
+    def test_no_command_not_in_mux_sets_relaunch_prompt(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path)
+        none_backend = self._mock_not_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': none_backend, 'screen': none_backend,
+                                            'terminal': none_backend}):
+            app._cmd_mux('')
+        assert app.prompt is not None
+        assert app.prompt['type'] == 'mux_relaunch'
+        # No pending_cmd: the relaunch IS the goal, no follow-up command
+        assert not app.prompt.get('pending_cmd')
+
+    def test_no_command_in_mux_opens_split_with_argv(self, pb, tmp_path):
+        import sys
+        app = _make_app(pb, tmp_path)
+        mock_backend = self._mock_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
+                app._cmd_mux('')
+        mock_backend.split.assert_called_once()
+        # _cmd_mux wraps tokens in ['sh', '-c', '<script>']
+        shell_script = mock_backend.split.call_args[0][1][2]
+        assert './ping-bulk' in shell_script
+        assert '-f' in shell_script
+        assert 'hosts.txt' in shell_script
+
+    def test_no_command_in_mux_adds_select_for_highlighted_host(self, pb, tmp_path):
+        import sys
+        app = _make_app(pb, tmp_path)
+        app.highlighted_index = 0   # 127.0.0.1
+        mock_backend = self._mock_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
+                app._cmd_mux('')
+        shell_script = mock_backend.split.call_args[0][1][2]
+        assert '--select' in shell_script
+        assert '127.0.0.1' in shell_script
+
+    def test_no_command_in_mux_no_select_when_no_highlight(self, pb, tmp_path):
+        import sys
+        app = _make_app(pb, tmp_path)
+        app.highlighted_index = None
+        mock_backend = self._mock_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
+                app._cmd_mux('')
+        shell_script = mock_backend.split.call_args[0][1][2]
+        assert '--select' not in shell_script
+
+    def test_no_command_with_direction_flag_in_mux(self, pb, tmp_path):
+        import sys
+        app = _make_app(pb, tmp_path)
+        mock_backend = self._mock_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
+                app._cmd_mux('-h')
+        mock_backend.split.assert_called_once()
+        direction = mock_backend.split.call_args[0][0]
+        assert direction == 'h'
