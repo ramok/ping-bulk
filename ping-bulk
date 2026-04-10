@@ -6114,11 +6114,10 @@ class Application:
                             # First navigation: start at the last visible entry
                             self.highlighted_index = visible_indices[-1]
                         else:
-                            # Find current position in visible list and move up
+                            # Find current position in visible list and move up, wrapping
                             try:
                                 current_pos = visible_indices.index(self.highlighted_index)
-                                if current_pos > 0:
-                                    self.highlighted_index = visible_indices[current_pos - 1]
+                                self.highlighted_index = visible_indices[(current_pos - 1) % len(visible_indices)]
                             except ValueError:
                                 # Current highlight is not visible; snap to last visible
                                 self.highlighted_index = visible_indices[-1]
@@ -6134,11 +6133,10 @@ class Application:
                             # First navigation: start at the first visible entry
                             self.highlighted_index = visible_indices[0]
                         else:
-                            # Find current position in visible list and move down
+                            # Find current position in visible list and move down, wrapping
                             try:
                                 current_pos = visible_indices.index(self.highlighted_index)
-                                if current_pos < len(visible_indices) - 1:
-                                    self.highlighted_index = visible_indices[current_pos + 1]
+                                self.highlighted_index = visible_indices[(current_pos + 1) % len(visible_indices)]
                             except ValueError:
                                 # Current highlight is not visible; snap to first visible
                                 self.highlighted_index = visible_indices[0]
