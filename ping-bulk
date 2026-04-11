@@ -30,6 +30,7 @@ LEVEL_QUIET  = 0   # host status changes only (up / down / recover)
 LEVEL_NORMAL = 1   # + warnings and errors  (default)
 LEVEL_INFO   = 2   # + cmd output, config, settings, resolv
 LEVEL_DEBUG  = 3   # + bind-key dispatch and all internal events
+LEVEL_TRACE  = 4   # + every external program call (subprocess / execvp)
 
 # Maps well-known category strings → minimum level at which they appear.
 # Any category not listed here is treated as a host-monitor event → LEVEL_QUIET.
@@ -50,7 +51,22 @@ _CATEGORY_LEVELS = {
     'multikey-timeout':  LEVEL_INFO,
     # shown at DEBUG+
     'bind-key':  LEVEL_DEBUG,
+    # shown at TRACE+
+    'exec':      LEVEL_TRACE,
 }
+
+# Module-level trace sink: set by Application._set_loglevel() when
+# LEVEL_TRACE is active so backend methods can log without holding a
+# reference to the Application instance.
+_exec_trace = None   # callable(cmd_list) → None, or None
+
+
+def _subrun(cmd, **kw):
+    """Drop-in replacement for subprocess.run() that emits a TRACE log entry."""
+    if _exec_trace is not None:
+        _exec_trace(cmd)
+    return subprocess.run(cmd, **kw)
+
 
 # Lightweight record stored in the events deque.
 class EventEntry:
@@ -189,9 +205,9 @@ SET_PARAMS = [
     SetParam('multikey-timeout', '_cmd_multikey_timeout',
              ['0', '200', '500', '1000'],
              'ms to wait for follow-up key in multi-key binding (0 = wait forever)'),
-    SetParam('log-level', '_cmd_loglevel',
-             ['quiet', 'normal', 'info', 'debug'],
-             'event log verbosity (quiet=host status only, normal=+errors/warnings, info=+cmd/config, debug=all)'),
+        SetParam('log-level', '_cmd_loglevel',
+             ['quiet', 'normal', 'info', 'debug', 'trace'],
+             'event log verbosity (quiet=host status only, normal=+errors/warnings, info=+cmd/config, debug=all, trace=+exec)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -3163,7 +3179,7 @@ class TmuxBackend(TerminalBackend):
         cmd = ['tmux', 'split-window', flag]
         if not focus:
             cmd.append('-d')
-        r = subprocess.run(cmd + ['--'] + command,
+        r = _subrun(cmd + ['--'] + command,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
@@ -3172,13 +3188,13 @@ class TmuxBackend(TerminalBackend):
         cmd = ['tmux', 'new-window']
         if not focus:
             cmd.append('-d')
-        r = subprocess.run(cmd + ['--'] + command,
+        r = _subrun(cmd + ['--'] + command,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
 
     def kill_others(self) -> None:
-        r = subprocess.run(['tmux', 'kill-pane', '-a'],
+        r = _subrun(['tmux', 'kill-pane', '-a'],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
@@ -3224,7 +3240,7 @@ class ScreenBackend(TerminalBackend):
             # Split, move focus to the new region to start the command there,
             # then cycle back ('focus' is cyclic) to the original region.
             eval_args = [split_cmd, 'focus', cmd_str, 'focus']
-        r = subprocess.run(base + ['-X', 'eval'] + eval_args,
+        r = _subrun(base + ['-X', 'eval'] + eval_args,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"screen exited {r.returncode}")
@@ -3236,13 +3252,13 @@ class ScreenBackend(TerminalBackend):
         base = ['screen']
         if sty:
             base += ['-S', sty]
-        r = subprocess.run(base + ['-X', 'screen'] + command,
+        r = _subrun(base + ['-X', 'screen'] + command,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"screen exited {r.returncode}")
         if focus:
             # Switch to the newly created window (last window in the list).
-            subprocess.run(base + ['-X', 'other'],
+            _subrun(base + ['-X', 'other'],
                            capture_output=True, text=True)
 
     def kill_others(self) -> None:
@@ -5927,6 +5943,7 @@ class Application:
                     cmd = backend.relaunch_cmd(sys.argv + extra, hosts_file=self.hosts_file)
                     self.prompt = None
                     curses.endwin()
+                    self.add_event("exec", shlex.join(cmd), level=LEVEL_TRACE)
                     os.execvp(cmd[0], cmd)
                 else:
                     self.add_event("cmd", "relaunch: tmux/screen not found")
@@ -5943,6 +5960,7 @@ class Application:
             if key == ord('1'):
                 self.prompt = None
                 curses.endwin()
+                self.add_event("exec", shlex.join(sys.argv), level=LEVEL_TRACE)
                 os.execvp(sys.argv[0], sys.argv)
             elif key == ord('2'):
                 self._edit_reload_inplace(file)
@@ -7176,9 +7194,21 @@ class Application:
             self.add_event("sync-history", f"wall-clock history alignment {state}")
 
     _LOGLEVEL_NAMES = {'quiet': LEVEL_QUIET, 'normal': LEVEL_NORMAL,
-                       'info': LEVEL_INFO, 'debug': LEVEL_DEBUG}
+                       'info': LEVEL_INFO, 'debug': LEVEL_DEBUG,
+                       'trace': LEVEL_TRACE}
     _LOGLEVEL_LABELS = {LEVEL_QUIET: 'quiet', LEVEL_NORMAL: 'normal',
-                        LEVEL_INFO: 'info', LEVEL_DEBUG: 'debug'}
+                        LEVEL_INFO: 'info', LEVEL_DEBUG: 'debug',
+                        LEVEL_TRACE: 'trace'}
+
+    def _set_loglevel(self, level: int):
+        """Set loglevel and update the module-level exec-trace sink."""
+        global _exec_trace
+        self.loglevel = level
+        if level >= LEVEL_TRACE:
+            _exec_trace = lambda cmd: self.add_event(
+                "exec", shlex.join(cmd), level=LEVEL_TRACE)
+        else:
+            _exec_trace = None
 
     def _cmd_loglevel(self, args=''):
         """Set or display the event log verbosity level."""
@@ -7189,9 +7219,9 @@ class Application:
             return
         if val not in self._LOGLEVEL_NAMES:
             self.add_event("cmd", f"log-level: unknown value '{val}'; "
-                           "choices: quiet normal info debug")
+                           "choices: quiet normal info debug trace")
             return
-        self.loglevel = self._LOGLEVEL_NAMES[val]
+        self._set_loglevel(self._LOGLEVEL_NAMES[val])
         # Reset scroll so new level is immediately visible from tail
         self.log_offset = 0
         if self._monitoring_started:
@@ -8247,8 +8277,8 @@ press '?' inside the app for the full keyboard reference.\
     parser.add_argument('--select', metavar='HOST', dest='select_host',
                         help=argparse.SUPPRESS)  # internal: pre-select a host by name at startup
     parser.add_argument('--log-level', metavar='LEVEL', dest='log_level',
-                        choices=['quiet', 'normal', 'info', 'debug'],
-                        help='event log verbosity: quiet normal info debug (default: normal)')
+                        choices=['quiet', 'normal', 'info', 'debug', 'trace'],
+                        help='event log verbosity: quiet normal info debug trace (default: normal)')
     parser.add_argument('-v', dest='verbose', action='count', default=0,
                         help='increase log verbosity (-v info, -vv debug)')
     parser.add_argument('-q', dest='quiet', action='count', default=0,
@@ -8312,10 +8342,10 @@ def main(stdscr, args):
 
     # Resolve log level: --log-level base, then +verbose/-quiet offset
     _level_names = {'quiet': LEVEL_QUIET, 'normal': LEVEL_NORMAL,
-                    'info': LEVEL_INFO, 'debug': LEVEL_DEBUG}
+                    'info': LEVEL_INFO, 'debug': LEVEL_DEBUG, 'trace': LEVEL_TRACE}
     base_level = _level_names.get(args.log_level, LEVEL_NORMAL)
-    app.loglevel = max(LEVEL_QUIET, min(LEVEL_DEBUG,
-                                        base_level + args.verbose - args.quiet))
+    app._set_loglevel(max(LEVEL_QUIET, min(LEVEL_TRACE,
+                                           base_level + args.verbose - args.quiet)))
 
     # Apply any display-mode flags supplied on the command line.
     # These run after _load_config() so they always take precedence over the
