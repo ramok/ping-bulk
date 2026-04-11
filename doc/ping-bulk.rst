@@ -739,14 +739,26 @@ pressing ``c`` directly.
 
 ``:edit``
     Open the loaded hosts file in an external editor.  After the editor
-    exits, ping-bulk prompts to reload the file (``Y``/``n``).
+    exits, if the file was modified a three-option prompt appears:
+
+    * ``[1] re-exec`` — replace the current process with a fresh
+      ping-bulk invocation (``os.execvp``), picking up both the updated
+      hosts script and any newer version of the ping-bulk binary itself.
+      Ping history is not preserved.
+    * ``[2] reload`` — in-process reload: stop monitoring threads, clear
+      the host list, re-source the file, then restart monitoring.  Ping
+      history and counters are preserved for hosts whose name is unchanged.
+    * ``[3] / Esc / any other key`` — ignore; continue with the current session.
+
+    If the file was not modified (or is read-only), no prompt is shown.
 
     Editor resolution order: ``$VISUAL`` → ``$EDITOR`` → ``editor``
     (Debian alternatives) → ``vim`` → ``vi``.
 
-    In **kiosk mode** the editor is restricted to ``rvim`` (``vim -Z``),
-    which disables ``:!``, ``:shell``, and external filters to prevent
-    shell escapes.  The file is reloaded automatically (no prompt).
+    In **kiosk mode** the editor is restricted to ``rnano`` or ``rvim``
+    (``vim -Z``), which disables ``:!``, ``:shell``, and external filters
+    to prevent shell escapes.  The same three-option prompt appears after
+    editing.
 
 Kiosk mode
 ----------

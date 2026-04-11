@@ -5345,8 +5345,8 @@ class Application:
             line = "Not in a multiplexer — relaunch inside tmux? [Y/n]: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
-        elif p['type'] == 'edit_reload':
-            line = f"Reload '{p.get('file', '')}' ? [Y/n]: "
+        elif p['type'] == 'script_changed':
+            line = "Script changed — [1] re-exec  [2] reload  [3] ignore: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
 
@@ -5422,11 +5422,17 @@ class Application:
                     self.add_event("cmd", "relaunch: tmux/screen not found")
             self.prompt = None
 
-        elif p['type'] == 'edit_reload':
-            if key not in (ord('n'), ord('N'), 27):
-                self._cmd_source(p.get('file', ''))
-                self.add_event("cmd", f"edit: reloaded {p.get('file', '')}")
-            self.prompt = None
+        elif p['type'] == 'script_changed':
+            file = p.get('file', '')
+            if key == ord('1'):
+                self.prompt = None
+                curses.endwin()
+                os.execvp(sys.argv[0], sys.argv)
+            elif key == ord('2'):
+                self._edit_reload_inplace(file)
+                self.prompt = None
+            else:  # 3, Esc, or any other key
+                self.prompt = None
 
     def save_to_file(self, filename, append=False, write_separator=True):
         """Write the current event log to a file.
@@ -6190,6 +6196,58 @@ class Application:
 
     # ── :edit ────────────────────────────────────────────────────────────────
 
+    def _snapshot_monitor(self, m):
+        """Return a dict of per-monitor stats for history preservation across reload."""
+        with m.lock:
+            return {
+                'history':      list(m.history),
+                'history_times': list(m.history_times),
+                'latencies':    m.latencies[:],
+                'rx_count':     m.rx_count,
+                'xx_count':     m.xx_count,
+                'ping_count':   m.ping_count,
+                'alive':        m.alive,
+                'down_since':   m.down_since,
+                'up_since':     m.up_since,
+            }
+
+    def _restore_monitor(self, m, snap):
+        """Restore stats captured by _snapshot_monitor into a freshly created monitor."""
+        with m.lock:
+            m.history.extend(snap['history'])
+            m.history_times.extend(snap['history_times'])
+            m.latencies[:] = snap['latencies']
+            m.rx_count    = snap['rx_count']
+            m.xx_count    = snap['xx_count']
+            m.ping_count  = snap['ping_count']
+            m.alive       = snap['alive']
+            m.down_since  = snap['down_since']
+            m.up_since    = snap['up_since']
+
+    def _edit_reload_inplace(self, hosts_file):
+        """In-process reload: snapshot history, clear monitors, re-source, restore."""
+        snapshot = {m.host: self._snapshot_monitor(m) for m in self.monitors}
+
+        for m in self.monitors:
+            m.stop()
+        for t in self.threads:
+            t.join(timeout=0)
+
+        self.highlighted_index = None
+        self.host_scroll = 0
+        self.monitors.clear()
+        self.entries.clear()
+        self.threads.clear()
+        self.hosts_map.clear()
+
+        self._cmd_source(hosts_file)
+
+        for m in self.monitors:
+            if m.host in snapshot:
+                self._restore_monitor(m, snapshot[m.host])
+
+        self.add_event("cmd", f"edit: reloaded {hosts_file}")
+
     def _resolve_editor(self) -> list:
         """Return [editor_binary] or [editor_binary, flags] to open a file.
 
@@ -6214,14 +6272,9 @@ class Application:
         return []
 
     def _cmd_edit(self, args=''):
-        """Open the active hosts file in an external editor, then reload it."""
+        """Open the active hosts file in an external editor, then offer reload options."""
         if not self.hosts_file:
             self.add_event("cmd", "edit: no hosts file loaded (use -f <file>)")
-            return
-
-        if not os.access(self.hosts_file, os.W_OK):
-            self.add_event("cmd",
-                f"edit: no write permission for {self.hosts_file}")
             return
 
         editor_cmd = self._resolve_editor()
@@ -6234,6 +6287,11 @@ class Application:
                                "(set $VISUAL or $EDITOR, or install vim)")
             return
 
+        try:
+            mtime_before = os.stat(self.hosts_file).st_mtime
+        except OSError:
+            mtime_before = None
+
         import curses as _curses
         _curses.endwin()
         try:
@@ -6241,11 +6299,15 @@ class Application:
         finally:
             _curses.doupdate()
 
-        if self.kiosk_mode:
-            self._cmd_source(self.hosts_file)
-            self.add_event("cmd", f"edit: reloaded {self.hosts_file}")
-        else:
-            self.prompt = {'type': 'edit_reload', 'chars': [], 'file': self.hosts_file}
+        try:
+            mtime_after = os.stat(self.hosts_file).st_mtime
+        except OSError:
+            mtime_after = None
+
+        if mtime_before is None or mtime_after is None or mtime_after == mtime_before:
+            return  # nothing changed (or read-only file that couldn't be written)
+
+        self.prompt = {'type': 'script_changed', 'file': self.hosts_file}
 
     def _cmd_dns(self, args=''):
         """Cycle (no arg) or set DNS display mode."""
