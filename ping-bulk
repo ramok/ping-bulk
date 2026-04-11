@@ -3508,7 +3508,8 @@ class Application:
     def scroll_log(self, delta):
         """Scroll event log by delta lines (positive = up/back in time, negative = down/forward)"""
         total = len(self.events)
-        max_offset = max(0, total - 1)
+        page_size = getattr(self, '_log_page_size', 20)
+        max_offset = max(0, total - page_size)
         self.log_offset = max(0, min(max_offset, self.log_offset + delta))
 
     def clamp_host_scroll(self, visible_rows: int) -> None:
