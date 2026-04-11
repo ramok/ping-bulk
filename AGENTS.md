@@ -173,7 +173,6 @@ Users write `:bind-key` directives:
 ### Direction / scroll arguments
 - **Trailing dash = reverse/backward**: `half-` scrolls left/back; `half` scrolls right/forward.
 - Standard set: `half`, `half-`, `full`, `full-`, `page`, `page-`.
-- Old leading-dash forms (`-half`, `-full`, `-page`) are kept as **permanent aliases**; do not remove them.
 
 ### Confirmation UX
 - Destructive commands support `--confirm`.

@@ -224,7 +224,7 @@ class _Binding:
         mode_str = f', mode={self.mode}' if self.mode != 'normal' else ''
         return f"_Binding({ctx}{self.key_notation!r}, {edit}, {cmds!r}, {self.origin}{mode_str})"
 
-# Valid context guard variables for :bindkey --%x flags.
+# Valid context guard variables for :bind-key --%x flags.
 _BINDING_CONTEXT_VARS = frozenset('hsrdjpHR')
 
 
@@ -2813,7 +2813,7 @@ CMD_REGISTRY = [
            '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
-    CmdDef(['bind-key', 'bindkey'], '_cmd_bindkey',    None,
+    CmdDef(['bind-key'],             '_cmd_bindkey',    None,
            '[key] [command]',    'bind/unbind/list key bindings'),
     CmdDef(['select'],           '_cmd_select',     ['up', 'down', 'first', 'last', 'none'],
            '[up|down|first|last|none]', 'navigate or clear host selection'),
@@ -3886,18 +3886,17 @@ class Application:
         """Scroll ping history: numeric delta, half/half-, full/full-.
 
         Trailing ``-`` means reverse/back direction (half- = older, full- = oldest).
-        Legacy leading-dash forms (-half, -full) are accepted as aliases.
         """
         if not args:
             return
         a = args.strip()
         if a == 'half':
             self.scroll_history(max(1, self._visible_ping_length // 2))
-        elif a in ('half-', '-half'):
+        elif a == 'half-':
             self.scroll_history(-max(1, self._visible_ping_length // 2))
         elif a == 'full':
             self.scroll_history(self._visible_ping_length)
-        elif a in ('full-', '-full'):
+        elif a == 'full-':
             self.scroll_history(-self._visible_ping_length)
         else:
             try:
@@ -3909,7 +3908,6 @@ class Application:
         """Scroll event log: numeric delta, page/page-.
 
         Trailing ``-`` means reverse/back direction (page- = up/older).
-        Legacy leading-dash form (-page) is accepted as an alias.
         """
         if not args:
             return
@@ -3917,7 +3915,7 @@ class Application:
         page_size = getattr(self, '_log_page_size', 20)
         if a == 'page':
             self.scroll_log(page_size)
-        elif a in ('page-', '-page'):
+        elif a == 'page-':
             self.scroll_log(-page_size)
         else:
             try:
@@ -4229,10 +4227,10 @@ class Application:
     def _cmd_bindkey(self, args=''):
         """Bind, unbind, or list key bindings.
 
-        :bindkey                               — list all user bindings
-        :bindkey [--mode MODE] [--%x] <key>    — unbind (remove binding)
-        :bindkey [--mode MODE] [--desc TEXT] [--hint TEXT] [--%x] <key> <cmd>
-                                               — bind key to command(s)
+        :bind-key                               — list all user bindings
+        :bind-key [--mode MODE] [--%x] <key>    — unbind (remove binding)
+        :bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] [--%x] <key> <cmd>
+                                                — bind key to command(s)
 
         --mode MODE:  normal (default), help, details, command
         --desc TEXT:  description shown in help overlay custom-bindings section

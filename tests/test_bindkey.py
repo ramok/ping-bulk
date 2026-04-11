@@ -986,12 +986,12 @@ class TestScrollDirectionArgs:
         app._cmd_scroll_history('half-')
         assert app._last_delta == -50
 
-    def test_scroll_history_legacy_minus_half(self, app):
-        """Old -half form still works."""
+    def test_scroll_history_legacy_minus_half_invalid(self, app):
+        """-half is no longer valid; treated as invalid arg."""
         app.scroll_history = lambda d: setattr(app, '_last_delta', d)
         app._visible_ping_length = 100
         app._cmd_scroll_history('-half')
-        assert app._last_delta == -50
+        assert not hasattr(app, '_last_delta')
 
     def test_scroll_history_full_dash(self, app):
         app.scroll_history = lambda d: setattr(app, '_last_delta', d)
@@ -1005,12 +1005,12 @@ class TestScrollDirectionArgs:
         app._cmd_scroll_log('page-')
         assert app._last_log_delta == -20
 
-    def test_scroll_log_legacy_minus_page(self, app):
-        """Old -page form still works."""
+    def test_scroll_log_legacy_minus_page_invalid(self, app):
+        """-page is no longer valid; treated as invalid arg."""
         app.scroll_log = lambda d: setattr(app, '_last_log_delta', d)
         app._log_page_size = 20
         app._cmd_scroll_log('-page')
-        assert app._last_log_delta == -20
+        assert not hasattr(app, '_last_log_delta')
 
 
 # ===========================================================================

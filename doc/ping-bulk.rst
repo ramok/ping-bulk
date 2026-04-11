@@ -313,9 +313,6 @@ Key bindings
 ``:bind-key``
     List all user-defined key bindings in the event log.
 
-``:bindkey``
-    Alias for ``:bind-key`` (kept for backward compatibility).
-
 ``:set multikey-timeout <ms>``
     Set the multi-key timeout in milliseconds (0–2000).
     Default: ``0`` (wait forever for the next key in a multi-key sequence).
@@ -1123,7 +1120,7 @@ Recognised settings
 ``:bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] <key> <command>``
     User key bindings.  Only bindings that differ from the defaults
     are saved.  Unbinds of default keys are stored as bare
-    ``:bind-key <key>`` lines.  ``:bindkey`` is accepted as an alias.
+    ``:bind-key <key>`` lines.
 
 Example::
 
