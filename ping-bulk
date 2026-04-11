@@ -4607,8 +4607,8 @@ class Application:
     def _cmd_bindkey(self, args=''):
         """Bind, unbind, or list key bindings.  Also dispatched by :unbind-key.
 
-        :bind-key [--show]                      — list all user bindings
-        :bind-key --show-all                    — list all bindings (user + default)
+        :bind-key [--show]                      — list all bindings in [A] overlay
+        :bind-key --show-all                    — same as above (alias)
         :bind-key [--mode MODE] [--%x] <key>    — query: show what is bound
         :bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] [--%x] <key> <cmd>
                                                 — bind key to command(s)
@@ -4630,9 +4630,9 @@ class Application:
             self._cmd_bindkey_show_all()
             return
 
-        # no args or --show: list user bindings only
+        # no args or --show: list all bindings (user + default) in [A] mode
         if not args or args == '--show':
-            self._cmd_bindkey_show_user()
+            self._cmd_bindkey_show_all()
             return
 
         # Parse --mode, --desc, --hint flags before context flags
