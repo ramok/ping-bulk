@@ -3067,8 +3067,8 @@ CMD_REGISTRY = [
            '[prev]',              'jump to next (or prev) search match',
            completable=False),
     CmdDef(['bind-key'],             '_cmd_bindkey',    None,
-           '[--show|--show-all] [key] [command]', 'bind/query/list key bindings',
-           flags=['--show', '--show-all', '--mode', '--desc', '--hint',
+           '[--show] [key] [command]', 'bind/query/list key bindings',
+           flags=['--show', '--mode', '--desc', '--hint',
                   '--%h', '--%s', '--%p', '--%r', '--%d', '--%j']),
     CmdDef(['unbind-key'],           '_cmd_bindkey',    None,
            '<key>',              'unbind a key binding',
@@ -4583,22 +4583,6 @@ class Application:
             return s.join(value)
         return value
 
-    def _cmd_bindkey_show_user(self):
-        """Open the help overlay scrolled to the Custom bindings section.
-
-        If there are no user bindings, scroll to the top so the user sees
-        the full help text (custom section won't exist).
-        """
-        self._cmd_help()  # opens overlay, resets scroll to 0
-        # Find the "Custom bindings" divider line in the rendered content
-        lines = self._build_help_lines()
-        for i, line in enumerate(lines):
-            if 'Custom bindings' in line:
-                self.help_scroll = max(0, i - 1)
-                return
-        # No user bindings section found — stay at top, the overlay will show
-        # the standard help text which already lists custom bindings info
-
     def _cmd_bindkey_show_all(self):
         """Open the help overlay in all-bindings ([A]) mode."""
         self._cmd_help()
@@ -4608,7 +4592,6 @@ class Application:
         """Bind, unbind, or list key bindings.  Also dispatched by :unbind-key.
 
         :bind-key [--show]                      — list all bindings in [A] overlay
-        :bind-key --show-all                    — same as above (alias)
         :bind-key [--mode MODE] [--%x] <key>    — query: show what is bound
         :bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] [--%x] <key> <cmd>
                                                 — bind key to command(s)
@@ -4625,12 +4608,7 @@ class Application:
 
         args = args.strip()
 
-        # --show-all: print every binding (user + default)
-        if args == '--show-all':
-            self._cmd_bindkey_show_all()
-            return
-
-        # no args or --show: list all bindings (user + default) in [A] mode
+        # no args or --show: open [A] all-bindings overlay
         if not args or args == '--show':
             self._cmd_bindkey_show_all()
             return
