@@ -148,11 +148,10 @@ class TestGetCompletions:
             f"Unexpected results for 'hi': {sorted(result)}"
         )
 
-    def test_non_completable_ssh_begin_not_returned(self, app):
-        """remote-ping-begin and remote-ping-end are marked completable=False and must be excluded."""
+    def test_non_completable_with_not_returned(self, app):
+        """:with is marked completable=False and must be excluded from completions."""
         result = app._get_completions('')
-        assert 'remote-ping-begin' not in result, "'remote-ping-begin' should be excluded from completions"
-        assert 'remote-ping-end'   not in result, "'remote-ping-end' should be excluded from completions"
+        assert 'with' not in result, "'with' should be excluded from completions (completable=False)"
 
     def test_result_is_sorted(self, app):
         """Completions for the first token must be returned in sorted order."""

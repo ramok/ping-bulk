@@ -1,8 +1,8 @@
 """Unit tests for nested SSH jump host chaining.
 
 Covers:
-  - :remote-ping command inside :remote-ping-begin block (direct nesting)
-  - :remote-ping command inside :for loop inside :remote-ping-begin block
+  - :remote-ping command inside :with remote-ping block (direct nesting)
+  - :remote-ping command inside :for loop inside :with remote-ping block
   - Multiple levels of jump host chaining with -J option
   - Username stripping in jump host display chains
   - Display format verification for chained jump hosts
@@ -25,14 +25,14 @@ from utils.hosts_helper import write_hosts
 # ===========================================================================
 
 class TestDirectSshNesting:
-    """Direct :remote-ping command inside :remote-ping-begin block (no :for loop)."""
+    """Direct :remote-ping command inside :with remote-ping block (no :for loop)."""
 
     def test_ssh_inside_ssh_begin_chains_with_jump_option(self, pb, tmp_path):
-        """:remote-ping inside :remote-ping-begin should produce -J chained command."""
+        """:remote-ping inside :with remote-ping should produce -J chained command."""
         content = """\
-            :remote-ping-begin komar@ps-supervisor
+            :with remote-ping komar@ps-supervisor
             :remote-ping dev@10.123.1.31 ps-jetson
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -43,12 +43,12 @@ class TestDirectSshNesting:
         )
 
     def test_multiple_ssh_inside_ssh_begin_all_chained(self, pb, tmp_path):
-        """Multiple :remote-ping commands inside :remote-ping-begin all get chained."""
+        """Multiple :remote-ping commands inside :with remote-ping all get chained."""
         content = """\
-            :remote-ping-begin user@bastion
+            :with remote-ping user@bastion
             :remote-ping admin@host1 target1
             :remote-ping admin@host2 target2
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -57,7 +57,7 @@ class TestDirectSshNesting:
         assert ':remote-ping -J user@bastion admin@host2 target2' in cmd_entries
 
     def test_ssh_without_ssh_begin_not_chained(self, pb, tmp_path):
-        """:remote-ping command outside :remote-ping-begin block is not modified."""
+        """:remote-ping command outside :with remote-ping block is not modified."""
         content = """\
             :remote-ping user@host target
         """
@@ -73,26 +73,26 @@ class TestDirectSshNesting:
 # ===========================================================================
 
 class TestSshInsideForInsideSshBegin:
-    """:remote-ping command inside :for loop inside :remote-ping-begin block."""
+    """:remote-ping command inside :for loop inside :with remote-ping block."""
 
     def test_ssh_inside_for_inside_ssh_begin_chains_properly(self, pb, tmp_path):
         """The key test case from the user's example.
 
-        :remote-ping-begin komar@ps-supervisor
+        :with remote-ping komar@ps-supervisor
             :for sensor-hub-{1-3,5}
                 :remote-ping dev@10.123.$1.31 ps-jetson
             :done
-        :remote-ping-end
+        :done
 
         Should produce: :remote-ping -J komar@ps-supervisor dev@10.123.1.31 ps-jetson
         (repeated for each iteration: 1, 2, 3, 5)
         """
         content = """\
-            :remote-ping-begin komar@ps-supervisor
+            :with remote-ping komar@ps-supervisor
             :for sensor-hub-{1-3,5}
             :remote-ping dev@10.123.$1.31 ps-jetson
             :done
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -111,7 +111,7 @@ class TestSshInsideForInsideSshBegin:
             )
 
     def test_ssh_inside_for_without_outer_ssh_begin(self, pb, tmp_path):
-        """:remote-ping inside :for without outer :remote-ping-begin should not chain."""
+        """:remote-ping inside :for without outer :with remote-ping should not chain."""
         content = """\
             :for node{1,2}
             :remote-ping user@jump$1 target$1
@@ -130,13 +130,13 @@ class TestSshInsideForInsideSshBegin:
                 assert '-J' not in cmd, f"Unexpected -J in {cmd!r}"
 
     def test_ssh_inside_for_with_multiple_backrefs(self, pb, tmp_path):
-        """:remote-ping command with multiple backrefs inside :for inside :remote-ping-begin."""
+        """:remote-ping command with multiple backrefs inside :for inside :with remote-ping."""
         content = """\
-            :remote-ping-begin admin@gateway
+            :with remote-ping admin@gateway
             :for rack{1,2}-unit{a,b}
             :remote-ping user@10.$1.$2.1 target-$1-$2
             :done
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -155,14 +155,14 @@ class TestSshInsideForInsideSshBegin:
             )
 
     def test_mixed_ssh_and_host_lines_inside_for_inside_ssh_begin(self, pb, tmp_path):
-        """:for loop with both :remote-ping commands and plain host lines inside :remote-ping-begin."""
+        """:for loop with both :remote-ping commands and plain host lines inside :with remote-ping."""
         content = """\
-            :remote-ping-begin user@bastion
+            :with remote-ping user@bastion
             :for zone{1,2}
             plain-host-$1
             :remote-ping jump@zone$1 target$1
             :done
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -181,23 +181,24 @@ class TestSshInsideForInsideSshBegin:
 # ===========================================================================
 
 class TestNestedSshBeginInsideFor:
-    """:remote-ping-begin/:remote-ping-end blocks inside :for loop should produce errors."""
+    """:with remote-ping blocks inside :for loop — supported."""
 
-    def test_ssh_begin_inside_for_produces_error(self, pb, tmp_path):
-        """:remote-ping-begin inside :for is not supported and should produce an error."""
+    def test_ssh_begin_inside_for_emits_commands(self, pb, tmp_path):
+        """:with remote-ping inside :for expands relay per iteration."""
         content = """\
             :for dc{1,2}
-            :remote-ping-begin user@dc$1-jump
+            :with remote-ping user@dc$1-jump
             target-$1
-            :remote-ping-end
+            :done
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         error_entries = [v for k, v in entries if k == 'error']
+        cmd_entries = [v for k, v in entries if k == 'cmd']
 
-        # Should produce at least one error about :remote-ping-begin inside :for
-        assert len(error_entries) >= 1
-        assert any('remote-ping-begin' in v.lower() for v in error_entries)
+        assert not error_entries, f"Expected no errors; got {error_entries!r}"
+        assert ':remote-ping user@dc1-jump target-1' in cmd_entries
+        assert ':remote-ping user@dc2-jump target-2' in cmd_entries
 
 
 # ===========================================================================
@@ -210,9 +211,9 @@ class TestMultipleJumpHostsWithoutUsernames:
     def test_jump_chain_without_usernames_displays_correctly(self, pb, tmp_path):
         """Jump host chain without usernames should display all hosts."""
         content = """\
-            :remote-ping-begin jumphost1
+            :with remote-ping jumphost1
             :remote-ping jumphost2 target
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -223,11 +224,11 @@ class TestMultipleJumpHostsWithoutUsernames:
     def test_multiple_jump_hosts_in_for_loop(self, pb, tmp_path):
         """Multiple jump hosts without usernames expanded in :for loop."""
         content = """\
-            :remote-ping-begin bastion
+            :with remote-ping bastion
             :for subnet{1,2}
             :remote-ping 10.0.$1.1 final-$1
             :done
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -244,11 +245,11 @@ class TestEdgeCases:
     """Edge cases and error conditions."""
 
     def test_ssh_with_empty_args_inside_ssh_begin(self, pb, tmp_path):
-        """:remote-ping with no arguments inside :remote-ping-begin."""
+        """:remote-ping with no arguments inside :with remote-ping."""
         content = """\
-            :remote-ping-begin user@jump
+            :with remote-ping user@jump
             :remote-ping
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -257,11 +258,11 @@ class TestEdgeCases:
         assert ':remote-ping -J user@jump ' in cmd_entries or ':remote-ping -J user@jump' in cmd_entries
 
     def test_ssh_begin_with_empty_args(self, pb, tmp_path):
-        """:remote-ping-begin with no arguments."""
+        """:with remote-ping with no arguments."""
         content = """\
-            :remote-ping-begin
+            :with remote-ping
             :remote-ping user@host target
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -272,11 +273,11 @@ class TestEdgeCases:
     def test_deduplication_of_chained_ssh_commands(self, pb, tmp_path):
         """Duplicate chained SSH commands should be deduplicated."""
         content = """\
-            :remote-ping-begin user@jump
+            :with remote-ping user@jump
             :for node{1,1}
             :remote-ping admin@host target
             :done
-            :remote-ping-end
+            :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']

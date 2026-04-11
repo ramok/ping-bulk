@@ -475,14 +475,34 @@ Monitoring via SSH
         :remote-ping user@remote 8.8.8.8
         :remote-ping -J bastion ops@remote-a 10.10.0.1
 
-``:remote-ping-begin [ssh-opts] <relay>``
+``:with remote-ping [ssh-opts] <relay>``
     Open a remote-ping block.  Every plain host line that follows (until
-    ``:remote-ping-end``) is automatically wrapped as
-    ``:remote-ping [ssh-opts] <relay> <host>``.  Only valid inside a hosts file.
+    ``:done``) is automatically wrapped as
+    ``:remote-ping [ssh-opts] <relay> <host>``.  ``:for`` loops may appear
+    inside the block.  Only valid inside a hosts file.
 
-``:remote-ping-end``
-    Close the current ``:remote-ping-begin`` block.  Only valid inside a
-    hosts file.
+    Example::
+
+        :with remote-ping -J bastion.example.com ops@remote-a
+            10.10.0.{1..4}
+            :for sensor-{1..3}
+                10.10.1.$1
+            :done
+        :done
+
+``:with prog-options <prog>``
+    Open a :prog-options block for *prog*.  Every non-directive line
+    until ``:done`` is treated as ``<glob> [opts|--disable]``
+    and applied as ``:prog-options <prog> <glob> [opts]``.
+    Only valid inside a hosts file.
+
+    Example::
+
+        :with prog-options ssh
+          *.internal.example.com  -o ProxyJump=bastion
+          *-router                -l admin
+          restricted.example.com  --disable
+        :done
 
 Help
 ----
@@ -622,12 +642,12 @@ Format
     for named) in body lines are substituted with the value produced by
     brace group *N* of the expanded pattern.  ``$0`` / ``${0}`` is the
     entire expanded string.  Body lines without any back-reference are
-    included only once.  ``:for`` may appear inside a ``:remote-ping-begin`` block.
+    included only once.  ``:with`` may appear inside a ``:for`` body.
 
 ``:done``
-    Close the current ``:for`` loop.  If the file ends without a ``:done``
-    (e.g. the ``:for`` block is the last thing in the file), an implicit
-    ``:done`` is applied at EOF so the loop still produces its entries.
+    Close the current ``:with`` or ``:for`` block.  If the file ends without
+    a ``:done`` (e.g. the ``:for`` block is the last thing in the file), an
+    implicit ``:done`` is applied at EOF so the loop still produces its entries.
     This also applies when a file is loaded interactively via ``:source``.
 
 ``:let name [value]``
@@ -773,12 +793,12 @@ Format
     When there are many rules for one program, the block form avoids
     repeating the program name on every line::
 
-        :prog-options-begin ssh
+        :with prog-options ssh
           *.internal.example.com  -o ProxyJump=bastion
           *-router                -l admin
           *-comm-mod              -l root
           restricted.example.com  --disable
-        :prog-options-end
+        :done
 
     Each inner line is ``<glob> [opts|--disable]`` — identical to the
     last two arguments of the inline form.  The inline form continues
@@ -795,16 +815,6 @@ Format
     ``:prog-options``
         List all rules for all programs.
 
-``:prog-options-begin <prog>``
-    Open a :prog-options block for *prog*.  Every non-directive line
-    until ``:prog-options-end`` is treated as ``<glob> [opts|--disable]``
-    and applied as ``:prog-options <prog> <glob> [opts]``.
-    Only valid inside a hosts file.
-
-``:prog-options-end``
-    Close the current ``:prog-options-begin`` block.
-    Only valid inside a hosts file.
-
 ``c`` hotkey (SSH connect)
 --------------------------
 
@@ -814,7 +824,7 @@ pre-fills the command line for editing and executes after **Enter**.
 The default ``c`` binding behaves as follows:
 
 - For ``SshPingMonitor`` hosts (those that have an SSH destination
-  ``%d``, e.g. hosts added via ``:remote-ping`` or ``:remote-ping-begin``)::
+  ``%d``, e.g. hosts added via ``:remote-ping`` or ``:with remote-ping``)::
 
       :mux ssh%{j? -J %{j: -J }} %d
 

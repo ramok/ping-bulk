@@ -562,11 +562,10 @@ _FULL_HELP = [
     "                            :remote-ping user@hostname resolves hostname, preserves username",
     "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
     "  :remote-ping \\[ssh-opts] <relay> <target>  remote ping (runs on relay via SSH)",
-    "  :remote-ping-begin \\[ssh-opts] <relay>     host lines → :remote-ping \\[opts] <relay> <host>",
-    "  :remote-ping-end                            close :remote-ping-begin block (hosts file only)",
+    "  :with remote-ping \\[ssh-opts] <relay>      open block; host lines → :remote-ping commands",
+    "  :with prog-options <prog>                   open :prog-options block; inner lines are <glob> [opts]",
+    "  :done                                       close :with or :for block (hosts file only)",
     "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
-    "  :prog-options-begin <prog>                  open :prog-options block; inner lines are <glob> [opts]",
-    "  :prog-options-end                           close :prog-options-begin block (hosts file only)",
     "  :help  or  ?              show this help",
     "-DIVIDER-",
     "  Section headers  (hosts file)",
@@ -670,9 +669,9 @@ example.com:443
 # ── Remote monitoring over SSH ─────────────────────────────────────────────
 ## Remote sites
 ### Site A (via jump host)
-:remote-ping-begin -J bastion.example.com ops@remote-a
+:with remote-ping -J bastion.example.com ops@remote-a
     10.10.0.{1..4}
-:remote-ping-end
+:done
 
 ### Site B
 :remote-ping ops@remote-b 10.20.0.{1..5}
@@ -1979,8 +1978,8 @@ class SectionLabel:
         self.folded = bool(folded_default)  # True = starts collapsed
 
 
-def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
-                      var_names=None, variables=None, prog_opts_block_prog=None):
+def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
+                      var_names=None, variables=None):
     """Expand a ``:for`` loop and return a list of entry tuples.
 
     Applies back-references (``$0``–``$9`` or ``$name``) to each body
@@ -1998,9 +1997,10 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
     seen_hosts : set
         Mutable set of already-encountered host/SSH-command strings; updated
         in place so deduplication spans the whole file.
-    ssh_block_args : str or None
-        When non-``None`` the loop is nested inside a ``:remote-ping-begin`` block;
-        plain host lines become ``:remote-ping <ssh_block_args> <host>`` commands.
+    with_context : (str, str) or None
+        Inherited ``:with`` context from an enclosing block, as a
+        ``(type, args)`` tuple where *type* is ``'remote-ping'`` or
+        ``'prog-options'``.  ``None`` means no outer context.
     var_names : list[str] or None
         When non-``None``, a list of variable names for named back-references
         (e.g. ``['x', 'y']`` from ``:for x,y in pattern``).
@@ -2009,10 +2009,6 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
         ``:let`` variable store from the enclosing parse context.  Each body
         line is passed through ``_expand_let_vars`` before back-reference
         substitution.  A ``None`` value is treated as an empty dict.
-    prog_opts_block_prog : str or None
-        When non-``None`` the loop is nested inside a ``:prog-options-begin``
-        block; plain (non-directive) lines become ``:prog-options <prog> <line>``
-        commands.
 
     Returns
     -------
@@ -2031,20 +2027,15 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
     # Track no-backref body lines already emitted (add-once logic).
     no_backref_emitted = set()
 
-    # Local SSH context tracking for nested :remote-ping-begin/:remote-ping-end inside :for
-    local_ssh_args = None
-    in_local_ssh_block = False
-
-    # Local prog-options context tracking for :prog-options-begin/:prog-options-end inside :for
-    local_prog_opts_prog = prog_opts_block_prog  # inherit outer block (if any)
-    in_local_prog_opts_block = prog_opts_block_prog is not None
-
     for iteration_idx, (full_str, captures) in enumerate(rows):
         if var_names is not None:
             captures = dict(zip(var_names, captures))
         # Loop-local variable copy so :let inside the body doesn't bleed out
         local_vars = dict(variables)
         if_stack = []  # per-iteration conditional nesting state
+        # Local :with context — inherits outer with_context; overridden per body.
+        local_with_type = with_context[0] if with_context else None
+        local_with_args = with_context[1] if with_context else None
         for line in body_lines:
             # ── :let inside loop body ──────────────────────────────────────
             if line.startswith(':'):
@@ -2158,35 +2149,36 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                         title_tmpl = parts[1].strip() if len(parts) > 1 else ''
                         title = _apply_backref(title_tmpl, captures, full_str)
                         entries.append(('section', title, level, folded_default))
-                    elif cmd_word == 'remote-ping-begin':
-                        # Open local remote-ping block — captures args with back-reference expansion
-                        ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
-                        in_local_ssh_block = True
-                        local_ssh_args = _apply_backref(ssh_args_tmpl, captures, full_str)
-                        continue  # Don't emit a command entry for :remote-ping-begin
-                    elif cmd_word == 'remote-ping-end':
-                        # Close local remote-ping block
-                        in_local_ssh_block = False
-                        local_ssh_args = None
-                        continue  # Don't emit a command entry for :remote-ping-end
-                    elif cmd_word == 'prog-options-begin':
-                        prog_tmpl = parts[1].strip() if len(parts) > 1 else ''
-                        if not prog_tmpl:
-                            entries.append(('error', ':prog-options-begin requires a program name'))
+                    elif cmd_word == 'with':
+                        w_parts_raw = parts[1].strip() if len(parts) > 1 else ''
+                        w_parts = w_parts_raw.split(None, 1)
+                        w_type_tmpl = w_parts[0] if w_parts else ''
+                        w_type = _apply_backref(w_type_tmpl, captures, full_str)
+                        w_args_tmpl = w_parts[1] if len(w_parts) > 1 else ''
+                        w_args = _apply_backref(w_args_tmpl, captures, full_str)
+                        if local_with_type is not None:
+                            entries.append(('error',
+                                ':with cannot be nested inside another :with'))
+                        elif w_type not in ('remote-ping', 'prog-options'):
+                            entries.append(('error',
+                                f':with: unknown block type {w_type!r}; '
+                                f'expected remote-ping or prog-options'))
+                        elif w_type == 'prog-options' and not w_args:
+                            entries.append(('error',
+                                ':with prog-options requires a program name'))
                         else:
-                            in_local_prog_opts_block = True
-                            local_prog_opts_prog = _apply_backref(prog_tmpl, captures, full_str)
+                            local_with_type = w_type
+                            local_with_args = w_args
                         continue
-                    elif cmd_word == 'prog-options-end':
-                        if not in_local_prog_opts_block:
-                            entries.append(('error', ':prog-options-end without :prog-options-begin'))
-                        in_local_prog_opts_block = False
-                        local_prog_opts_prog = prog_opts_block_prog  # restore outer (None if none)
+                    elif cmd_word == 'done':
+                        # Close inner :with block — restore inherited outer context.
+                        local_with_type = with_context[0] if with_context else None
+                        local_with_args = with_context[1] if with_context else None
                         continue
                     elif cmd_word == 'remote-ping':
-                        # :remote-ping command inside :for loop
-                        # If we have an effective SSH context (local or outer), chain them
-                        effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
+                        # :remote-ping inside :for — chain with outer context if remote-ping.
+                        effective_ssh_args = (local_with_args
+                                              if local_with_type == 'remote-ping' else None)
                         inner_ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
                         inner_ssh_args = _apply_backref(inner_ssh_args_tmpl, captures, full_str)
 
@@ -2212,9 +2204,9 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
             else:
                 if not currently_skipping:
                     # If inside a prog-options block, treat line as a glob+opts rule.
-                    if in_local_prog_opts_block:
+                    if local_with_type == 'prog-options':
                         expanded_rule = _apply_backref(line, captures, full_str)
-                        entries.append(('cmd', f':prog-options {local_prog_opts_prog} {expanded_rule}'))
+                        entries.append(('cmd', f':prog-options {local_with_args} {expanded_rule}'))
                         continue
                     # Host line.  A leading '?' marks it as optional: silently skip if the
                     # expanded name has no :resolv mapping at Application init time.
@@ -2234,7 +2226,8 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                         except ValueError as e:
                             entries.append(('error', str(e)))
                             continue
-                        effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
+                        effective_ssh_args = (local_with_args
+                                              if local_with_type == 'remote-ping' else None)
                         for host, host_captures in expanded_pairs:
                             key = (effective_ssh_args, host)
                             if key in seen_hosts:
@@ -2263,7 +2256,8 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                             except ValueError as e:
                                 entries.append(('error', str(e)))
                                 continue
-                            effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
+                            effective_ssh_args = (local_with_args
+                                                  if local_with_type == 'remote-ping' else None)
                             for host, host_captures in expanded_pairs:
                                 key = (effective_ssh_args, host)
                                 if key in seen_hosts:
@@ -2392,8 +2386,7 @@ class _HostsParser:
     def _parse_lines(self, lines):
         """Process a list of ``(text, comment)`` pairs into entry tuples."""
         entries = []
-        remote_ping_args = None  # :remote-ping-begin context; None = not in a block
-        prog_opts_block_prog = None  # :prog-options-begin context; None = not in a block
+        with_stack = []  # list of (type, args); at most 1 deep — :with/:done blocks
         if_stack = []   # stack of {'skipping': bool, 'matched': bool, 'seen_else': bool}
 
         i = 0
@@ -2406,7 +2399,7 @@ class _HostsParser:
                 continue
 
             # When inside a skipped :if block, skip everything; still track
-            # :if/:fi nesting so we pop the right frame, and consume :for
+            # :if/:fi nesting so we pop the right frame, and consume :for/:with
             # bodies so _collect_for_body finds their :done correctly.
             # :elif/:else are handled here too so they can transition the
             # frame from "skipping" to "not skipping" (mirrors _process_for_loop).
@@ -2417,7 +2410,7 @@ class _HostsParser:
                         if_stack.append({'skipping': True, 'matched': True, 'seen_else': False})
                     elif cmd_word_raw == 'fi':
                         if_stack.pop()
-                    elif cmd_word_raw == 'for':
+                    elif cmd_word_raw in ('for', 'with'):
                         _, _, i = self._collect_for_body(lines, i)
                     elif cmd_word_raw in ('elif', 'else'):
                         frame = if_stack[-1]
@@ -2472,8 +2465,9 @@ class _HostsParser:
                     # :let-defined names (e.g. $sh_num) are substituted
                     # before brace-expansion and back-reference extraction.
                     expanded_args = _expand_let_vars(args, self.variables)
-                    entries.extend(self._process_for(expanded_args, body, remote_ping_args,
-                                                    prog_opts_block_prog=prog_opts_block_prog))
+                    w_context = (with_stack[-1][0], with_stack[-1][1]) if with_stack else None
+                    entries.extend(self._process_for(expanded_args, body,
+                                                     with_context=w_context))
                     continue
 
                 # Variable-expand the whole directive line, then re-dispatch.
@@ -2522,24 +2516,31 @@ class _HostsParser:
                         entries.append(('error', ':fi without :if'))
                     else:
                         if_stack.pop()
-                elif cmd_word == 'remote-ping-begin':
-                    remote_ping_args = args
-                elif cmd_word == 'remote-ping-end':
-                    remote_ping_args = None
-                elif cmd_word == 'prog-options-begin':
-                    if not args:
-                        entries.append(('error', ':prog-options-begin requires a program name'))
+                elif cmd_word == 'with':
+                    if with_stack:
+                        entries.append(('error', ':with cannot be nested inside another :with'))
                     else:
-                        prog_opts_block_prog = args
-                elif cmd_word == 'prog-options-end':
-                    if prog_opts_block_prog is None:
-                        entries.append(('error', ':prog-options-end without :prog-options-begin'))
-                    prog_opts_block_prog = None
+                        w_parts = args.split(None, 1)
+                        w_type = w_parts[0] if w_parts else ''
+                        w_args = w_parts[1].strip() if len(w_parts) > 1 else ''
+                        if w_type not in ('remote-ping', 'prog-options'):
+                            entries.append(('error',
+                                f':with: unknown block type {w_type!r}; '
+                                f'expected remote-ping or prog-options'))
+                        elif w_type == 'prog-options' and not w_args:
+                            entries.append(('error',
+                                ':with prog-options requires a program name'))
+                        else:
+                            with_stack.append((w_type, w_args))
                 elif cmd_word == 'done':
-                    entries.append(('error', ':done without :for'))
-                elif cmd_word == 'remote-ping' and remote_ping_args is not None:
-                    # Nested :remote-ping inside :remote-ping-begin → chain jump hosts.
-                    entries.append(('cmd', f':remote-ping -J {remote_ping_args} {args}'))
+                    if with_stack:
+                        with_stack.pop()
+                    else:
+                        entries.append(('error', ':done without :with or :for'))
+                elif (cmd_word == 'remote-ping' and with_stack
+                        and with_stack[-1][0] == 'remote-ping'):
+                    # Nested :remote-ping inside :with remote-ping → chain jump hosts.
+                    entries.append(('cmd', f':remote-ping -J {with_stack[-1][1]} {args}'))
                 else:
                     entries.append(('cmd', text))
                 continue
@@ -2548,10 +2549,14 @@ class _HostsParser:
             text = _expand_let_vars(text, self.variables)
             if not text.strip():
                 continue
-            if prog_opts_block_prog is not None:
-                entries.append(('cmd', f':prog-options {prog_opts_block_prog} {text}'))
+            if with_stack:
+                w_type, w_args = with_stack[-1]
+                if w_type == 'prog-options':
+                    entries.append(('cmd', f':prog-options {w_args} {text}'))
+                else:  # remote-ping
+                    entries.extend(self._parse_host(text, comment, w_args))
             else:
-                entries.extend(self._parse_host(text, comment, remote_ping_args))
+                entries.extend(self._parse_host(text, comment, None))
 
         return entries
 
@@ -2563,8 +2568,7 @@ class _HostsParser:
         Returns ``(body_lines, errors, next_index)``:
 
         * *body_lines* — list of raw text strings (inline comments stripped).
-        * *errors* — ``('error', …)`` entries for illegal nested directives
-          (``:for``, ``:remote-ping-begin``, ``:remote-ping-end``).
+        * *errors* — ``('error', …)`` entries for illegal nested directives.
         * *next_index* — index of the first line after ``:done``.
 
         ``## …`` section headers inside the body are kept unchanged.
@@ -2572,11 +2576,14 @@ class _HostsParser:
         If the file ends without a matching ``:done`` an implicit ``:done`` is
         applied at EOF (useful for ``:source``'d files).
 
-        ``:if``, ``:elif``, ``:else``, and ``:fi`` are intentionally passed
-        through as raw body lines; ``_process_for_loop`` handles them.
+        ``:if``, ``:elif``, ``:else``, ``:fi``, ``:with``, and ``:done`` are
+        passed through as raw body lines; ``_process_for_loop`` handles them.
+        ``:with`` / ``:done`` depth is tracked so that an inner ``:with``'s
+        ``:done`` does not prematurely terminate body collection.
         """
         body = []
         errors = []
+        depth = 0  # tracks open :with blocks inside the body
         i = start
         while i < len(lines):
             text, ic = lines[i]
@@ -2587,15 +2594,21 @@ class _HostsParser:
                 parts = text.split(None, 1)
                 cmd = parts[0][1:].lower()
                 if cmd == 'done':
-                    return body, errors, i
-                if cmd == 'for':
+                    if depth > 0:
+                        depth -= 1
+                        # fall through — preserve :done in body for _process_for_loop
+                    else:
+                        return body, errors, i
+                elif cmd == 'with':
+                    depth += 1
+                    # fall through — preserve :with in body
+                elif cmd == 'for':
                     errors.append(('error', "nested :for is not supported"))
                     continue
-                if cmd == 'remote-ping-begin':
-                    errors.append(('error', ":remote-ping-begin inside :for is not supported"))
-                    continue
-                if cmd == 'remote-ping-end':
-                    errors.append(('error', ":remote-ping-end inside :for is not supported"))
+                elif cmd in ('remote-ping-begin', 'remote-ping-end',
+                             'prog-options-begin', 'prog-options-end'):
+                    errors.append(('error',
+                        f':{cmd} is not supported; use :with/:done syntax'))
                     continue
             # Preserve inline ## label so _process_for_loop can emit :resolv
             body.append(text + (' ## ' + ic if ic else ''))
@@ -2603,7 +2616,7 @@ class _HostsParser:
 
     # ── :for execution ────────────────────────────────────────────────────
 
-    def _process_for(self, args, body_lines, ssh_args, prog_opts_block_prog=None):
+    def _process_for(self, args, body_lines, with_context=None):
         """Expand a ``:for`` directive and return its entries."""
         var_names = None
         if ' in ' in args:
@@ -2613,9 +2626,8 @@ class _HostsParser:
         else:
             pattern = args.strip()
         return _process_for_loop(
-            pattern, body_lines, self.seen_hosts, ssh_args,
+            pattern, body_lines, self.seen_hosts, with_context,
             var_names=var_names, variables=self.variables,
-            prog_opts_block_prog=prog_opts_block_prog,
         )
 
     # ── :let variable assignment ──────────────────────────────────────────
@@ -2699,24 +2711,26 @@ def parse_hosts_file(filename, variables=None):
       :let name val   — define a variable; ``$name`` is substituted in subsequent lines.
                         The name may contain brace expansion (e.g. ``name{1..4}``);
                         ``$N`` in the value is eagerly expanded per brace index.
-      :remote-ping-begin [ssh-opts] <relay>
-                      — open a remote-ping block; all plain host lines until :remote-ping-end are
+      :with remote-ping [ssh-opts] <relay>
+                      — open a remote-ping block; all plain host lines until :done are
                         expanded into ':remote-ping [ssh-opts] <relay> <host>' commands.
-                        Blocks may not be nested.
-      :remote-ping-end — close the current remote-ping block
+                        Blocks may not be nested. :for may appear inside a :with block.
+      :with prog-options <prog>
+                      — open a prog-options block; all plain lines until :done are
+                        treated as '<glob> [opts]' rules for :prog-options.
+      :done           — close the most recent :with or :for block; if the file ends
+                        without :done, an implicit :done is applied at EOF so the loop
+                        still produces its entries (useful for :source'd files)
       :for pattern    — open a loop; every body line is repeated for each expansion
                         of *pattern*, with back-references (\\N / $N) substituted.
-                        :for may appear inside a :remote-ping-begin block.
-      :done           — close the most recent :for loop; if the file ends without
-                        :done, an implicit :done is applied at EOF so the loop still
-                        produces its entries (useful for :source'd files)
+                        :with may appear inside a :for body.
       :cmd [args]     — any other ':'-prefixed line is treated as a startup command
                         (same syntax as the interactive ':' command line)
       # ...           — comment line; ignored entirely
       host1; host2    — semicolons may separate multiple entries on one line
       (empty)         — blank line; ignored
       anything else   — treated as a host/IP address to ping (or, inside a
-                        :remote-ping-begin block, expanded to a :remote-ping command)
+                        :with remote-ping block, expanded to a :remote-ping command)
     """
     return _HostsParser(variables=variables).parse_file(filename)
 
@@ -2841,10 +2855,8 @@ CMD_REGISTRY = [
            '<port> <service>',    'static port→service mapping (overrides default port names from /etc/services)'),
     CmdDef(['remote-ping'],      '_cmd_remote_ping',  None,
            '[ssh-opts] <relay>', 'add remote ping monitor (runs ping on relay via SSH)', completable=False),
-    CmdDef(['remote-ping-begin'],'_cmd_remote_ping_begin', None,
-           '[ssh-opts] <relay>', 'open remote-ping block (hosts file only)', completable=False),
-    CmdDef(['remote-ping-end'],  '_cmd_remote_ping_end',   None,
-           '',                   'close remote-ping block (hosts file only)', completable=False),
+    CmdDef(['with'],             '_cmd_with',         None,
+           '<type> [args]',      'open a context block (hosts file only)', completable=False),
     CmdDef(['fold-all'],         '_cmd_fold_all',   None,
            '',                    'fold (collapse) all sections  [alias: zM / []'),
     CmdDef(['unfold-all'],       '_cmd_unfold_all', None,
@@ -2862,12 +2874,6 @@ CMD_REGISTRY = [
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
     CmdDef(['prog-options'],         '_cmd_prog_options', None,
            '<prog> <glob> <opts>', 'per-program options for :mux'),
-    CmdDef(['prog-options-begin'],   '_cmd_prog_options_begin', None,
-           '<prog>', 'open a :prog-options block (hosts-file only)',
-           completable=False),
-    CmdDef(['prog-options-end'],     '_cmd_prog_options_end',   None,
-           '',      'close a :prog-options block (hosts-file only)',
-           completable=False),
     CmdDef(['edit'],             '_cmd_edit',       None,
            '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
@@ -6505,15 +6511,10 @@ class Application:
             status = '--disable' if opts is None else f'opts={opts_str!r}'
             self.add_event("cmd", f"prog-options: '{prog}' '{pattern}' → {status}")
 
-    def _cmd_prog_options_begin(self, args=''):
-        """:prog-options-begin is a hosts-file-only directive; cannot be used interactively."""
+    def _cmd_with(self, args=''):
+        """:with is a hosts-file-only directive; cannot be used interactively."""
         self.add_event("cmd",
-            "prog-options-begin: this directive is only valid in a hosts file, not interactively")
-
-    def _cmd_prog_options_end(self, args=''):
-        """:prog-options-end is a hosts-file-only directive; cannot be used interactively."""
-        self.add_event("cmd",
-            "prog-options-end: this directive is only valid in a hosts file, not interactively")
+            "with: this directive is only valid in a hosts file, not interactively")
 
     def _match_prog_options(self, prog, host, resolved_hostname=''):
         """Return (disabled, opts_str) for prog + host by matching prog_options rules.
@@ -7083,16 +7084,6 @@ class Application:
                                 )
                                 thread.start()
                                 self.threads.append(thread)
-
-    def _cmd_remote_ping_begin(self, args=''):
-        """Report that :remote-ping-begin is a hosts-file-only directive."""
-        self.add_event("cmd",
-            "remote-ping-begin: only supported in hosts files — use :remote-ping interactively")
-
-    def _cmd_remote_ping_end(self, args=''):
-        """Report that :remote-ping-end is a hosts-file-only directive."""
-        self.add_event("cmd",
-            "remote-ping-end: only supported in hosts files — use :remote-ping interactively")
 
     def _cmd_fold_all(self, args=''):
         """Fold (collapse) all sections."""
@@ -7845,8 +7836,9 @@ hosts file format:
   10.0.0.{1..5}             — brace range expansion (5 hosts)
   :resolv <ip> <hostname>   — static DNS override
   :remote-ping [ssh-opts] <relay> <target> — ping via SSH (run on relay host)
-  :remote-ping-begin [ssh-opts] <relay>    — open block (plain lines → :remote-ping commands)
-  :remote-ping-end                         — close remote-ping block
+  :with remote-ping [ssh-opts] <relay>     — open block (plain lines → :remote-ping commands)
+  :with prog-options <prog>                — open block (plain lines → :prog-options rules)
+  :done                                    — close :with or :for block
 
 press '?' inside the app for the full keyboard reference.\
 """,
