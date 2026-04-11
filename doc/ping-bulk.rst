@@ -534,6 +534,74 @@ Format
     loop-local variable.  It is visible only within that iteration and
     does not modify the outer variable store.
 
+``:if VALUE in val1,val2,...``
+    Open a conditional block.  The lines between ``:if`` and ``:fi`` are
+    included only when the condition is true.  *VALUE* is a plain string
+    or a ``$variable`` / ``${variable}`` reference; it is expanded before
+    the test is evaluated.  The comma-separated token list on the right
+    side is **not** expanded.
+
+    Two condition operators are supported:
+
+    * ``VALUE in val1,val2,...`` — true when *VALUE* matches any token.
+    * ``VALUE not in val1,val2,...`` — true when *VALUE* matches **none**
+      of the tokens.
+
+    An ``:if`` block may be followed by zero or more ``:elif`` clauses and
+    an optional ``:else`` clause, and must be closed with ``:fi``::
+
+        :if VALUE in val1,val2
+            ...lines included when condition is true...
+        :elif VALUE in other1,other2
+            ...included if the first condition was false and this one is true...
+        :else
+            ...included if all preceding conditions were false...
+        :fi
+
+    Conditional blocks work **at the top level** (using ``:let`` variables)
+    as well as **inside** ``:for`` loop bodies (using loop back-references
+    such as ``$1`` or named variables).  Blocks may be nested to arbitrary
+    depth.
+
+    **Top-level example** — select hosts based on a ``:let`` variable::
+
+        :let env production
+
+        :if $env in staging,production
+            10.0.0.1            ## monitoring-server
+        :fi
+
+        :if $env in production
+            10.0.0.2            ## prod-db
+        :fi
+
+    **Inside a** ``:for`` **loop** — conditionally include per-iteration
+    hosts based on the brace-group back-reference::
+
+        :for hub in sensor-hub-{1..4}
+            10.123.$1.1         ## sh$1-router
+            :if $1 in 1,2
+                10.123.$1.16    ## sh$1-activesonar
+            :fi
+        :done
+
+    Here ``$1`` is the numeric capture from the brace group (``1``,
+    ``2``, ``3``, ``4``), so ``sh1-activesonar`` and ``sh2-activesonar``
+    are added but ``sh3-activesonar`` and ``sh4-activesonar`` are not.
+
+``:elif VALUE in val1,val2,...``
+    Add a follow-on condition to the preceding ``:if`` (or ``:elif``).
+    The same operators (``in`` / ``not in``) apply.  Only valid between
+    ``:if`` and ``:fi``.
+
+``:else``
+    Optional fallback clause.  Lines that follow are included when all
+    preceding ``:if`` / ``:elif`` conditions were false.  Only valid
+    between ``:if`` and ``:fi``.
+
+``:fi``
+    Close the current ``:if`` block.
+
 ``:cmd [args]``
     Any command listed under **COMMANDS** above; applied immediately
     when the file is loaded.  This includes ``:bindkey``, so

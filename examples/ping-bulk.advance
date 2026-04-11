@@ -108,6 +108,28 @@ $gw1$domain
 $gw2$domain
 ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 
+# ── :if conditionals ──────────────────────────────────────────────────────
+# :if VALUE in val1,val2,...   — include block when VALUE matches any token
+# :if VALUE not in val1,...    — include block when VALUE matches none
+# :elif / :else / :fi work as expected.  Blocks can be nested and work both
+# at the top level (with :let variables) and inside :for loops.
+
+:let env production
+
+:if $env in staging,production
+    10.0.0.100          ## staging-monitor
+:fi
+
+## :if also works inside :for loops
+:for hub in region-{1..3}
+    10.0.$1.1           ## region$1-router
+    :if $1 in 1,2
+        10.0.$1.10      ## region$1-primary
+    :else
+        10.0.$1.11      ## region$1-backup
+    :fi
+:done
+
 # ── :let with per-loop folding ──────────────────────────────────────────────
 # ${name_$N} two-level expansion: $N is resolved first (from loop back-ref),
 # then the resulting string is used as the variable name.
