@@ -1828,9 +1828,12 @@ class SshPingMonitor(Monitor):
         # Strip username if present for lookup
         lookup_target = self._strip_username(host_or_ip)
 
-        # Perform reverse lookup on the host/IP part only
+        # Perform reverse lookup on the host/IP part only.
+        # Skip entries where the alias IS the IP (self-mapping) so a
+        # human-readable alias (e.g. 'ps-supervisor') is preferred over the
+        # raw IP that _apply_hosts_entry also stores under the same IP key.
         for alias, (resolved_ip, _) in self._hosts_map.items():
-            if resolved_ip == lookup_target:
+            if resolved_ip == lookup_target and alias != resolved_ip:
                 return alias
         return lookup_target
 
@@ -2702,8 +2705,8 @@ class _HostsParser:
 
         if with_stack:
             w_type, w_args = with_stack[-1]
-            entries.append(('error',
-                f':with {w_type} block not closed — missing :end at end of file'))
+            entries.append(('warn',
+                f':with {w_type}: implicit :end at EOF'))
 
         return entries
 
