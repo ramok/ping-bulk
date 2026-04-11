@@ -181,7 +181,7 @@ class TestInlineComment:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('cmd',  ':resolv 10.0.0.1 router'),
-            ('host', '10.0.0.1'),
+            ('host', 'router'),
         ], f"Expected resolv+host for IP with inline comment; got {entries!r}"
 
     def test_hostname_with_inline_comment_no_resolv(self, pb, tmp_path):
@@ -219,9 +219,9 @@ class TestInlineComment:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('cmd',  ':resolv 10.0.0.1 gw1'),
-            ('host', '10.0.0.1'),
+            ('host', 'gw1'),
             ('cmd',  ':resolv 10.0.0.2 gw2'),
-            ('host', '10.0.0.2'),
+            ('host', 'gw2'),
             ('host', 'hostname.local'),
         ], f"Unexpected entries for multiple annotated lines; got {entries!r}"
 
@@ -245,13 +245,13 @@ class TestInlineCommentBackref:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('cmd',  ':resolv 192.168.1.2 workstation2'),
-            ('host', '192.168.1.2'),
+            ('host', 'workstation2'),
             ('cmd',  ':resolv 192.168.1.3 workstation3'),
-            ('host', '192.168.1.3'),
+            ('host', 'workstation3'),
             ('cmd',  ':resolv 192.168.1.4 workstation4'),
-            ('host', '192.168.1.4'),
+            ('host', 'workstation4'),
             ('cmd',  ':resolv 192.168.1.5 workstation5'),
-            ('host', '192.168.1.5'),
+            ('host', 'workstation5'),
         ], f"$1 back-reference in inline comment not expanded; got {entries!r}"
 
     def test_dollar0_full_host_backref(self, pb, tmp_path):
@@ -260,9 +260,9 @@ class TestInlineCommentBackref:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('cmd',  ':resolv 10.0.0.1 ip-10.0.0.1'),
-            ('host', '10.0.0.1'),
+            ('host', 'ip-10.0.0.1'),
             ('cmd',  ':resolv 10.0.0.2 ip-10.0.0.2'),
-            ('host', '10.0.0.2'),
+            ('host', 'ip-10.0.0.2'),
         ], f"$0 back-reference in inline comment not expanded; got {entries!r}"
 
     def test_no_backref_comment_used_verbatim(self, pb, tmp_path):
@@ -271,9 +271,9 @@ class TestInlineCommentBackref:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('cmd',  ':resolv 10.2.0.1 gateway'),
-            ('host', '10.2.0.1'),
+            ('host', 'gateway'),
             ('cmd',  ':resolv 10.2.0.2 gateway'),
-            ('host', '10.2.0.2'),
+            ('host', 'gateway'),
         ], f"Comment without back-reference should be used verbatim; got {entries!r}"
 
     def test_two_brace_groups_two_backrefs(self, pb, tmp_path):
@@ -282,13 +282,13 @@ class TestInlineCommentBackref:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('cmd',  ':resolv 10.1.0.3 rack1-port3'),
-            ('host', '10.1.0.3'),
+            ('host', 'rack1-port3'),
             ('cmd',  ':resolv 10.1.0.4 rack1-port4'),
-            ('host', '10.1.0.4'),
+            ('host', 'rack1-port4'),
             ('cmd',  ':resolv 10.2.0.3 rack2-port3'),
-            ('host', '10.2.0.3'),
+            ('host', 'rack2-port3'),
             ('cmd',  ':resolv 10.2.0.4 rack2-port4'),
-            ('host', '10.2.0.4'),
+            ('host', 'rack2-port4'),
         ], f"Two-group back-reference in inline comment failed; got {entries!r}"
 
     def test_plain_ip_no_brace_no_backref(self, pb, tmp_path):
@@ -297,7 +297,7 @@ class TestInlineCommentBackref:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('cmd',  ':resolv 172.16.0.1 firewall'),
-            ('host', '172.16.0.1'),
+            ('host', 'firewall'),
         ], f"Plain IP with literal comment failed; got {entries!r}"
 
 
@@ -363,7 +363,7 @@ class TestSemicolonSeparator:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('cmd', ':resolv 10.0.0.1 router'),
-            ('host', '10.0.0.1'),
+            ('host', 'router'),
             ('host', '10.0.0.2'),
         ], f"## label ; host failed; got {entries!r}"
 

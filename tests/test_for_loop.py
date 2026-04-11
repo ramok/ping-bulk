@@ -900,7 +900,7 @@ class TestForResolv:
         assert ':resolv 10.0.2.42 sh2-cam42' in resolv_cmds
 
         hosts = [v for k, v in entries if k == 'host']
-        assert hosts == ['10.0.1.41', '10.0.1.42', '10.0.2.41', '10.0.2.42']
+        assert hosts == ['sh1-cam41', 'sh1-cam42', 'sh2-cam41', 'sh2-cam42']
 
     def test_inline_label_named_var_brace_capture(self, pb, tmp_path):
         """':for sh in' named var + inline ## uses $1 for brace capture in label.
@@ -927,6 +927,6 @@ class TestForResolv:
 
         hosts = [v for k, v in entries if k == 'host']
         assert hosts == [
-            '10.0.1.41', '10.0.1.42', '10.0.1.31', '10.0.1.32',
-            '10.0.2.41', '10.0.2.42', '10.0.2.31', '10.0.2.32',
+            'sh1-cam41', 'sh1-cam42', 'sh1-ps31', 'sh1-ps32',
+            'sh2-cam41', 'sh2-cam42', 'sh2-ps31', 'sh2-ps32',
         ]

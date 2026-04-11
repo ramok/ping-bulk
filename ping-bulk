@@ -2128,7 +2128,10 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                                     # '?' not supported for SSH hosts inside :for — add normally.
                                     entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
                                 else:
-                                    entries.append(('optional_host' if optional else 'host', host))
+                                    # Use the label as host entry so dns_mode='off' shows the
+                                    # hostname, matching the behaviour of :resolv IP label + label.
+                                    host_entry = label if (expanded_label and _is_ip(host)) else host
+                                    entries.append(('optional_host' if optional else 'host', host_entry))
                     else:
                         # No back-reference — include only on first encounter, then warn.
                         if host_line not in no_backref_emitted:
@@ -2153,7 +2156,8 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                                     if effective_ssh_args is not None:
                                         entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
                                     else:
-                                        entries.append(('optional_host' if optional else 'host', host))
+                                        host_entry = label if (label_tmpl and _is_ip(host)) else host
+                                        entries.append(('optional_host' if optional else 'host', host_entry))
 
     return entries
 
@@ -2536,7 +2540,11 @@ class _HostsParser:
                 if inline_comment and _is_ip(host):
                     resolved = _apply_backref(inline_comment, captures, host)
                     entries.append(('cmd', f':resolv {host} {resolved}'))
-                entries.append(('optional_host' if optional else 'host', host))
+                    # Use the label as the host entry so dns_mode='off' shows
+                    # the hostname (same behaviour as :resolv IP label + label).
+                    entries.append(('optional_host' if optional else 'host', resolved))
+                else:
+                    entries.append(('optional_host' if optional else 'host', host))
         return entries
 
 

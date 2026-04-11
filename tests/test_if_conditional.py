@@ -258,7 +258,7 @@ class TestIfInsideFor:
         assert not errors, f"Unexpected errors: {errors!r}"
 
         hosts = [v for k, v in entries if k == 'host']
-        assert hosts == ['10.0.0.1'], f"Unexpected hosts: {hosts!r}"
+        assert hosts == ['host1'], f"Unexpected hosts: {hosts!r}"
 
         cmds = [v for k, v in entries if k == 'cmd']
         assert ':resolv 10.0.0.1 host1' in cmds, f"Expected resolv cmd, got: {cmds!r}"
