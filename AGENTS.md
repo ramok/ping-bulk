@@ -55,12 +55,11 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
-- Fixed an `OverflowError` bug in `PortMonitor._resolve_port` when standard library `socket.getservbyport` fails with an out-of-bounds port by catching `OverflowError` alongside `OSError`.
+- **Phase 8 (command flags + key binding system)**: Full flag consistency refactor, `:bind-key` rename, `:quit --confirm` re-press pattern, data-driven overlay dispatch, `--mode`/`--desc`/`--hint` flags, bottom-bar hints moved from hardcoded Python to user-configurable trie entries.
+- **Phase 7 (`:if`/`:elif`/`:else`/`:fi` conditionals)**: Hosts-file conditionals with variable expansion, usable both inside and outside `:for` loops.
+- **Phase 6 (`:prog-options`, mux variables, port monitoring)**: `:prog-options` command, `%r/%d/%j/%R` template variables, TCP port monitoring via `PortMonitor`, inline `##` display-name syntax.
+- Fixed an `OverflowError` bug in `PortMonitor._resolve_port` when `socket.getservbyport` fails with an out-of-bounds port.
 - Refactored the monitor class hierarchy to use a proper abstract base class (`Monitor`) for improved extensibility.
-- Implemented TCP port monitoring via `PortMonitor` and added the `:ping <host>:<port>` syntax.
-- Integrated event logs into the expanded host details overlay with scrolling support.
-- Configured keyboard navigation (Up, Down, Page Up, Page Down) to handle scrolling within the details view.
-- Added ESC to the help text to indicate clearing host selection.
 
 ## 9. Monitor Class Architecture
 
@@ -101,3 +100,91 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
 - `_proc`: Subprocess handle (if applicable).
 - `resolv_static`: Flag for static DNS mappings.
 
+## 10. Key Binding System
+
+All interactive key bindings go through a single unified system. Do **not** add new hardcoded key checks in the main loop.
+
+### Modes
+There are four UI modes that determine which binding table is active:
+
+| Mode | Active when |
+|------|-------------|
+| `normal` | Default — no overlay open |
+| `help` | `?` help overlay is visible |
+| `details` | Host details overlay is visible |
+| `command` | `:` command-line input is active |
+
+The active mode is tracked in `self._current_mode`.
+
+### Binding tables
+- **Normal mode**: bindings stored in `_key_trie` (supports multi-key sequences like `gg`).
+- **Overlay modes** (`help`, `details`, `command`): bindings stored in `_mode_bindings[mode]` — single-key only, no sequences.
+
+### Adding a default binding (Python side)
+1. In `_register_default_bindings()` use the `_b()` helper for normal-mode keys:
+   ```python
+   _b('q', ':quit', hint='[q]uit')
+   ```
+2. For overlay-mode defaults, add to `_register_mode_bindings()`:
+   ```python
+   self._mode_bindings.setdefault('help', {})[ord('q')] = _Binding(
+       commands=[':close'], key_notation='q', mode='help', origin='default')
+   ```
+3. `--hint` makes the label appear in the bottom bar; only set it on the most important actions.
+4. `--desc` makes the binding appear in the `?` help overlay "Custom bindings" section.
+
+### Adding a user-configurable binding (hosts file / config)
+Users write `:bind-key` directives:
+```
+:bind-key ? :help --desc "Show help"
+:bind-key --mode details q :close --hint "[q]uit"
+```
+`_cmd_bindkey` parses these and populates either `_key_trie` (normal mode) or `_mode_bindings` (overlay modes).
+
+### Dispatching
+- Normal mode: `_dispatch_key(key)` walks the trie and calls `_dispatch_cmd()`.
+- Overlay modes: `_dispatch_mode_key(mode, key)` looks up `_mode_bindings[mode][key]` and calls `_dispatch_cmd()`.
+- The main input loop **must not** contain bare `if key == ord('x')` checks for anything user-rebindable.
+
+### Built-in overlay commands
+| Command | Effect |
+|---------|--------|
+| `:close` | Close the currently active overlay (uses `_current_mode` to decide which) |
+| `:scroll-overlay up` | Scroll overlay content up one line |
+| `:scroll-overlay down` | Scroll overlay content down one line |
+| `:scroll-overlay page` | Scroll overlay content down one page |
+| `:scroll-overlay page-` | Scroll overlay content up one page |
+
+---
+
+## 11. Command & Flag Design Policy
+
+### Command naming
+- Use **kebab-case**: `:bind-key`, `:scroll-history`, `:scroll-overlay`, `:prog-options`.
+- Keep old names as **aliases** when renaming; `saveconfig` always writes the canonical (new) name.
+- Register aliases in `CMD_ALIASES` (or equivalent), not as separate `CmdDef` entries.
+
+### Flag naming
+- **Long flags are canonical**: `--confirm`, `--desc`, `--hint`, `--mode`, `--split-v`, `--split-h`, `--split-window`.
+- Short single-char flags (e.g., `-v`, `-h`) are **aliases only** — never the primary documented form.
+- Boolean flags: `--word` with no value (`--confirm`).
+- Value flags: `--word value` space-separated, value may be quoted (`--mode help`, `--desc "Show help"`).
+
+### Direction / scroll arguments
+- **Trailing dash = reverse/backward**: `half-` scrolls left/back; `half` scrolls right/forward.
+- Standard set: `half`, `half-`, `full`, `full-`, `page`, `page-`.
+- Old leading-dash forms (`-half`, `-full`, `-page`) are kept as **permanent aliases**; do not remove them.
+
+### Confirmation UX
+- Destructive commands support `--confirm`.
+- Pattern: first press sets a 2-second deadline and shows a transient `_status_msg`; second press within deadline executes.
+- Do **not** use a `[y/N]` blocking prompt — use `_status_msg` instead.
+
+### Bottom bar hints
+- Action labels in the bottom bar (e.g., `[q]uit`, `help:[?]`) come from `hint=` on trie/mode bindings.
+- **Do not hardcode** new action labels in `draw_menu_bar`; add `hint=` to the binding registration.
+- Keep hints ≤ 12 chars. Only the most important actions need hints.
+
+### Status bar indicators
+- Left-side indicators (DNS / stats / order / history / sync / pause) are **internal-only** hardcoded in `draw_menu_bar`.
+- There is no user-facing `--status` flag; do not add one.
