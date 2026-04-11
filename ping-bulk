@@ -7431,7 +7431,8 @@ class Application:
             self.details_scroll = max(0, self.details_scroll + delta)
 
     def _draw_overlay_box(self, stdscr, height, width, lines, scroll_offset, inner_w, *,
-                          handle_dividers=False, search_bar=None, current_match=None):
+                          handle_dividers=False, search_bar=None,
+                          match_set=None, current_match=None, search_query=''):
         """Draw a centered bordered overlay popup; return the clamped scroll offset.
 
         Draws a ┌─┐ / │ │ / └─┘ box centered on the terminal.  Content lines
@@ -7498,14 +7499,27 @@ class Application:
                 try:
                     stdscr.addstr(r, col0, '│', border_attr)
                     text = line.ljust(inner_w)[:inner_w]
-                    if current_match is not None and abs_line_idx == current_match:
-                        # Highlight the current search match with reverse video
-                        stdscr.addstr(r, col0 + 1, text, curses.A_REVERSE)
-                    else:
-                        self._draw_hint_text(stdscr, r, col0 + 1, text,
-                                             col0 + 1 + inner_w)
+                    self._draw_hint_text(stdscr, r, col0 + 1, text,
+                                         col0 + 1 + inner_w)
                     if col0 + 1 + inner_w < width:
                         stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
+                    # Highlight search match substring via chgat (overwrites attrs
+                    # in-place, so markup colouring from _draw_hint_text is preserved
+                    # for non-matching characters).
+                    if search_query and match_set and abs_line_idx in match_set:
+                        # Strip \[ escapes to get the display text for position lookup.
+                        plain = line.replace('\\[', '[').replace('\\]', ']')
+                        pos = plain.lower().find(search_query.lower())
+                        if pos >= 0:
+                            hl_col = col0 + 1 + pos
+                            hl_len = min(len(search_query), inner_w - pos)
+                            hl_attr = (curses.A_REVERSE | curses.A_BOLD
+                                       if abs_line_idx == current_match
+                                       else curses.A_REVERSE)
+                            try:
+                                stdscr.chgat(r, hl_col, hl_len, hl_attr)
+                            except curses.error:
+                                pass
                 except curses.error:
                     pass
 
@@ -7625,7 +7639,9 @@ class Application:
             stdscr, height, width, lines, self.help_scroll, inner_w,
             handle_dividers=True,
             search_bar=search_bar,
+            match_set=set(self.help_search_matches) if self.help_search_matches else None,
             current_match=current_match,
+            search_query=self.help_search,
         )
 
     def _build_all_bindings_lines(self):
