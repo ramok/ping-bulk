@@ -324,7 +324,7 @@ class TestBackrefIntegration:
         ], f"Unexpected entries: {entries!r}"
 
     def test_ssh_command_brace_form(self, pb, tmp_path):
-        """Generic command with ${1} inside :for → commands with substitution."""
+        """Unknown :ssh directive inside :for → warning (not silently passed through)."""
         content = """\
             :for gw-{1,2}
             :ssh gw-${1}.example.com localhost
@@ -332,8 +332,8 @@ class TestBackrefIntegration:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmds = [e[1] for e in entries if e[0] == 'cmd']
-        assert cmds == [
-            ':ssh gw-1.example.com localhost',
-            ':ssh gw-2.example.com localhost',
-        ], f"Unexpected cmds: {cmds!r}"
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        # :ssh is not a ping-bulk directive — should warn, not be dispatched.
+        assert not cmds, f"Unknown command should not be emitted; got {cmds!r}"
+        assert any('ssh' in w for w in warns), f"Expected warning for :ssh; got {warns!r}"
 

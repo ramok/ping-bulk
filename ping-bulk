@@ -3,6 +3,7 @@ import argparse
 import ctypes
 import ctypes.util
 import curses
+import difflib
 import fnmatch
 import glob as _glob
 import itertools
@@ -706,6 +707,20 @@ _DIRECTIVE_KEYWORDS = frozenset({
     'resolv', 'resolv-port', 'title', 'title2', 'title3',
     'remote-ping', 'source', 'log', 'edit', 'bind-key', 'section',
 })
+
+
+def _unknown_directive_warn(cmd_word):
+    """Return a ``('warn', …)`` entry for an unrecognised directive.
+
+    Looks up *cmd_word* in ``_CMD_MAP`` plus the parser-only keywords and
+    uses :mod:`difflib` to suggest the closest matching directive name.
+    """
+    # _CMD_MAP is defined later in the module but is always populated by the
+    # time this function is called at runtime.
+    all_names = set(_CMD_MAP.keys()) | _DIRECTIVE_KEYWORDS
+    matches = difflib.get_close_matches(cmd_word, all_names, n=1, cutoff=0.6)
+    hint = f'; did you mean :{matches[0]}?' if matches else ''
+    return ('warn', f'unknown directive :{cmd_word}{hint}')
 
 
 def _strip_inline_comment(line):
@@ -2247,7 +2262,12 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                     else:
                         # Generic command — apply back-references and emit every iteration.
                         expanded_cmd = _apply_backref(line, captures, full_str)
-                        entries.append(('cmd', expanded_cmd))
+                        _parts = expanded_cmd.split(None, 1)
+                        _cw = _parts[0][1:].lower()
+                        if _cw not in _CMD_MAP:
+                            entries.append(_unknown_directive_warn(_cw))
+                        else:
+                            entries.append(('cmd', expanded_cmd))
 
             else:
                 if not currently_skipping:
@@ -2629,7 +2649,10 @@ class _HostsParser:
                         f':with {w_type} block'))
                     with_stack.pop()
                 else:
-                    entries.append(('cmd', text))
+                    if cmd_word not in _CMD_MAP:
+                        entries.append(_unknown_directive_warn(cmd_word))
+                    else:
+                        entries.append(('cmd', text))
                 continue
 
             # ── Host line ─────────────────────────────────────────────────

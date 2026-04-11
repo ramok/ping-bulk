@@ -145,7 +145,7 @@ class TestApplyNamedBackref:
 
 
     def test_with_ssh(self, pb, tmp_path):
-        """Test named backrefs in :ssh commands."""
+        """Unknown :ssh directive inside :for → warning (not silently passed through)."""
         content = """\
             :for dc in {us,eu}
             :ssh user@gateway-$dc sensor-$dc-1
@@ -153,9 +153,11 @@ class TestApplyNamedBackref:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmds = [val for kind, val in entries if kind == 'cmd']
+        warns = [val for kind, val in entries if kind == 'warn']
 
-        assert ':ssh user@gateway-us sensor-us-1' in cmds
-        assert ':ssh user@gateway-eu sensor-eu-1' in cmds
+        # :ssh is not a ping-bulk directive — should warn, not be dispatched.
+        assert not cmds, f"Unknown command should not be emitted; got {cmds!r}"
+        assert any('ssh' in w for w in warns), f"Expected warning for :ssh; got {warns!r}"
 
 
     def test_fallback_to_numbered(self, pb, tmp_path):

@@ -430,3 +430,70 @@ class TestSpacedHostWarning:
         hosts = [v for k, v in entries if k == 'host']
         assert not warns
         assert len(hosts) == 4
+
+
+# ---------------------------------------------------------------------------
+# Unknown directive warnings
+# ---------------------------------------------------------------------------
+
+class TestUnknownDirective:
+    """parse_hosts_file emits warnings for unrecognised :directives."""
+
+    def test_unknown_top_level(self, pb, tmp_path):
+        """An unrecognised directive at top level emits a warning, not a cmd."""
+        content = ":unknown-cmd foo bar\n10.0.0.1\n"
+        fname = tmp_path / "hosts"
+        fname.write_text(content)
+        entries = pb.parse_hosts_file(str(fname))
+        cmds = [v for k, v in entries if k == 'cmd']
+        warns = [v for k, v in entries if k == 'warn']
+        assert not any('unknown-cmd' in c for c in cmds), (
+            f"Unknown directive must not be dispatched; cmds={cmds!r}"
+        )
+        assert any('unknown-cmd' in w for w in warns), (
+            f"Expected warning for :unknown-cmd; warns={warns!r}"
+        )
+
+    def test_typo_suggests_correction(self, pb, tmp_path):
+        """:bindkey (without dash) is unknown; warning should suggest :bind-key."""
+        content = ":bindkey t :mux mtr %i\n10.0.0.1\n"
+        fname = tmp_path / "hosts"
+        fname.write_text(content)
+        entries = pb.parse_hosts_file(str(fname))
+        warns = [v for k, v in entries if k == 'warn']
+        assert any('bindkey' in w for w in warns), (
+            f"Expected warning for :bindkey; warns={warns!r}"
+        )
+        assert any('bind-key' in w for w in warns), (
+            f"Expected :bind-key suggestion in warning; warns={warns!r}"
+        )
+
+    def test_known_directive_not_warned(self, pb, tmp_path):
+        """:bind-key (correct name) is known — no warning."""
+        content = ":bind-key t :mux mtr %i\n10.0.0.1\n"
+        fname = tmp_path / "hosts"
+        fname.write_text(content)
+        entries = pb.parse_hosts_file(str(fname))
+        warns = [v for k, v in entries if k == 'warn']
+        assert not any('bind-key' in w for w in warns), (
+            f"Known :bind-key must not warn; warns={warns!r}"
+        )
+
+    def test_unknown_inside_for(self, pb, tmp_path):
+        """An unrecognised directive inside :for emits a warning, not a cmd."""
+        content = textwrap.dedent("""\
+            :for i in host-{1,2}
+                :unknown-in-for $1
+            :end
+        """)
+        fname = tmp_path / "hosts"
+        fname.write_text(content)
+        entries = pb.parse_hosts_file(str(fname))
+        cmds = [v for k, v in entries if k == 'cmd']
+        warns = [v for k, v in entries if k == 'warn']
+        assert not any('unknown-in-for' in c for c in cmds), (
+            f"Unknown directive inside :for must not be dispatched; cmds={cmds!r}"
+        )
+        assert any('unknown-in-for' in w for w in warns), (
+            f"Expected warning for :unknown-in-for; warns={warns!r}"
+        )
