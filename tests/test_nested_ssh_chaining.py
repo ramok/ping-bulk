@@ -344,3 +344,53 @@ class TestDisplayNameFormatting:
         assert 'sshhost' in display
         assert 'target' in display
 
+
+
+# ===========================================================================
+# TestWithRelayLabel  — ## label on :with remote-ping line and inside block
+# ===========================================================================
+
+class TestWithRelayLabel:
+    """## label on :with remote-ping line and on host lines inside the block."""
+
+    def test_with_relay_ip_label_emits_resolv(self, pb, tmp_path):
+        """:with remote-ping user@IP ## label  →  :resolv IP label emitted."""
+        content = """\
+            :with remote-ping komar@10.10.6.117 ## ps-supervisor
+            10.10.6.1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmd_entries = [v for k, v in entries if k == 'cmd']
+        assert ':resolv 10.10.6.117 ps-supervisor' in cmd_entries, (
+            f":resolv not emitted for relay; cmds={cmd_entries!r}"
+        )
+
+    def test_with_relay_hostname_label_not_emitted(self, pb, tmp_path):
+        """## label on :with line is only processed if the relay is an IP."""
+        content = """\
+            :with remote-ping komar@ps-supervisor ## relay
+            10.10.6.1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmd_entries = [v for k, v in entries if k == 'cmd']
+        assert not any(':resolv' in c for c in cmd_entries), (
+            f"Unexpected :resolv for hostname relay; cmds={cmd_entries!r}"
+        )
+
+    def test_host_label_inside_with_block_emits_resolv(self, pb, tmp_path):
+        """IP ## label on a host line inside :with remote-ping block emits :resolv."""
+        content = """\
+            :with remote-ping komar@relay
+            10.10.6.10 ## myserver
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmd_entries = [v for k, v in entries if k == 'cmd']
+        assert ':resolv 10.10.6.10 myserver' in cmd_entries, (
+            f":resolv not emitted for host inside block; cmds={cmd_entries!r}"
+        )
+        assert any(':remote-ping' in c and '10.10.6.10' in c for c in cmd_entries), (
+            f":remote-ping not emitted; cmds={cmd_entries!r}"
+        )

@@ -2643,6 +2643,11 @@ class _HostsParser:
                             entries.append(('error',
                                 ':with prog-options requires a program name'))
                         else:
+                            # ## label on the :with line → :resolv for the relay IP.
+                            if w_type == 'remote-ping' and comment:
+                                relay_host = w_args.split()[-1].split('@', 1)[-1] if w_args else ''
+                                if relay_host and _is_ip(relay_host):
+                                    entries.append(('cmd', f':resolv {relay_host} {comment}'))
                             with_stack.append((w_type, w_args))
                 elif cmd_word == 'end':
                     if with_stack:
@@ -2848,6 +2853,9 @@ class _HostsParser:
                 continue
             self.seen_hosts.add(key)
             if ssh_args is not None:
+                if inline_comment and _is_ip(host):
+                    resolved = _apply_backref(inline_comment, captures, host)
+                    entries.append(('cmd', f':resolv {host} {resolved}'))
                 entries.append(('cmd', f':remote-ping {ssh_args} {host}'))
             else:
                 if inline_comment and _is_ip(host):
