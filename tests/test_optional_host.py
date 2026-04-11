@@ -40,7 +40,7 @@ class TestOptionalHostParsing:
         content = """\
             :for hub-{1..3}
                 ?sh$1-cam
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -55,7 +55,7 @@ class TestOptionalHostParsing:
             :for hub-{1..2}
                 sh$1-router
                 ?sh$1-cam
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -179,7 +179,7 @@ class TestOptionalHostApplication:
             :resolv 10.0.4.50  sh4-cam
             :for hub-{1..4}
                 ?sh$1-cam
-            :done
+            :end
         """)
         f = tmp_path / 'hosts.txt'
         f.write_text(content)
@@ -199,7 +199,7 @@ class TestOptionalHostApplication:
             :for hub-{1..3}
                 sh$1-router
                 ?sh$1-cam
-            :done
+            :end
         """)
         f = tmp_path / 'hosts.txt'
         f.write_text(content)

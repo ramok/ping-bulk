@@ -14,7 +14,7 @@ Covers:
   - True when multiple forms are mixed
   - False for plain strings, escaped-looking but non-placeholder chars
 
-  Integration (parse_hosts_file + :for/:done)
+  Integration (parse_hosts_file + :for/:end)
   - ${N} brace forms work inside a :for body
   - adjacent-digit disambiguation via ${1}9 in a :for body
   - mixed bare and brace forms in the same body line
@@ -222,18 +222,18 @@ class TestHasBackref:
 
 
 # ===========================================================================
-# TestBackrefIntegration — brace forms inside :for/:done via parse_hosts_file
+# TestBackrefIntegration — brace forms inside :for/:end via parse_hosts_file
 # ===========================================================================
 
 class TestBackrefIntegration:
-    """Integration tests: brace-form back-references inside :for/:done blocks."""
+    """Integration tests: brace-form back-references inside :for/:end blocks."""
 
     def test_brace_dollar_in_for(self, pb, tmp_path):
         """${1} inside :for body → correct host per iteration."""
         content = """\
             :for node-{1..3}
             node-${1}.example.com
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -247,7 +247,7 @@ class TestBackrefIntegration:
         content = """\
             :for web-{a,b,c}
             ${0}.lan
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -261,7 +261,7 @@ class TestBackrefIntegration:
         content = """\
             :for host-{A,B}
             host-${1}9.lan
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -274,7 +274,7 @@ class TestBackrefIntegration:
         content = """\
             :for {web,db}-{1,2}
             ${1}-${2}.local
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [e[1] for e in entries if e[0] == 'host']
@@ -290,7 +290,7 @@ class TestBackrefIntegration:
         content = """\
             :for {web,db}-{1,2}
             $1-${2}.internal
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [e[1] for e in entries if e[0] == 'host']
@@ -307,7 +307,7 @@ class TestBackrefIntegration:
             :for cluster-{A,B}
             ## Cluster ${1}
             node-${1}.example.com
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -322,7 +322,7 @@ class TestBackrefIntegration:
         content = """\
             :for gw-{1,2}
             :ssh gw-${1}.example.com localhost
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmds = [e[1] for e in entries if e[0] == 'cmd']

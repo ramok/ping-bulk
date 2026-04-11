@@ -1,10 +1,10 @@
-"""Unit tests for :if/:elif/:else/:fi conditional handling in parse_hosts_file().
+"""Unit tests for :if/:elif/:else/:end conditional handling in parse_hosts_file().
 
 Covers:
   - _evaluate_if_condition helper (in/not-in, edge cases)
-  - top-level :if/:elif/:else/:fi with :let variables
-  - :if/:elif/:else/:fi inside :for loops with named and numeric vars
-  - nesting, error cases (:fi without :if, :else after :else)
+  - top-level :if/:elif/:else/:end with :let variables
+  - :if/:elif/:else/:end inside :for loops with named and numeric vars
+  - nesting, error cases (:end without :if, :else after :else)
 """
 
 import textwrap
@@ -55,7 +55,7 @@ class TestEvaluateIfCondition:
 # ===========================================================================
 
 class TestIfTopLevel:
-    """:if/:elif/:else/:fi at the top level of _parse_entries."""
+    """:if/:elif/:else/:end at the top level of _parse_entries."""
 
     def test_if_true(self, pb, tmp_path):
         """:if with a true condition includes the host."""
@@ -63,7 +63,7 @@ class TestIfTopLevel:
             :let env prod
             :if $env in prod
             10.0.0.1
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert ('host', '10.0.0.1') in entries
@@ -74,7 +74,7 @@ class TestIfTopLevel:
             :let env dev
             :if $env in prod
             10.0.0.1
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -88,7 +88,7 @@ class TestIfTopLevel:
             10.0.0.1
             :else
             10.0.0.2
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -103,7 +103,7 @@ class TestIfTopLevel:
             10.0.0.1
             :else
             10.0.0.2
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -120,7 +120,7 @@ class TestIfTopLevel:
             hostB
             :else
             hostC
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -134,8 +134,8 @@ class TestIfTopLevel:
             :if $a in 1
             :if $b in 2
             10.0.0.1
-            :fi
-            :fi
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -149,8 +149,8 @@ class TestIfTopLevel:
             :if $a in 1
             :if $b in 2
             10.0.0.1
-            :fi
-            :fi
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -162,21 +162,21 @@ class TestIfTopLevel:
             :let env prod
             :if $env not in dev,test
             10.0.0.1
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
         assert hosts == ['10.0.0.1'], f"Expected ['10.0.0.1'], got: {hosts!r}"
 
     def test_fi_without_if(self, pb, tmp_path):
-        """Bare :fi without :if produces an error entry."""
+        """Bare :end without any open block produces an error entry."""
         content = """\
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [v for k, v in entries if k == 'error']
-        assert any(':fi without :if' in e for e in errors), (
-            f"Expected ':fi without :if' error, got: {errors!r}"
+        assert any(':end without' in e for e in errors), (
+            f"Expected ':end without' error, got: {errors!r}"
         )
 
     def test_else_after_else(self, pb, tmp_path):
@@ -185,7 +185,7 @@ class TestIfTopLevel:
             :if 1 in 1
             :else
             :else
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [v for k, v in entries if k == 'error']
@@ -200,7 +200,7 @@ class TestIfTopLevel:
             :if $env in prod
             ## Prod hosts
             10.0.0.1
-            :fi
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         kinds = [entry[0] for entry in entries]
@@ -214,7 +214,7 @@ class TestIfTopLevel:
 # ===========================================================================
 
 class TestIfInsideFor:
-    """:if/:elif/:else/:fi inside :for loops."""
+    """:if/:elif/:else/:end inside :for loops."""
 
     def test_if_in_for_basic(self, pb, tmp_path):
         """:if inside :for includes only iterations matching the condition."""
@@ -222,8 +222,8 @@ class TestIfInsideFor:
             :for sh in {1,2,3}
             :if $sh in 1,2
             10.0.0.$sh
-            :fi
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -237,8 +237,8 @@ class TestIfInsideFor:
             host-a-$sh
             :else
             host-b-$sh
-            :fi
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -250,8 +250,8 @@ class TestIfInsideFor:
             :for sh in {1,2}
             :if $sh in 1
             10.0.0.$sh ## host$sh
-            :fi
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [v for k, v in entries if k == 'error']
@@ -270,9 +270,9 @@ class TestIfInsideFor:
             :if $sh in 1,2
             :if $sh in 2
             host-$sh
-            :fi
-            :fi
-            :done
+            :end
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -284,8 +284,8 @@ class TestIfInsideFor:
             :for sh in sensor-hub-{1,2,3}
             :if $sh in 1,2
             10.0.0.$sh
-            :fi
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']

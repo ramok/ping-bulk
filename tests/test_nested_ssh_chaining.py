@@ -32,7 +32,7 @@ class TestDirectSshNesting:
         content = """\
             :with remote-ping komar@ps-supervisor
             :remote-ping dev@10.123.1.31 ps-jetson
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -48,7 +48,7 @@ class TestDirectSshNesting:
             :with remote-ping user@bastion
             :remote-ping admin@host1 target1
             :remote-ping admin@host2 target2
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -81,8 +81,8 @@ class TestSshInsideForInsideSshBegin:
         :with remote-ping komar@ps-supervisor
             :for sensor-hub-{1-3,5}
                 :remote-ping dev@10.123.$1.31 ps-jetson
-            :done
-        :done
+            :end
+        :end
 
         Should produce: :remote-ping -J komar@ps-supervisor dev@10.123.1.31 ps-jetson
         (repeated for each iteration: 1, 2, 3, 5)
@@ -91,8 +91,8 @@ class TestSshInsideForInsideSshBegin:
             :with remote-ping komar@ps-supervisor
             :for sensor-hub-{1-3,5}
             :remote-ping dev@10.123.$1.31 ps-jetson
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -115,7 +115,7 @@ class TestSshInsideForInsideSshBegin:
         content = """\
             :for node{1,2}
             :remote-ping user@jump$1 target$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -135,8 +135,8 @@ class TestSshInsideForInsideSshBegin:
             :with remote-ping admin@gateway
             :for rack{1,2}-unit{a,b}
             :remote-ping user@10.$1.$2.1 target-$1-$2
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -161,8 +161,8 @@ class TestSshInsideForInsideSshBegin:
             :for zone{1,2}
             plain-host-$1
             :remote-ping jump@zone$1 target$1
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -189,8 +189,8 @@ class TestNestedSshBeginInsideFor:
             :for dc{1,2}
             :with remote-ping user@dc$1-jump
             target-$1
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         error_entries = [v for k, v in entries if k == 'error']
@@ -213,7 +213,7 @@ class TestMultipleJumpHostsWithoutUsernames:
         content = """\
             :with remote-ping jumphost1
             :remote-ping jumphost2 target
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -227,8 +227,8 @@ class TestMultipleJumpHostsWithoutUsernames:
             :with remote-ping bastion
             :for subnet{1,2}
             :remote-ping 10.0.$1.1 final-$1
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -249,7 +249,7 @@ class TestEdgeCases:
         content = """\
             :with remote-ping user@jump
             :remote-ping
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -262,7 +262,7 @@ class TestEdgeCases:
         content = """\
             :with remote-ping
             :remote-ping user@host target
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -276,8 +276,8 @@ class TestEdgeCases:
             :with remote-ping user@jump
             :for node{1,1}
             :remote-ping admin@host target
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']

@@ -295,11 +295,11 @@ class TestMuxProgOptionsInjection:
 
 
 # ===========================================================================
-# :with prog-options / :done block form
+# :with prog-options / :end block form
 # ===========================================================================
 
 class TestProgOptionsBlock:
-    """Parser-level tests for :with prog-options / :done."""
+    """Parser-level tests for :with prog-options / :end."""
 
     def test_basic_block(self, pb, tmp_path):
         """:with prog-options block emits :prog-options commands."""
@@ -307,7 +307,7 @@ class TestProgOptionsBlock:
             ":with prog-options ssh\n"
             "  *-router -l admin\n"
             "  *-switch -l root\n"
-            ":done\n"
+            ":end\n"
             "1.2.3.4\n"
         )
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -321,7 +321,7 @@ class TestProgOptionsBlock:
         content = (
             ":with prog-options mtr\n"
             "  bad-host --disable\n"
-            ":done\n"
+            ":end\n"
         )
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmds = [e[1] for e in entries if e[0] == 'cmd']
@@ -329,14 +329,14 @@ class TestProgOptionsBlock:
 
     def test_block_no_prog_name_is_error(self, pb, tmp_path):
         """:with prog-options with no program name emits an error."""
-        content = ":with prog-options\n  * -l admin\n:done\n"
+        content = ":with prog-options\n  * -l admin\n:end\n"
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [e for e in entries if e[0] == 'error']
         assert errors, "expected an error for missing program name"
 
     def test_end_without_begin_is_error(self, pb, tmp_path):
-        """:done without matching begin emits an error."""
-        content = ":done\n"
+        """:end without matching begin emits an error."""
+        content = ":end\n"
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [e for e in entries if e[0] == 'error']
         assert errors
@@ -348,7 +348,7 @@ class TestProgOptionsBlock:
         content = (
             ":with prog-options ssh\n"
             "  *.internal -o ProxyJump=bastion\n"
-            ":done\n"
+            ":end\n"
             "127.0.0.1\n"
         )
         hosts_file = write_hosts(tmp_path, content)
@@ -364,10 +364,10 @@ class TestProgOptionsBlock:
         content = (
             ":with prog-options ssh\n"
             "  *.internal -l admin\n"
-            ":done\n"
+            ":end\n"
             ":with prog-options mtr\n"
             "  slow-host --interval 2\n"
-            ":done\n"
+            ":end\n"
         )
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmds = [e[1] for e in entries if e[0] == 'cmd']
@@ -380,8 +380,8 @@ class TestProgOptionsBlock:
             ":for {router,switch}\n"
             ":with prog-options ssh\n"
             "  $1 -l admin\n"
-            ":done\n"
-            ":done\n"
+            ":end\n"
+            ":end\n"
         )
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmds = [e[1] for e in entries if e[0] == 'cmd']
@@ -394,8 +394,8 @@ class TestProgOptionsBlock:
         events = [e for e in app.events if 'with' in e.text]
         assert events
 
-    def test_end_inside_with_is_error(self, pb, tmp_path):
-        """:end inside :with block emits an error (not just a warning) and hosts after it appear."""
+    def test_end_closes_with_block(self, pb, tmp_path):
+        """:end correctly closes a :with block; hosts after it are parsed normally."""
         content = (
             ":with prog-options ssh\n"
             "  *-router -l admin\n"
@@ -404,11 +404,9 @@ class TestProgOptionsBlock:
         )
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [e for e in entries if e[0] == 'error']
-        assert errors, "expected an error for :end inside :with block"
-        assert 'end' in errors[0][1]
-        # hosts after the block must appear (block was closed on error)
+        assert not errors, f"expected no errors for valid :end closer; got {errors!r}"
         hosts = [e[1] for e in entries if e[0] == 'host']
-        assert any('1.1.1.1' in h for h in hosts), "host after :end should still be parsed"
+        assert any('1.1.1.1' in h for h in hosts), "host after :end should be parsed"
 
     def test_unknown_cmd_inside_with_is_error(self, pb, tmp_path):
         """Any unrecognised command inside :with prog-options block is an error; hosts after still appear."""
@@ -430,4 +428,4 @@ class TestProgOptionsBlock:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [e for e in entries if e[0] == 'error']
         assert errors, "expected an error for unclosed :with block at EOF"
-        assert 'missing :done' in errors[0][1]
+        assert 'missing :end' in errors[0][1]

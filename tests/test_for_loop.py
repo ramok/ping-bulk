@@ -1,14 +1,14 @@
-"""Unit tests for :for/:done loop handling in parse_hosts_file().
+"""Unit tests for :for/:end loop handling in parse_hosts_file().
 
 Covers:
   - basic backref expansion $N
   - $0 (full-string back-reference)
   - no-backref host lines inside :for  → warn + add once
   - duplicate hosts (within loop, across iterations, vs. outside loop)
-  - unclosed :for at EOF  → implicit :done (hosts produced, no error)
-  - :done without :for    → error entry
+  - unclosed :for at EOF  → implicit :end (hosts produced, no error)
+  - :end without :for    → error entry
   - nested :for           → error entry
-  - :with/:done inside :for → :remote-ping commands emitted
+  - :with/:end inside :for → :remote-ping commands emitted
   - :for inside :with remote-ping block    → SSH commands emitted
   - section headers (## / :title) inside :for, with and without backrefs
   - comment lines (#) inside :for body are skipped
@@ -40,7 +40,7 @@ class TestForLoopBasic:
         content = """\
             :for host-{a,b,c}
             $1.lan
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -54,7 +54,7 @@ class TestForLoopBasic:
         content = """\
             :for node-{1,2}
             $0.cluster
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -67,7 +67,7 @@ class TestForLoopBasic:
         content = """\
             :for gw-{10,20}
             $0.net
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -80,7 +80,7 @@ class TestForLoopBasic:
         content = """\
             :for rack{1,2}-unit{3,4}
             $1-$2.mgmt
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -96,7 +96,7 @@ class TestForLoopBasic:
         content = """\
             :for sw{1-3}
             sw$1.local
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -110,7 +110,7 @@ class TestForLoopBasic:
         content = """\
             :for rack{1,2}
             rack$1-unit{1,2}
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
@@ -127,7 +127,7 @@ class TestForLoopBasic:
             :for zone{1,2}
             zone$1-primary
             zone$1-secondary
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -151,7 +151,7 @@ class TestForLoopSectionHeaders:
             :for dc{1,2}
             ## Data Centre $1
             dc$1-router
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -167,7 +167,7 @@ class TestForLoopSectionHeaders:
             :for pod{a,b}
             :title Pod $1
             pod$1-host
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -184,7 +184,7 @@ class TestForLoopSectionHeaders:
             :for node{1,2}
             ## Servers
             node$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         # Section emitted twice; no 'warn' tuples expected
@@ -201,7 +201,7 @@ class TestForLoopSectionHeaders:
             :for sp{1,2}
             :title Static Section
             sp$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -225,7 +225,7 @@ class TestForLoopComments:
             :for srv{1,2}
             # this is a comment
             srv$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
@@ -246,7 +246,7 @@ class TestForLoopNoBackref:
         content = """\
             :for dc{1,2}
             static-host.example.com
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         warn_entries = [(k, v) for k, v in entries if k == 'warn']
@@ -267,7 +267,7 @@ class TestForLoopNoBackref:
         content = """\
             :for node{1..5}
             always-same.lan
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -285,7 +285,7 @@ class TestForLoopNoBackref:
         content = """\
             :for dc{1,2}
             host{a,b}.static
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -305,7 +305,7 @@ class TestForLoopNoBackref:
             :for shard{1,2}
             always-a.lan
             always-b.lan
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -332,7 +332,7 @@ class TestForLoopDuplicates:
         content = """\
             :for dc{1,1,2}
             dc$1-server
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -356,7 +356,7 @@ class TestForLoopDuplicates:
             node1.example.com
             :for node{1,2}
             node$1.example.com
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -375,7 +375,7 @@ class TestForLoopDuplicates:
         content = """\
             :for node{1,2}
             node$1.example.com
-            :done
+            :end
             node1.example.com
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -415,10 +415,10 @@ class TestForLoopDuplicates:
         content = """\
             :for grp{1}
             shared-host
-            :done
+            :end
             :for grp{2}
             shared-host
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         # shared-host has no backref → warn twice, host once
@@ -445,10 +445,10 @@ class TestForLoopDuplicates:
 # ===========================================================================
 
 class TestForLoopErrors:
-    """Error conditions: implicit :done at EOF, :done without :for, nested :for."""
+    """Error conditions: implicit :end at EOF, :end without :for, nested :for."""
 
     def test_unclosed_for_at_eof_is_implicit_done(self, pb, tmp_path):
-        """A :for loop that reaches EOF without :done is treated as implicit :done."""
+        """A :for loop that reaches EOF without :end is treated as implicit :end."""
         content = """\
             :for node{1,2}
             node$1
@@ -458,25 +458,25 @@ class TestForLoopErrors:
         host_entries = [v for k, v in entries if k == 'host']
 
         assert not error_entries, (
-            f"Expected no error for implicit :done at EOF; got {error_entries!r}"
+            f"Expected no error for implicit :end at EOF; got {error_entries!r}"
         )
         assert host_entries == ['node1', 'node2'], (
-            f"Expected hosts node1, node2 from implicit :done; got {host_entries!r}"
+            f"Expected hosts node1, node2 from implicit :end; got {host_entries!r}"
         )
 
     def test_done_without_for_produces_error(self, pb, tmp_path):
-        """:done outside any :for loop produces an error entry."""
+        """:end outside any :for loop produces an error entry."""
         content = """\
             host1
-            :done
+            :end
             host2
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         error_entries = [(k, v) for k, v in entries if k == 'error']
 
-        assert any(':done' in v.lower() or 'without' in v.lower()
+        assert any(':end' in v.lower() or 'without' in v.lower()
                    for _, v in error_entries), (
-            f"Expected an error mentioning ':done without :for'; got {error_entries!r}"
+            f"Expected an error mentioning ':end without :for'; got {error_entries!r}"
         )
 
     def test_nested_for_produces_error(self, pb, tmp_path):
@@ -485,8 +485,8 @@ class TestForLoopErrors:
             :for dc{1,2}
             :for node{1,2}
             dc$1-node$2
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         error_entries = [(k, v) for k, v in entries if k == 'error']
@@ -505,8 +505,8 @@ class TestForLoopErrors:
             :for dc{1,2}
             :with remote-ping user@dc$1
             target-$1
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -521,11 +521,11 @@ class TestForLoopErrors:
         )
 
     def test_orphan_done_produces_error(self, pb, tmp_path):
-        """A :done with no open :with or :for block produces an error entry."""
+        """A :end with no open :with or :for block inside a :for body produces an error entry."""
         content = """\
             :for dc{1,2}
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         error_entries = [(k, v) for k, v in entries if k == 'error']
@@ -533,8 +533,9 @@ class TestForLoopErrors:
         assert len(error_entries) >= 1, (
             f"Expected at least one error; got {entries!r}"
         )
-        assert any('done' in v.lower() for _, v in error_entries), (
-            f"Error should mention 'done'; got {error_entries!r}"
+        assert any(':end' in v.lower() or 'without' in v.lower()
+                   for _, v in error_entries), (
+            f"Error should mention ':end without'; got {error_entries!r}"
         )
 
     def test_invalid_brace_in_for_pattern_produces_error(self, pb, tmp_path):
@@ -542,7 +543,7 @@ class TestForLoopErrors:
         content = """\
             :for host{}
             host$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         error_entries = [(k, v) for k, v in entries if k == 'error']
@@ -557,7 +558,7 @@ class TestForLoopErrors:
 # ===========================================================================
 
 class TestForLoopInsideSshBlock:
-    """:for loop inside an :with remote-ping / :done block."""
+    """:for loop inside an :with remote-ping / :end block."""
 
     def test_for_inside_ssh_block_emits_ssh_commands(self, pb, tmp_path):
         """Host lines with back-references inside :for / :with remote-ping emit :remote-ping commands."""
@@ -565,8 +566,8 @@ class TestForLoopInsideSshBlock:
             :with remote-ping user@gateway
             :for node{1,2}
             192.168.1.$1
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -588,8 +589,8 @@ class TestForLoopInsideSshBlock:
             :with remote-ping jump@bastion
             :for group{1,1,2}
             app$1.internal
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -614,8 +615,8 @@ class TestForLoopInsideSshBlock:
             :with remote-ping user@gw
             :for zone{1,2}
             fixed.host
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -646,7 +647,7 @@ class TestForLoopMixed:
             before.example.com
             :for mid{1,2}
             mid$1.example.com
-            :done
+            :end
             after.example.com
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -664,7 +665,7 @@ class TestForLoopMixed:
             ## My Group
             :for app{1,2}
             app$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries[0] == ('section', 'My Group', 1, False), (
@@ -680,7 +681,7 @@ class TestForLoopMixed:
         content = """\
             :for node{1,2}
             # just a comment
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert not any(k in ('host', 'warn', 'error') for k, _ in entries), (
@@ -693,7 +694,7 @@ class TestForLoopMixed:
         content = """\
             :for {1,2}
             :resolv 10.0.0.$1 node$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
@@ -709,7 +710,7 @@ class TestForLoopMixed:
         content = """\
             :for static-host
             $0.local
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [('host', 'static-host.local')], (
@@ -727,7 +728,7 @@ class TestForLoopMixed:
             :let x {1..3}
             :for host-$x
             node$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -746,7 +747,7 @@ class TestForLoopMixed:
             :let sh_num {1-4}
             :for sensor-hub-$sh_num
             sh$1-router
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -764,7 +765,7 @@ class TestForLoopMixed:
             :for hub-$nums
             $1-router
             $1-switch
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -780,8 +781,8 @@ class TestForLoopMixed:
             :with remote-ping user@gw
             :for x{1}
             target.host
-            :done
-            :done
+            :end
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -825,7 +826,7 @@ class TestForResolv:
             :for hub-{1-2}
                 :resolv 10.0.$1.1  $1-gw
                 $1-gw
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [v for k, v in entries if k in ('error', 'warn')]
@@ -855,7 +856,7 @@ class TestForResolv:
                 :resolv 10.0.$1.{41,42}  sh$1-cam$2
                 sh$1-cam41
                 sh$1-cam42
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
 
@@ -878,7 +879,7 @@ class TestForResolv:
                 :resolv 10.0.$1.42  sh$1-cam42
                 sh$1-cam41
                 sh$1-cam42
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [v for k, v in entries if k in ('error', 'warn')]
@@ -893,7 +894,7 @@ class TestForResolv:
             :for hub-{1-2}
                 10.0.$1.41 ## sh$1-cam41
                 10.0.$1.42 ## sh$1-cam42
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [v for k, v in entries if k in ('error', 'warn')]
@@ -917,7 +918,7 @@ class TestForResolv:
             :for sh in hub-{1-2}
                 10.0.$sh.{41,42} ## sh$sh-cam$1
                 10.0.$sh.{31,32} ## sh$sh-ps$1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [v for k, v in entries if k in ('error', 'warn')]

@@ -348,8 +348,8 @@ class TestSemicolonSeparator:
         ], f"section + hosts on same line failed; got {entries!r}"
 
     def test_for_loop_body_on_one_line(self, pb, tmp_path):
-        """:for header, body, and :done all on one physical line via semicolons."""
-        content = ":for {1..3}; 10.0.0.$1; :done\n"
+        """:for header, body, and :end all on one physical line via semicolons."""
+        content = ":for {1..3}; 10.0.0.$1; :end\n"
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
             ('host', '10.0.0.1'),

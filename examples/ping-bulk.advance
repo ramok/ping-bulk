@@ -66,7 +66,7 @@
     10.0.$1.1  ## sw$1-router
     10.0.$1.2  ## sw$1-uplink
     ?sw$1-cam
-:done
+:end
 
 ## TCP Port Monitoring
 # TCP connection check instead of ICMP ping.
@@ -111,14 +111,14 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # ── :if conditionals ──────────────────────────────────────────────────────
 # :if VALUE in val1,val2,...   — include block when VALUE matches any token
 # :if VALUE not in val1,...    — include block when VALUE matches none
-# :elif / :else / :fi work as expected.  Blocks can be nested and work both
+# :elif / :else / :end work as expected.  Blocks can be nested and work both
 # at the top level (with :let variables) and inside :for loops.
 
 :let env production
 
 :if $env in staging,production
     10.0.0.100          ## staging-monitor
-:fi
+:end
 
 ## :if also works inside :for loops
 :for hub in region-{1..3}
@@ -127,8 +127,8 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
         10.0.$1.10      ## region$1-primary
     :else
         10.0.$1.11      ## region$1-backup
-    :fi
-:done
+    :end
+:end
 
 # ── :let with per-loop folding ──────────────────────────────────────────────
 # ${name_$N} two-level expansion: $N is resolved first (from loop back-ref),
@@ -141,7 +141,7 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
     :title${fold$1} sensor-hub-$1
     sensor-hub-$1-router
     sensor-hub-$1-uplink
-:done
+:end
 
 # ── Use :for loop with backreferences to assign names ──────────────────────
 # $0 expands to the full expanded host string for each iteration.
@@ -150,7 +150,7 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :for x in 192.168.1.{2..4}
     :resolv $0 workstation$x
     $0
-:done
+:end
 
 # ── Sections that start folded (##-) ───────────────────────────────────────
 # Append '-' directly after the hashes (or after :title/:title2) to start
@@ -166,7 +166,7 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :for r,n in 10.3.{1..3}.{1..2}
     :resolv $0 rack$r-node$n
     $0
-:done
+:end
 
 # ── Remote monitoring over SSH ─────────────────────────────────────────────
 # Ping hosts on a remote network segment as seen from a remote server.
@@ -177,7 +177,7 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 ### Remote site A (via ssh jump)
 :with remote-ping -J bastion.example.com ops@remote-a
     10.10.0.{1..3}
-:done
+:end
 
 ### Remote site B
 :remote-ping ops@remote-b 10.20.0.1
@@ -198,7 +198,7 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 #   :with prog-options <prog>
 #     <glob> <opts>
 #     ...
-#   :done
+#   :end
 #
 # Options are auto-injected when :mux <prog> is run from a key binding.
 

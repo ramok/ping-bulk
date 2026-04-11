@@ -7,7 +7,7 @@ Covers:
   - $name bare substitution in host lines
   - ${name} brace-delimited substitution
   - ${expr_$N} two-level expansion inside :for body
-  - :let inside :for body → loop-local, not visible after :done
+  - :let inside :for body → loop-local, not visible after :end
   - :let before :for → available in loop body
   - undefined variable → empty string, no error
   - :title${fold$1} pattern (the motivating use case)
@@ -230,7 +230,7 @@ class TestTwoLevelExpansion:
             :let fold4 -
             :for sensor-hub-{1..5}
                 :title${fold$1} hub-$1
-            :done
+            :end
         """, tmp_path)
         secs = sections(entries)
         # iterations 1,2,3,5 → fold_default=False; iteration 4 → fold_default=True
@@ -247,7 +247,7 @@ class TestTwoLevelExpansion:
         entries = parse(pb, """\
             :for host-{1..3}
                 :title${fold$1} section-$1
-            :done
+            :end
         """, tmp_path)
         secs = sections(entries)
         # No fold* variables defined → ${fold$N} → "" → :title (not folded)
@@ -260,7 +260,7 @@ class TestTwoLevelExpansion:
             :let ip2 10.0.2
             :for {1..2}
                 ${ip$1}.100
-            :done
+            :end
         """, tmp_path)
         assert hosts(entries) == ['10.0.1.100', '10.0.2.100']
 
@@ -278,7 +278,7 @@ class TestLetInsideFor:
             :for {1..2}
                 :let sfx -$1
                 host$sfx
-            :done
+            :end
         """, tmp_path)
         assert hosts(entries) == ['host-1', 'host-2']
 
@@ -289,7 +289,7 @@ class TestLetInsideFor:
             :for {1..2}
                 :let sfx loop-$1
                 host$sfx
-            :done
+            :end
             outer$sfx
         """, tmp_path)
         # Inside loop: host$sfx = host + loop-1 = hostloop-1 (no separator)
@@ -305,7 +305,7 @@ class TestLetInsideFor:
             :let suffix .example.com
             :for host{1..3}
                 $0$suffix
-            :done
+            :end
         """, tmp_path)
         assert hosts(entries) == [
             'host1.example.com',

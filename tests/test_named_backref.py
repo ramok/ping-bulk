@@ -27,7 +27,7 @@ class TestApplyNamedBackref:
         content = """\
             :for x in web{1..3}
             server-$x
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']
@@ -41,7 +41,7 @@ class TestApplyNamedBackref:
         content = """\
             :for x in {1..3}
             host${x}9
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']
@@ -55,7 +55,7 @@ class TestApplyNamedBackref:
         content = """\
             :for x,y in 10.{1..2}.{3..4}
             server-$x-$y
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']
@@ -69,7 +69,7 @@ class TestApplyNamedBackref:
             :for ip,host in 10.0.0.{1..3}
             :resolv 10.0.0.$ip host-$ip
             10.0.0.$ip
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         # Should have 3 :resolv commands and 3 hosts
@@ -90,7 +90,7 @@ class TestApplyNamedBackref:
             :for env in {prod,stage,dev}
             :title Environment: $env
             server-$env-1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         sections = [title for kind, title, *_ in entries if kind == 'section']
@@ -105,7 +105,7 @@ class TestApplyNamedBackref:
         content = """\
             :for x in {1..2}
             server-$x-$y
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']
@@ -124,7 +124,7 @@ class TestApplyNamedBackref:
         content = """\
             :for x in {1..2}
             price$100-host$x
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']
@@ -140,7 +140,7 @@ class TestApplyNamedBackref:
         content = """\
             :for env_name,host_num in {prod}.{1..2}
             $env_name-server-$host_num
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']
@@ -152,7 +152,7 @@ class TestApplyNamedBackref:
         content = """\
             :for dc in {us,eu}
             :ssh user@gateway-$dc sensor-$dc-1
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmds = [val for kind, val in entries if kind == 'cmd']
@@ -166,7 +166,7 @@ class TestApplyNamedBackref:
         content = """\
             :for 10.{1..2}.{3..4}
             server-$1-$2
-            :done
+            :end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']

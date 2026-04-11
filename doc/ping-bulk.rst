@@ -477,7 +477,7 @@ Monitoring via SSH
 
 ``:with remote-ping [ssh-opts] <relay>``
     Open a remote-ping block.  Every plain host line that follows (until
-    ``:done``) is automatically wrapped as
+    ``:end``) is automatically wrapped as
     ``:remote-ping [ssh-opts] <relay> <host>``.  ``:for`` loops may appear
     inside the block.  Only valid inside a hosts file.
 
@@ -487,12 +487,12 @@ Monitoring via SSH
             10.10.0.{1..4}
             :for sensor-{1..3}
                 10.10.1.$1
-            :done
-        :done
+            :end
+        :end
 
 ``:with prog-options <prog>``
     Open a :prog-options block for *prog*.  Every non-directive line
-    until ``:done`` is treated as ``<glob> [opts|--disable]``
+    until ``:end`` is treated as ``<glob> [opts|--disable]``
     and applied as ``:prog-options <prog> <glob> [opts]``.
     Only valid inside a hosts file.
 
@@ -502,7 +502,7 @@ Monitoring via SSH
           *.internal.example.com  -o ProxyJump=bastion
           *-router                -l admin
           restricted.example.com  --disable
-        :done
+        :end
 
 Help
 ----
@@ -633,10 +633,10 @@ Format
             ### $0
             hub$1-router
             ?hub$1-cam
-        :done
+        :end
 
 ``:for pattern``
-    Open a loop.  Every body line between ``:for`` and ``:done`` is
+    Open a loop.  Every body line between ``:for`` and ``:end`` is
     repeated once for each expansion of *pattern*.  Back-reference
     placeholders (``$N`` / ``${N}`` for numeric, ``$name`` / ``${name}``
     for named) in body lines are substituted with the value produced by
@@ -644,10 +644,10 @@ Format
     entire expanded string.  Body lines without any back-reference are
     included only once.  ``:with`` may appear inside a ``:for`` body.
 
-``:done``
-    Close the current ``:with`` or ``:for`` block.  If the file ends without
-    a ``:done`` (e.g. the ``:for`` block is the last thing in the file), an
-    implicit ``:done`` is applied at EOF so the loop still produces its entries.
+``:end``
+    Close the current ``:with``, ``:for``, or ``:if`` block.  If the file ends
+    without a ``:end`` (e.g. the ``:for`` block is the last thing in the file),
+    an implicit ``:end`` is applied at EOF so the loop still produces its entries.
     This also applies when a file is loaded interactively via ``:source``.
 
 ``:let name [value]``
@@ -688,7 +688,7 @@ Format
         :for sensor-hub-{1..5}
             :title${fold$1} $0
             sensor-hub-$1-router
-        :done
+        :end
 
     For iteration ``$1=4`` the directive becomes ``:title-`` (folded by
     default); for all other iterations ``${fold$N}`` is undefined and
@@ -699,7 +699,7 @@ Format
     does not modify the outer variable store.
 
 ``:if VALUE in val1,val2,...``
-    Open a conditional block.  The lines between ``:if`` and ``:fi`` are
+    Open a conditional block.  The lines between ``:if`` and ``:end`` are
     included only when the condition is true.  *VALUE* is a plain string
     or a ``$variable`` / ``${variable}`` reference; it is expanded before
     the test is evaluated.  The comma-separated token list on the right
@@ -712,7 +712,7 @@ Format
       of the tokens.
 
     An ``:if`` block may be followed by zero or more ``:elif`` clauses and
-    an optional ``:else`` clause, and must be closed with ``:fi``::
+    an optional ``:else`` clause, and must be closed with ``:end``::
 
         :if VALUE in val1,val2
             ...lines included when condition is true...
@@ -720,7 +720,7 @@ Format
             ...included if the first condition was false and this one is true...
         :else
             ...included if all preceding conditions were false...
-        :fi
+        :end
 
     Conditional blocks work **at the top level** (using ``:let`` variables)
     as well as **inside** ``:for`` loop bodies (using loop back-references
@@ -733,11 +733,11 @@ Format
 
         :if $env in staging,production
             10.0.0.1            ## monitoring-server
-        :fi
+        :end
 
         :if $env in production
             10.0.0.2            ## prod-db
-        :fi
+        :end
 
     **Inside a** ``:for`` **loop** — conditionally include per-iteration
     hosts based on the brace-group back-reference::
@@ -746,8 +746,8 @@ Format
             10.123.$1.1         ## sh$1-router
             :if $1 in 1,2
                 10.123.$1.16    ## sh$1-activesonar
-            :fi
-        :done
+            :end
+        :end
 
     Here ``$1`` is the numeric capture from the brace group (``1``,
     ``2``, ``3``, ``4``), so ``sh1-activesonar`` and ``sh2-activesonar``
@@ -756,15 +756,12 @@ Format
 ``:elif VALUE in val1,val2,...``
     Add a follow-on condition to the preceding ``:if`` (or ``:elif``).
     The same operators (``in`` / ``not in``) apply.  Only valid between
-    ``:if`` and ``:fi``.
+    ``:if`` and ``:end``.
 
 ``:else``
     Optional fallback clause.  Lines that follow are included when all
     preceding ``:if`` / ``:elif`` conditions were false.  Only valid
-    between ``:if`` and ``:fi``.
-
-``:fi``
-    Close the current ``:if`` block.
+    between ``:if`` and ``:end``.
 
 ``:cmd [args]``
     Any command listed under **COMMANDS** above; applied immediately
@@ -798,7 +795,7 @@ Format
           *-router                -l admin
           *-comm-mod              -l root
           restricted.example.com  --disable
-        :done
+        :end
 
     Each inner line is ``<glob> [opts|--disable]`` — identical to the
     last two arguments of the inline form.  The inline form continues
@@ -1112,13 +1109,13 @@ Examples::
     :for 10.0.{1..3}.{10..12}
         :resolv $0 rack$1-node$2    # rack1-node10, rack1-node11, etc.
         $0
-    :done
+    :end
 
     # Named backreference examples
     :for r,n in 10.0.{1..3}.{10..12}
         :resolv $0 rack$r-node$n    # rack1-node10, rack1-node11, etc.
         $0
-    :done
+    :end
 
 
 HISTORY MODES
