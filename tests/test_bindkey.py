@@ -530,14 +530,14 @@ class TestSaveConfigBindings:
             yield app, cfg
 
     def test_saveconfig_includes_user_bindings(self, app_with_cfg, pb):
-        """After binding a key, _save_config output contains :bindkey ..."""
+        """After binding a key, _save_config output contains :bind-key ..."""
         app, cfg = app_with_cfg
         app._cmd_bindkey('t :mux mtr')
         with patch.object(pb, '_config_path', return_value=cfg):
             success = app._save_config()
         assert success is True
         config_text = open(cfg).read()
-        assert ':bindkey t :mux mtr' in config_text
+        assert ':bind-key t :mux mtr' in config_text
 
     def test_saveconfig_excludes_default_bindings(self, app_with_cfg, pb):
         """Default bindings are not in save output."""
@@ -550,7 +550,7 @@ class TestSaveConfigBindings:
         assert ':bindkey q :quit' not in config_text
 
     def test_saveconfig_includes_unbinds(self, app_with_cfg, pb):
-        """After unbinding a default key, save output contains bare :bindkey <key>."""
+        """After unbinding a default key, save output contains bare :bind-key <key>."""
         app, cfg = app_with_cfg
         # Unbind 'q' (a default binding)
         app._cmd_bindkey('q')
@@ -558,9 +558,9 @@ class TestSaveConfigBindings:
             success = app._save_config()
         assert success is True
         config_text = open(cfg).read()
-        # Should have ':bindkey q' (without a command) to unbind it
+        # Should have ':bind-key q' (without a command) to unbind it
         lines = [line.strip() for line in config_text.splitlines()]
-        assert ':bindkey q' in lines
+        assert ':bind-key q' in lines
 
 
 # ===========================================================================

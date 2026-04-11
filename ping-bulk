@@ -124,23 +124,29 @@ _SET_PARAM_MAP: dict = {p.name: p for p in SET_PARAMS}
 
 class _Binding:
     """A key binding: one or more commands to execute on keypress."""
-    __slots__ = ('commands', 'edit_mode', 'key_notation', 'origin', 'context')
+    __slots__ = ('commands', 'edit_mode', 'key_notation', 'origin', 'context',
+                 'mode', 'desc', 'hint')
 
     def __init__(self, commands, edit_mode=False, key_notation='',
-                 origin='default', context=None):
+                 origin='default', context=None, mode='normal',
+                 desc='', hint=''):
         self.commands = commands
         self.edit_mode = edit_mode
         self.key_notation = key_notation
         self.origin = origin
         self.context = context  # frozenset of required vars or None
+        self.mode = mode        # UI mode: 'normal', 'help', 'details', 'command'
+        self.desc = desc        # description shown in help overlay
+        self.hint = hint        # short label shown in menu bar
 
     def __repr__(self):
-        mode = 'edit' if self.edit_mode else 'exec'
+        edit = 'edit' if self.edit_mode else 'exec'
         cmds = ' \\; '.join(self.commands)
         ctx = ''
         if self.context:
             ctx = ' '.join(f'--%{v}' for v in sorted(self.context)) + ' '
-        return f"_Binding({ctx}{self.key_notation!r}, {mode}, {cmds!r}, {self.origin})"
+        mode_str = f', mode={self.mode}' if self.mode != 'normal' else ''
+        return f"_Binding({ctx}{self.key_notation!r}, {edit}, {cmds!r}, {self.origin}{mode_str})"
 
 # Valid context guard variables for :bindkey --%x flags.
 _BINDING_CONTEXT_VARS = frozenset('hsrdjpHR')
@@ -507,17 +513,17 @@ _FULL_HELP = [
     "  :set terminal auto|xterm             X terminal emulator for :term",
     "-DIVIDER-",
     "  Key bindings",
-    "  :bindkey <key> <cmd>      bind key to command  (auto-execute)",
-    "  :bindkey <key> <cmd>...   bind key, fill command line for editing",
-    "  :bindkey <key>            unbind key",
-    "  :bindkey                  list all user bindings",
+    "  :bind-key <key> <cmd>     bind key to command  (auto-execute)",
+    "  :bind-key <key> <cmd>...  bind key, fill command line for editing",
+    "  :bind-key <key>           unbind key",
+    "  :bind-key                 list all user bindings",
     "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
     "  keys: a-z A-Z 0-9   <CR> <Esc> <Space> <C-x>  <Up>/<Down>/<Left>/<Right>",
     "        <PageUp> <PageDown>  za zc zo …  (arbitrary multi-key sequences)",
     "  %h = host  %i = IP  %r = connectable target  %d = SSH dest  %j = jump hosts",
   "  %H = section hosts  %p = port  %s = section  %% = literal %",
     "  %{H:,} = custom separator for multi-value variables",
-    "  \\\\; separates multiple commands: :bindkey x :set stats down \\\\; :set dns hostname",
+    "  \\\\; separates multiple commands: :bind-key x :set stats down \\\\; :set dns hostname",
 ]
 
 _EXAMPLE_HELP = """\
@@ -2653,7 +2659,7 @@ def _complete_path_arg(prefix):
 # Master command registry — single source of truth for names, handlers, and completions.
 CMD_REGISTRY = [
     CmdDef(['q', 'quit'],        '_cmd_quit',      None,
-           '',                    'quit the application'),
+           '[--confirm]',         'quit; --confirm uses re-press Ctrl-C pattern'),
     CmdDef(['dns'],              '_cmd_dns',        lambda: [m.lower() for m in DNS_MODES],
            '[off|hostname|ip]',   'cycle or set DNS display mode',
            cli_flags=('--dns',),
@@ -2679,9 +2685,9 @@ CMD_REGISTRY = [
     CmdDef(['seen'],             '_cmd_seen',       None,
            '',                    "insert 'seen' marker in event log"),
     CmdDef(['clear'],            '_cmd_clear',      None,
-           '',                    'clear event log'),
+           '[--confirm]',         'clear event log; --confirm asks for confirmation'),
     CmdDef(['clear-prompt'],     '_open_prompt_clear', None,
-           '',                    'clear event log (with confirmation prompt)',
+           '',                    'clear event log (alias for :clear --confirm)',
            completable=False),
     CmdDef(['log'],              '_cmd_log',        None,
            '[file|off]',          'show/set/disable the streaming log file',
@@ -2722,7 +2728,7 @@ CMD_REGISTRY = [
     CmdDef(['let'],              '_cmd_let',        None,
            '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
     CmdDef(['mux', 'tmux', 'screen'], '_cmd_mux', None,
-           '[-v|-h|-w] [command...]', 'run command in tmux/screen pane; no command = relaunch self (-v below, -h right, -w window)'),
+           '[--split-v|--split-h|--split-window] [command...]', 'run command in tmux/screen pane; no command = relaunch self (--split-v below, --split-h right, --split-window new)'),
     CmdDef(['term', 'terminal', 'xterm'], '_cmd_mux', None,
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
     CmdDef(['prog-options'],     '_cmd_prog_options', None,
@@ -2731,7 +2737,7 @@ CMD_REGISTRY = [
            '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
-    CmdDef(['bindkey'],          '_cmd_bindkey',    None,
+    CmdDef(['bind-key', 'bindkey'], '_cmd_bindkey',    None,
            '[key] [command]',    'bind/unbind/list key bindings'),
     CmdDef(['select'],           '_cmd_select',     ['up', 'down', 'first', 'last', 'none'],
            '[up|down|first|last|none]', 'navigate or clear host selection'),
@@ -2741,9 +2747,13 @@ CMD_REGISTRY = [
            ['toggle', 'toggle-recursive', 'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'],
            '<action>',            'fold action (toggle, za, zO, zR, zM, …)'),
     CmdDef(['scroll-history'],   '_cmd_scroll_history', None,
-           '<n|half|-half|full|-full>', 'scroll ping history'),
+           '<n|half|half-|full|full->', 'scroll ping history (trailing - = back/older)'),
     CmdDef(['scroll-log'],       '_cmd_scroll_log', None,
-           '<n|page|-page>',     'scroll event log'),
+           '<n|page|page->',     'scroll event log (trailing - = back/older)'),
+    CmdDef(['scroll-overlay'],   '_cmd_scroll_overlay', None,
+           '<up|down|page|page->', 'scroll active overlay (help or details)'),
+    CmdDef(['close'],            '_cmd_close',       None,
+           '',                    'close the currently open overlay'),
     CmdDef(['pause-selected'],   '_cmd_pause_selected', None,
            '',                    'toggle pause on highlighted host/section'),
 ]
@@ -3053,6 +3063,8 @@ class Application:
         if not os.path.exists(_config_path()):
             self._create_default_config()
         self.prompt = None        # None = no prompt; dict = prompt is open (see _open_prompt_*)
+        self._quit_confirm_deadline = 0.0   # epoch time; Ctrl-C before this = confirm quit
+        self._status_msg = None   # transient bottom-bar message: {'text': str, 'expires': float}
         self.cmd = None           # None = inactive; dict = command mode open (text buffer + cursor)
         self.cmd_history = []     # list of previously entered commands (oldest first)
         self._load_cmd_history()
@@ -3061,6 +3073,8 @@ class Application:
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
         self.details_scroll = 0   # Scroll offset for the host details overlay
+        self._current_mode = 'normal'  # current UI mode: normal/help/details/command
+        self._mode_bindings = {}  # mode → {key_code: _Binding} for overlay modes
         self.running = True
         self.threads = []
         self._start_time = None
@@ -3204,12 +3218,12 @@ class Application:
                 if user_bindings or self._unbound_defaults:
                     f.write("# Key bindings\n")
                     for notation in sorted(self._unbound_defaults):
-                        f.write(f":bindkey {notation}\n")
+                        f.write(f":bind-key {notation}\n")
                     for keys, b in user_bindings:
                         cmds = ' \\; '.join(b.commands)
                         suffix = '...' if b.edit_mode else ''
                         ctx_str = _format_context(b.context)
-                        f.write(f":bindkey {ctx_str}{b.key_notation} {cmds}{suffix}\n")
+                        f.write(f":bind-key {ctx_str}{b.key_notation} {cmds}{suffix}\n")
         except OSError as e:
             self.add_event("config", f"error saving config: {e}")
             return False
@@ -3730,6 +3744,7 @@ class Application:
                 self.details_open = True
                 self.details_monitor = entry
                 self.details_scroll = 0
+                self._current_mode = 'details'
 
     def _cmd_fold(self, args=''):
         """Execute a fold action: toggle, toggle-recursive, or z-action name."""
@@ -3746,17 +3761,21 @@ class Application:
             self.add_event("cmd", f"fold: unknown action '{args}'")
 
     def _cmd_scroll_history(self, args=''):
-        """Scroll ping history: numeric delta, half/-half, full/-full."""
+        """Scroll ping history: numeric delta, half/half-, full/full-.
+
+        Trailing ``-`` means reverse/back direction (half- = older, full- = oldest).
+        Legacy leading-dash forms (-half, -full) are accepted as aliases.
+        """
         if not args:
             return
         a = args.strip()
         if a == 'half':
             self.scroll_history(max(1, self._visible_ping_length // 2))
-        elif a == '-half':
+        elif a in ('half-', '-half'):
             self.scroll_history(-max(1, self._visible_ping_length // 2))
         elif a == 'full':
             self.scroll_history(self._visible_ping_length)
-        elif a == '-full':
+        elif a in ('full-', '-full'):
             self.scroll_history(-self._visible_ping_length)
         else:
             try:
@@ -3765,14 +3784,18 @@ class Application:
                 self.add_event("cmd", f"scroll-history: invalid value '{a}'")
 
     def _cmd_scroll_log(self, args=''):
-        """Scroll event log: numeric delta, page/-page."""
+        """Scroll event log: numeric delta, page/page-.
+
+        Trailing ``-`` means reverse/back direction (page- = up/older).
+        Legacy leading-dash form (-page) is accepted as an alias.
+        """
         if not args:
             return
         a = args.strip()
         page_size = getattr(self, '_log_page_size', 20)
         if a == 'page':
             self.scroll_log(page_size)
-        elif a == '-page':
+        elif a in ('page-', '-page'):
             self.scroll_log(-page_size)
         else:
             try:
@@ -3806,14 +3829,14 @@ class Application:
 
     def _register_default_bindings(self):
         """Populate the key trie with default (hardcoded) bindings."""
-        def _b(notation, *commands, context=None):
+        def _b(notation, *commands, context=None, hint=''):
             keys = _parse_key_notation(notation)
             self._key_trie.insert(keys, _Binding(
                 list(commands), key_notation=notation, origin='default',
-                context=context))
+                context=context, hint=hint))
 
         # Quit
-        _b('q', ':quit')
+        _b('q', ':quit', hint='[q]uit')
         _b('Q', ':quit')
         # Display modes
         _b('D', ':dns')
@@ -3826,10 +3849,10 @@ class Application:
         _b('P', ':pause')
         _b('p', ':pause-selected')
         # Actions
-        _b('C', ':clear-prompt')
+        _b('C', ':clear --confirm', hint='[C]lear log')
         _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'))
         _b('c', ':mux ssh %r')
-        _b('?', ':help')
+        _b('?', ':help', hint='help:[?]')
         _b('<Esc>', ':select none')
         # Selection
         _b('<Up>', ':select up')
@@ -3852,12 +3875,53 @@ class Application:
             _b(f'z{ch}', f':fold z{ch}')
         # History scrolling
         _b('<Left>', ':scroll-history half')
-        _b('<Right>', ':scroll-history -half')
+        _b('<Right>', ':scroll-history half-')
         _b('<C-Left>', ':scroll-history full')
-        _b('<C-Right>', ':scroll-history -full')
+        _b('<C-Right>', ':scroll-history full-')
         # Log scrolling
         _b('<PageUp>', ':scroll-log page')
-        _b('<PageDown>', ':scroll-log -page')
+        _b('<PageDown>', ':scroll-log page-')
+
+        self._register_mode_bindings()
+
+    def _register_mode_bindings(self):
+        """Register default key bindings for non-normal UI modes (help/details)."""
+        def _mb(mode, notation, *commands):
+            try:
+                keys = _parse_key_notation(notation)
+            except ValueError:
+                return
+            key_code = keys[0] if keys else None
+            if key_code is None:
+                return
+            b = _Binding(list(commands), key_notation=notation,
+                         origin='default', mode=mode)
+            self._mode_bindings.setdefault(mode, {})[key_code] = b
+            # Register Enter variants together
+            if notation == '<CR>':
+                for extra in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+                    self._mode_bindings[mode][extra] = b
+
+        # help mode bindings
+        _mb('help', 'q',      ':close')
+        _mb('help', 'Q',      ':close')
+        _mb('help', '<Esc>',  ':close')
+        _mb('help', '<CR>',   ':close')
+        _mb('help', '<Up>',   ':scroll-overlay up')
+        _mb('help', '<Down>', ':scroll-overlay down')
+        _mb('help', '<PgUp>', ':scroll-overlay page-')
+        _mb('help', '<PgDn>', ':scroll-overlay page')
+
+        # details mode bindings
+        _mb('details', 'q',      ':close')
+        _mb('details', 'Q',      ':close')
+        _mb('details', '<Esc>',  ':close')
+        _mb('details', '<CR>',   ':close')
+        _mb('details', 'c',      ':close')
+        _mb('details', '<Up>',   ':scroll-overlay up')
+        _mb('details', '<Down>', ':scroll-overlay down')
+        _mb('details', '<PgUp>', ':scroll-overlay page-')
+        _mb('details', '<PgDn>', ':scroll-overlay page')
 
     def _execute_binding(self, binding):
         """Execute a _Binding (one or more commands, or fill command line).
@@ -3868,7 +3932,7 @@ class Application:
         """
         commands, warning = self._expand_binding_commands(binding.commands)
         if warning:
-            self.add_event("bindkey", warning)
+            self.add_event("bind-key", warning)
             return
 
         if binding.edit_mode:
@@ -4039,7 +4103,7 @@ class Application:
         as AND (all must be present).  Without flags, binding is unconditional.
         """
         if self.kiosk_mode and not getattr(self, '_loading_file', False):
-            self.add_event("cmd", "bindkey: blocked in kiosk mode")
+            self.add_event("cmd", "bind-key: blocked in kiosk mode")
             return
 
         args = args.strip()
@@ -4048,24 +4112,24 @@ class Application:
             user_bindings = [(keys, b) for keys, b in self._key_trie
                              if b.origin == 'user']
             if not user_bindings:
-                self.add_event("bindkey", "no user key bindings")
+                self.add_event("bind-key", "no user key bindings")
             else:
                 for keys, b in user_bindings:
                     cmds = ' \\; '.join(b.commands)
                     suffix = '...' if b.edit_mode else ''
                     ctx_str = _format_context(b.context)
-                    self.add_event("bindkey",
+                    self.add_event("bind-key",
                                    f"{ctx_str}{b.key_notation}  →  {cmds}{suffix}")
             return
 
         # Parse context flags (--%h, --%s, --%p, --%j)
         context, args = _parse_context_flags(args)
         if context is False:
-            self.add_event("cmd", f"bindkey: {args}")  # args holds error msg
+            self.add_event("cmd", f"bind-key: {args}")  # args holds error msg
             return
         args = args.strip()
         if not args:
-            self.add_event("cmd", "bindkey: missing key notation")
+            self.add_event("cmd", "bind-key: missing key notation")
             return
 
         # Parse key notation (first token or angle-bracket group)
@@ -4073,7 +4137,7 @@ class Application:
         try:
             key_codes = _parse_key_notation(key_str)
         except ValueError as e:
-            self.add_event("cmd", f"bindkey: {e}")
+            self.add_event("cmd", f"bind-key: {e}")
             return
 
         if not rest:
@@ -4082,9 +4146,9 @@ class Application:
             if removed:
                 ctx_str = _format_context(context)
                 self._unbound_defaults.add(f"{ctx_str}{key_str}")
-                self.add_event("bindkey", f"unbound {ctx_str}{key_str}")
+                self.add_event("bind-key", f"unbound {ctx_str}{key_str}")
             else:
-                self.add_event("bindkey", f"no binding for {key_str}")
+                self.add_event("bind-key", f"no binding for {key_str}")
             return
 
         # Bind: rest is the command(s)
@@ -4094,7 +4158,7 @@ class Application:
         commands = [c.strip() for c in re.split(r'(?<!\\)\\\;', cmd_text)]
         commands = [c for c in commands if c]
         if not commands:
-            self.add_event("cmd", "bindkey: empty command")
+            self.add_event("cmd", "bind-key: empty command")
             return
 
         # If user is rebinding a key that was a prefix, clear its subtree
@@ -4110,7 +4174,7 @@ class Application:
         self._unbound_defaults.discard(f"{ctx_str}{key_str}")
         cmds_display = ' \\; '.join(commands)
         suffix = '...' if edit_mode else ''
-        self.add_event("bindkey", f"{ctx_str}{key_str} → {cmds_display}{suffix}")
+        self.add_event("bind-key", f"{ctx_str}{key_str} → {cmds_display}{suffix}")
 
     @staticmethod
     def _split_bindkey_args(args):
@@ -5137,10 +5201,6 @@ class Application:
             line = "Clear event log? [y/N]: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
-        elif p['type'] == 'quit_confirm':
-            line = "Quit? [y/N]: "
-            stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
-            stdscr.move(height - 1, min(len(line), width - 2))
         elif p['type'] == 'mux_relaunch':
             line = "Not in a multiplexer — relaunch inside tmux? [Y/n]: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
@@ -5202,11 +5262,6 @@ class Application:
                 self.events.clear()
                 self.log_offset = 0  # reset scroll position after clearing
             self.prompt = None  # any key closes the clear prompt
-
-        elif p['type'] == 'quit_confirm':
-            if key in (ord('y'), ord('Y')):
-                self.running = False
-            self.prompt = None  # any key closes the quit prompt
 
         elif p['type'] == 'mux_relaunch':
             if key not in (ord('n'), ord('N'), 27):
@@ -5602,8 +5657,24 @@ class Application:
                 + "  (try :help)")
 
     def _cmd_quit(self, args=''):
-        """Quit the application."""
-        self.running = False
+        """Quit the application.
+
+        :quit            — quit immediately
+        :quit --confirm  — re-press pattern: first press shows a message;
+                           a second press within 2 seconds quits.
+        """
+        if args.strip() == '--confirm':
+            now = time.time()
+            if now < self._quit_confirm_deadline:
+                self.running = False
+            else:
+                self._quit_confirm_deadline = now + 2.0
+                self._status_msg = {
+                    'text': "Press Ctrl-C again to quit",
+                    'expires': self._quit_confirm_deadline,
+                }
+        else:
+            self.running = False
 
     def _cmd_ping(self, args=''):
         """Ping a host directly.
@@ -5783,9 +5854,13 @@ class Application:
 
         # Parse optional split-direction override
         direction = self.mux_split
-        if tokens and tokens[0] in ('-v', '-h', '-w'):
+        if tokens and tokens[0] in ('-v', '-h', '-w', '--split-v', '--split-h', '--split-window'):
             flag = tokens.pop(0)
-            direction = {'-v': 'v', '-h': 'h', '-w': 'window'}.get(flag, flag[1:])
+            direction = {
+                '-v': 'v',      '--split-v': 'v',
+                '-h': 'h',      '--split-h': 'h',
+                '-w': 'window', '--split-window': 'window',
+            }.get(flag, 'v')
 
         if not tokens:
             # No command given: relaunch self.
@@ -6177,9 +6252,16 @@ class Application:
         self.mark_seen()
 
     def _cmd_clear(self, args=''):
-        """Clear the event log."""
-        self.events.clear()
-        self.log_offset = 0
+        """Clear the event log.
+
+        :clear           — clear immediately
+        :clear --confirm — open confirmation prompt before clearing
+        """
+        if args.strip() == '--confirm':
+            self._open_prompt_clear()
+        else:
+            self.events.clear()
+            self.log_offset = 0
 
     def _cmd_log(self, args=''):
         """Show active log file, set/stream log to file, or disable logging."""
@@ -6454,6 +6536,26 @@ class Application:
         """
         self.help_open = True
         self.help_scroll = 0
+        self._current_mode = 'help'
+
+    def _cmd_close(self, args=''):
+        """Close the currently open overlay (help or details)."""
+        if self.help_open:
+            self.help_open = False
+            self._current_mode = 'normal'
+        elif self.details_open:
+            self.details_open = False
+            self.details_monitor = None
+            self._current_mode = 'normal'
+
+    def _cmd_scroll_overlay(self, args=''):
+        """Scroll the active overlay: up/down (±1) or page/page- (±10)."""
+        a = args.strip()
+        delta = {'up': -1, 'down': 1, 'page-': -10, 'page': 10}.get(a, 0)
+        if self.help_open:
+            self.help_scroll = max(0, self.help_scroll + delta)
+        elif self.details_open:
+            self.details_scroll = max(0, self.details_scroll + delta)
 
     def _draw_overlay_box(self, stdscr, height, width, lines, scroll_offset, inner_w, *,
                           handle_dividers=False):
@@ -6544,8 +6646,9 @@ class Application:
     def _draw_help_overlay(self, stdscr, height, width):
         """Draw the help overlay as a centered bordered popup with scroll support.
 
-        Uses _FULL_HELP as content.  The box uses bold borders and renders each
-        line through _draw_hint_text so ``[key]`` tokens are highlighted in
+        Uses _FULL_HELP as content plus any user-defined bindings that have a
+        --desc annotation.  The box uses bold borders and renders each line
+        through _draw_hint_text so ``[key]`` tokens are highlighted in
         white/bold (same style as the main menu bar).
         The overlay is closed by pressing q, Q, or Esc (handled in run()).
 
@@ -6556,10 +6659,35 @@ class Application:
         scroll indicator ' ↑↓ n-m/total ' centered in the dashes so the user
         can see where they are.  The scroll position is clamped by the helper.
         """
-        ideal_w = max(len(line) for line in _FULL_HELP if line != "-DIVIDER-")
+        lines = list(_FULL_HELP)
+
+        # Collect user bindings with --desc, grouped by mode
+        by_mode = {}  # mode -> [(key_notation, desc)]
+        for _keys, b in self._key_trie:
+            if b.origin == 'user' and b.desc:
+                by_mode.setdefault(b.mode or 'normal', []).append(
+                    (b.key_notation, b.desc))
+        for mode, mode_dict in self._mode_bindings.items():
+            seen = set()
+            for b in mode_dict.values():
+                if b.origin == 'user' and b.desc and id(b) not in seen:
+                    seen.add(id(b))
+                    by_mode.setdefault(mode, []).append((b.key_notation, b.desc))
+
+        if by_mode:
+            lines.append('-DIVIDER-')
+            lines.append('─ Custom bindings ─')
+            for mode in sorted(by_mode):
+                entries = by_mode[mode]
+                if entries:
+                    lines.append(f'  {mode} mode')
+                    for notation, desc in entries:
+                        lines.append(f'    {notation:<10} {desc}')
+
+        ideal_w = max(len(line) for line in lines if line != "-DIVIDER-")
         inner_w = min(ideal_w, max(20, width - 4))
         self.help_scroll = self._draw_overlay_box(
-            stdscr, height, width, _FULL_HELP, self.help_scroll, inner_w,
+            stdscr, height, width, lines, self.help_scroll, inner_w,
             handle_dividers=True,
         )
 
@@ -6894,7 +7022,17 @@ class Application:
                     self._draw_prompt(stdscr, height, width)
                     curses.curs_set(1)
                 else:
-                    self.draw_menu_bar(stdscr, height, width)
+                    if self._status_msg and time.time() < self._status_msg['expires']:
+                        msg = self._status_msg['text']
+                        try:
+                            stdscr.addstr(height - 1, 0,
+                                          msg.ljust(width - 1)[:width - 1],
+                                          curses.A_REVERSE)
+                        except curses.error:
+                            pass
+                    else:
+                        self._status_msg = None
+                        self.draw_menu_bar(stdscr, height, width)
                     curses.curs_set(0)
 
                 # Help overlay drawn last so it floats above everything else
@@ -6919,7 +7057,7 @@ class Application:
                 try:
                     stdscr.refresh()
                 except KeyboardInterrupt:
-                    self.prompt = {'type': 'quit_confirm', 'chars': []}
+                    self._cmd_quit('--confirm')
                     continue
 
                 # Handle input — map Ctrl+C (KeyboardInterrupt) to key code 3
@@ -6987,9 +7125,9 @@ class Application:
                         'completions': [], 'comp_idx': -1, 'comp_prefix': '',
                     }
                     continue
-                if key == 3:  # Ctrl+C — quit confirmation
+                if key == 3:  # Ctrl+C — quit confirmation (re-press pattern)
                     self._key_seq = []
-                    self.prompt = {'type': 'quit_confirm', 'chars': []}
+                    self._cmd_quit('--confirm')
                     continue
                 # ── Trie lookup with context resolution ───────────────────
                 ctx_keys = set(self._binding_context().keys())

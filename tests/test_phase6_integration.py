@@ -47,7 +47,7 @@ class TestSaveconfigBothBindkeyAndProgOptions:
             app1._save_config()
 
         text = open(cfg).read()
-        assert ':bindkey t :mux mtr %i' in text
+        assert ':bind-key t :mux mtr %i' in text
         assert ':prog-options ssh *.internal -o ProxyJump=gw' in text
 
         with patch.object(pb, '_config_path', return_value=cfg):

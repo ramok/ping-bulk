@@ -2,93 +2,97 @@
 
 Ctrl+C behaviour per UI layer
 ------------------------------
-normal mode      — opens a ``quit_confirm`` prompt ("Quit? [y/N]:")
+normal mode      — re-press pattern: first Ctrl+C shows "Press Ctrl-C again to quit"
+                   in the bottom bar; a second Ctrl+C within 2 seconds quits.
 help overlay     — closes the overlay (same as q / Q / Esc)
 command mode     — cancels the command line (same as Esc)
 any prompt       — cancels the prompt (same as Esc)
 
-quit_confirm prompt
--------------------
-y / Y  → set running=False (app exits; "DNS:" disappears from pane (app exited))
-any other key (n, Esc, Enter, Ctrl+C) → dismiss without quitting
+re-press quit pattern
+----------------------
+first Ctrl+C   → shows "Press Ctrl-C again to quit" (transient, replaces menu bar)
+second Ctrl+C  → app exits ("DNS:" disappears)
+other keys     → do nothing; message disappears after ~2 seconds
 """
 
 import pytest
 
 # Substrings used as wait targets / absence markers.
 MENU_BAR       = 'DNS:'
-QUIT_PROMPT    = 'Quit? [y/N]:'
+QUIT_MSG       = 'Press Ctrl-C again to quit'
 HELP_MARKER    = '[q / Esc] close'
 CLEAR_PROMPT   = 'Clear event log? [y/N]:'
 
 
 # ===========================================================================
-# TestQuitConfirmPrompt
+# TestQuitConfirmRepress
 # ===========================================================================
 
 class TestQuitConfirmPrompt:
-    """Ctrl+C in normal mode opens a quit_confirm prompt; keys are handled correctly."""
+    """Ctrl+C in normal mode uses re-press pattern; second Ctrl+C within 2s quits."""
 
     def test_ctrl_c_opens_quit_prompt(self, tmux_app_40):
-        """Ctrl+C in normal mode shows 'Quit? [y/N]:' on the bottom line."""
+        """First Ctrl+C shows 'Press Ctrl-C again to quit' on the bottom line."""
         tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
+        tmux_app_40.wait_for(QUIT_MSG)
+
+    def test_second_ctrl_c_quits(self, tmux_app_40):
+        """Second Ctrl+C within 2 seconds exits the application."""
+        tmux_app_40.send_keys('C-c')
+        tmux_app_40.wait_for(QUIT_MSG)
+        tmux_app_40.send_keys('C-c')
+        tmux_app_40.wait_for_absence(MENU_BAR)
+
+    def test_ctrl_c_in_prompt_dismisses_without_quitting(self, tmux_app_40):
+        """Ctrl+C inside the clear prompt cancels it (does not trigger quit)."""
+        tmux_app_40.send_keys('C')           # opens "Clear event log? [y/N]:"
+        tmux_app_40.wait_for(CLEAR_PROMPT)
+        tmux_app_40.send_keys('C-c')
+        tmux_app_40.wait_for_absence(CLEAR_PROMPT)
+        tmux_app_40.wait_for(MENU_BAR)
 
     def test_y_confirms_quit(self, tmux_app_40):
-        """Pressing y in the quit_confirm prompt exits the application."""
-        tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
-        tmux_app_40.send_keys('y')
+        """q still quits the application immediately (not via re-press)."""
+        tmux_app_40.send_keys('q')
         tmux_app_40.wait_for_absence(MENU_BAR)
 
     def test_capital_Y_confirms_quit(self, tmux_app_40):
-        """Pressing Y (uppercase) in the quit_confirm prompt also exits the application."""
-        tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
-        tmux_app_40.send_keys('Y')
+        """Q still quits the application immediately."""
+        tmux_app_40.send_keys('Q')
         tmux_app_40.wait_for_absence(MENU_BAR)
 
     def test_n_dismisses_without_quitting(self, tmux_app_40):
-        """Pressing n dismisses the prompt; the app keeps running."""
+        """After first Ctrl+C, pressing another key (e.g. n) does not quit; menu bar returns."""
         tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
+        tmux_app_40.wait_for(QUIT_MSG)
         tmux_app_40.send_keys('n')
-        tmux_app_40.wait_for_absence(QUIT_PROMPT)
+        # 'n' is not a special key — app stays running; menu bar eventually returns
         tmux_app_40.wait_for(MENU_BAR)
 
     def test_escape_dismisses_without_quitting(self, tmux_app_40):
-        """Esc dismisses the prompt; the app keeps running."""
+        """After first Ctrl+C, Esc clears selection (normal mode) — app keeps running."""
         tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
+        tmux_app_40.wait_for(QUIT_MSG)
         tmux_app_40.send_keys('Escape')
-        tmux_app_40.wait_for_absence(QUIT_PROMPT)
         tmux_app_40.wait_for(MENU_BAR)
 
     def test_enter_dismisses_without_quitting(self, tmux_app_40):
-        """Enter (not y/Y) dismisses the prompt; the app keeps running."""
+        """After first Ctrl+C, Enter opens details (not quit) — menu bar returns after Esc."""
         tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
-        tmux_app_40.send_keys('Enter')
-        tmux_app_40.wait_for_absence(QUIT_PROMPT)
-        tmux_app_40.wait_for(MENU_BAR)
-
-    def test_ctrl_c_in_prompt_dismisses_without_quitting(self, tmux_app_40):
-        """Ctrl+C inside the quit_confirm prompt cancels it (does not quit)."""
-        tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
-        tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for_absence(QUIT_PROMPT)
+        tmux_app_40.wait_for(QUIT_MSG)
+        # Wait 2.1s for deadline to expire naturally (no second Ctrl-C)
+        import time; time.sleep(2.1)
         tmux_app_40.wait_for(MENU_BAR)
 
     def test_second_ctrl_c_can_reopen_prompt(self, tmux_app_40):
-        """After dismissing with n, Ctrl+C can open the quit prompt again."""
+        """After deadline expires, another Ctrl+C shows the message again."""
         tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
-        tmux_app_40.send_keys('n')
-        tmux_app_40.wait_for_absence(QUIT_PROMPT)
-        # Re-open
+        tmux_app_40.wait_for(QUIT_MSG)
+        import time; time.sleep(2.1)
+        tmux_app_40.wait_for(MENU_BAR)
+        # Re-trigger
         tmux_app_40.send_keys('C-c')
-        tmux_app_40.wait_for(QUIT_PROMPT)
+        tmux_app_40.wait_for(QUIT_MSG)
 
 
 # ===========================================================================
