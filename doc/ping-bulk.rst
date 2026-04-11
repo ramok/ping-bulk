@@ -98,17 +98,35 @@ Navigation
 ``:``
     Open the command line (see **COMMANDS** below).
 
-``←`` / ``→``
-    Scroll the ping-history strip backwards / forwards in time.
+``j`` / ``k``
+    Move host selection down / up.
 
 ``↑`` / ``↓``
-    Scroll the event log up / down one line.
+    When no host is selected: scroll the event log up / down one line.
+    When a host is selected: move selection up / down.
+
+``G``
+    Move selection to the last host.
+
+``gg``
+    Move selection to the first host.
+
+``Ctrl-F`` / ``Ctrl-B``
+    Scroll the event log forward / backward one page.
+
+``←`` / ``→``
+    Scroll the ping-history strip backwards / forwards in time.
 
 ``PgUp`` / ``PgDn``
     Scroll the event log up / down one page.
 
 ``Space``
     Insert a timestamped *seen* separator into the event log.
+
+``/``
+    Open the search prompt.  When a host is selected, searches hostnames;
+    otherwise searches the event log.  ``n`` / ``N`` navigate to the
+    next / previous match.  ``Esc`` cancels and clears highlights.
 
 Display
 -------
@@ -307,8 +325,13 @@ Key bindings
             :bind-key --hint "[t]race" t :mux mtr %i
 
 ``:bind-key <key>``
-    Unbind *key*.  If the key had a default binding, the default is
-    removed and the unbind is tracked by ``:saveconfig``.
+    Query: print what command is bound to *key* in the event log.
+    Does **not** remove the binding.
+
+``:unbind-key [--mode MODE] [--%x] <key>``
+    Remove a key binding.  If the key had a default binding, the default is
+    removed and the unbind is recorded in the saved config as ``:unbind-key
+    <key>`` so it survives restart.
 
 ``:bind-key``
     List all user-defined key bindings in the event log.
@@ -465,7 +488,63 @@ Help
 ----
 
 ``:help``
-    Open the built-in help overlay (same as ``?``).
+    Open the built-in help overlay (same as ``?``).  Press ``A`` inside
+    the overlay to toggle a generated view of all current key bindings
+    (including default ones).
+
+Folding
+-------
+
+``:fold <action>``
+    Fold or unfold sections.  *action* accepts either vim z-notation or
+    plain word aliases:
+
+    +------------------------+---------+------------------------------------+
+    | Word alias             | z-key   | Effect                             |
+    +========================+=========+====================================+
+    | ``toggle``             | ``za``  | Toggle fold under cursor           |
+    +------------------------+---------+------------------------------------+
+    | ``toggle-recursive``   | ``zA``  | Toggle fold recursively            |
+    +------------------------+---------+------------------------------------+
+    | ``open``               | ``zo``  | Open (unfold) section              |
+    +------------------------+---------+------------------------------------+
+    | ``open-recursive``     | ``zO``  | Open recursively                   |
+    +------------------------+---------+------------------------------------+
+    | ``close``              | ``zc``  | Close (fold) section               |
+    +------------------------+---------+------------------------------------+
+    | ``close-recursive``    | ``zC``  | Close recursively                  |
+    +------------------------+---------+------------------------------------+
+    | ``open-all``           | ``zR``  | Open all sections                  |
+    +------------------------+---------+------------------------------------+
+    | ``close-all``          | ``zM``  | Close all sections                 |
+    +------------------------+---------+------------------------------------+
+    | ``open-level``         | ``zr``  | Open one level                     |
+    +------------------------+---------+------------------------------------+
+    | ``close-level``        | ``zm``  | Close one level                    |
+    +------------------------+---------+------------------------------------+
+
+    Examples::
+
+        :fold toggle
+        :fold close-all
+        :fold zA
+
+``:fold-all`` / ``:unfold-all``
+    Fold / unfold all sections at once (shorthand for ``:fold close-all``
+    and ``:fold open-all``).
+
+Search
+------
+
+``:search``
+    Open the search prompt (same as ``/``).  When a host is selected,
+    searches host display names; otherwise searches the event log.
+    Matching is case-insensitive substring.  Press ``Enter`` to confirm and
+    jump to the first match, ``Esc`` to cancel.
+
+``:search-next [prev]``
+    Jump to the next search match (same as ``n``).  With ``prev``,
+    jump to the previous match (same as ``N``).
 
 
 HOSTS FILE
@@ -1119,8 +1198,8 @@ Recognised settings
 
 ``:bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] <key> <command>``
     User key bindings.  Only bindings that differ from the defaults
-    are saved.  Unbinds of default keys are stored as bare
-    ``:bind-key <key>`` lines.
+    are saved.  Explicit unbinds of default keys are stored as
+    ``:unbind-key <key>`` lines.
 
 Example::
 
