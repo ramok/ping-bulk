@@ -440,3 +440,59 @@ class TestCmdMuxNoCommand:
                 app._cmd_mux('')
         assert app.prompt is None
         mock_backend.split.assert_not_called()
+
+
+class TestNoFocusRelaunch:
+    """--no-focus flag is preserved through the relaunch prompt."""
+
+    def _mock_not_in_mux(self):
+        m = MagicMock()
+        m.is_inside.return_value = False
+        m.available.return_value = True
+        return m
+
+    def test_no_focus_preserved_in_relaunch_pending_cmd(self, pb, tmp_path):
+        """When not inside tmux, --no-focus must be kept in pending_cmd."""
+        app = _make_app(pb, tmp_path)
+        mux_backend = self._mock_not_in_mux()
+        term_backend = MagicMock()   # separate object so 'backend is not terminal' works
+        term_backend.is_inside.return_value = False
+        term_backend.available.return_value = False
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mux_backend, 'screen': mux_backend,
+                                            'terminal': term_backend}):
+            app._cmd_mux('--no-focus mtr host')
+        assert app.prompt is not None
+        assert app.prompt['type'] == 'mux_relaunch'
+        assert '--no-focus' in app.prompt['pending_cmd'], (
+            f"--no-focus not in pending_cmd: {app.prompt['pending_cmd']!r}"
+        )
+
+    def test_direction_preserved_in_relaunch_pending_cmd(self, pb, tmp_path):
+        """Explicit -h direction is re-injected into pending_cmd after relaunch."""
+        app = _make_app(pb, tmp_path)
+        mux_backend = self._mock_not_in_mux()
+        term_backend = MagicMock()
+        term_backend.is_inside.return_value = False
+        term_backend.available.return_value = False
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mux_backend, 'screen': mux_backend,
+                                            'terminal': term_backend}):
+            app._cmd_mux('-h ssh host')
+        assert app.prompt is not None
+        assert '--split-h' in app.prompt['pending_cmd'], (
+            f"--split-h not in pending_cmd: {app.prompt['pending_cmd']!r}"
+        )
+
+    def test_no_focus_and_direction_combined(self, pb, tmp_path):
+        """-h --no-focus: both flags preserved in pending_cmd."""
+        app = _make_app(pb, tmp_path)
+        mux_backend = self._mock_not_in_mux()
+        term_backend = MagicMock()
+        term_backend.is_inside.return_value = False
+        term_backend.available.return_value = False
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mux_backend, 'screen': mux_backend,
+                                            'terminal': term_backend}):
+            app._cmd_mux('-h --no-focus mtr host')
+        assert app.prompt is not None
+        cmd = app.prompt['pending_cmd']
+        assert '--split-h' in cmd, f"--split-h missing: {cmd!r}"
+        assert '--no-focus' in cmd, f"--no-focus missing: {cmd!r}"

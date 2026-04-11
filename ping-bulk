@@ -6449,12 +6449,28 @@ class Application:
         if self._monitoring_started:
             self.add_event("cmd", f"terminal: {value}")
 
-    def _mux_relaunch_prompt(self, tokens: list) -> dict:
+    def _mux_relaunch_prompt(self, tokens: list, no_focus: bool = False,
+                             direction: str = None) -> dict:
         """Build a mux_relaunch prompt dict, capturing context for post-relaunch restore.
 
-        tokens — the :mux command tokens (e.g. ['ssh', '10.0.0.1', '-l', 'root'])
+        tokens    — the :mux command tokens (e.g. ['ssh', '10.0.0.1', '-l', 'root'])
+        no_focus  — True if --no-focus was given; re-injected into pending_cmd
+        direction — explicit split direction if given; re-injected when it differs
+                    from the stored mux_split setting so the relaunch uses the same
+                    direction the user requested.
         """
-        pending_cmd = 'mux ' + shlex.join(tokens) if tokens else None
+        prefix_flags = []
+        if direction is not None and direction != self.mux_split:
+            prefix_flags.append({'v': '--split-v', 'h': '--split-h',
+                                  'window': '--split-window'}.get(direction, ''))
+        if no_focus:
+            prefix_flags.append('--no-focus')
+        prefix_flags = [f for f in prefix_flags if f]  # drop any empty strings
+
+        if tokens or prefix_flags:
+            pending_cmd = 'mux ' + shlex.join(prefix_flags + tokens)
+        else:
+            pending_cmd = None
         pending_host = None
         if (self.highlighted_index is not None
                 and 0 <= self.highlighted_index < len(self.entries)):
@@ -6568,7 +6584,8 @@ class Application:
                         self.add_event("cmd",
                             f"mux: {preference} is not installed")
                     else:
-                        self.prompt = self._mux_relaunch_prompt(tokens)
+                        self.prompt = self._mux_relaunch_prompt(
+                            tokens, no_focus=no_focus, direction=direction)
                     return
             backend = _resolve_mux_backend(preference)
             if backend is None:
@@ -6580,7 +6597,8 @@ class Application:
             # a session, the backend binary exists but has no session socket —
             # offer to relaunch inside one instead of hitting a cryptic error.
             if backend is not _MUX_BACKENDS.get('terminal') and not backend.is_inside():
-                self.prompt = self._mux_relaunch_prompt(tokens)
+                self.prompt = self._mux_relaunch_prompt(
+                    tokens, no_focus=no_focus, direction=direction)
                 return
 
         try:
