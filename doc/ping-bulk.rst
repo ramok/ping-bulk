@@ -722,6 +722,15 @@ Format
             ...included if all preceding conditions were false...
         :end
 
+    **Inline form** — when the body is a single line, the ``->`` shorthand
+    avoids the block/``:end`` boilerplate::
+
+        :if COND -> BODY
+
+    This is exactly equivalent to the three-line block form.  No ``:end``
+    is required or allowed.  ``:else``/``:elif`` are not available in the
+    inline form; use the block form when they are needed.
+
     Conditional blocks work **at the top level** (using ``:let`` variables)
     as well as **inside** ``:for`` loop bodies (using loop back-references
     such as ``$1`` or named variables).  Blocks may be nested to arbitrary
@@ -731,9 +740,7 @@ Format
 
         :let env production
 
-        :if $env in staging,production
-            10.0.0.1            ## monitoring-server
-        :end
+        :if $env in staging,production -> 10.0.0.1 ## monitoring-server
 
         :if $env in production
             10.0.0.2            ## prod-db
@@ -744,9 +751,7 @@ Format
 
         :for hub in sensor-hub-{1..4}
             10.123.$1.1         ## sh$1-router
-            :if $1 in 1,2
-                10.123.$1.16    ## sh$1-activesonar
-            :end
+            :if $1 in 1,2 -> 10.123.$1.16 ## sh$1-activesonar
         :end
 
     Here ``$1`` is the numeric capture from the brace group (``1``,

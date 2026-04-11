@@ -291,3 +291,141 @@ class TestIfInsideFor:
         hosts = [v for k, v in entries if k == 'host']
         # $sh = brace capture ('1', '2', '3'), not full string ('sensor-hub-1', ...)
         assert hosts == ['10.0.0.1', '10.0.0.2'], f"Unexpected hosts: {hosts!r}"
+
+
+# ===========================================================================
+# TestIfInline
+# ===========================================================================
+
+class TestIfInline:
+    """Tests for the inline :if COND -> BODY one-liner form."""
+
+    def test_inline_true_top_level(self, pb, tmp_path):
+        """:if COND -> host includes the host when condition is true."""
+        content = """\
+            :let env prod
+            :if $env in prod -> 10.0.0.1
+            10.0.0.2
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == ['10.0.0.1', '10.0.0.2']
+
+    def test_inline_false_top_level(self, pb, tmp_path):
+        """:if COND -> host skips the host when condition is false."""
+        content = """\
+            :let env dev
+            :if $env in prod -> 10.0.0.1
+            10.0.0.2
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == ['10.0.0.2']
+
+    def test_inline_inside_for_true(self, pb, tmp_path):
+        """:if COND -> host inside :for includes the host when condition is true."""
+        content = """\
+            :for hub-{1,2,3}
+            10.0.0.$1
+            :if $1 in 2 -> 10.0.1.$1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == ['10.0.0.1', '10.0.0.2', '10.0.1.2', '10.0.0.3']
+
+    def test_inline_inside_for_false(self, pb, tmp_path):
+        """:if COND -> host inside :for excludes the host when condition is false."""
+        content = """\
+            :for hub-{1,2,3}
+            :if $1 in 9 -> 10.0.0.$1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == []
+
+    def test_inline_with_label(self, pb, tmp_path):
+        """:if COND -> 10.0.0.1 ## label registers :resolv and uses label as host."""
+        content = """\
+            :let env prod
+            :if $env in prod -> 10.0.0.1 ## prod-server
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmds = [v for k, v in entries if k == 'cmd']
+        hosts = [v for k, v in entries if k == 'host']
+        assert any('prod-server' in c for c in cmds), f"Expected :resolv, got: {cmds!r}"
+        assert 'prod-server' in hosts
+
+    def test_inline_inside_for_with_label(self, pb, tmp_path):
+        """:if COND -> IP ## label$1 inside :for expands back-refs in label."""
+        content = """\
+            :for n in hub-{1,2}
+            :if $n in 1 -> 10.0.$n.1 ## gw$n
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmds = [v for k, v in entries if k == 'cmd']
+        hosts = [v for k, v in entries if k == 'host']
+        assert any('10.0.1.1' in c and 'gw1' in c for c in cmds)
+        assert 'gw1' in hosts
+        assert 'gw2' not in hosts
+
+    def test_inline_empty_body_warns(self, pb, tmp_path):
+        """:if COND -> with empty body emits a warning."""
+        content = """\
+            :let env prod
+            :if $env in prod ->
+            10.0.0.2
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [v for k, v in entries if k == 'warn']
+        assert any('empty' in w for w in warns), f"Expected empty-body warning, got: {warns!r}"
+
+    def test_inline_skipped_inside_false_block(self, pb, tmp_path):
+        """:if COND -> BODY inside a false :if block is entirely skipped."""
+        content = """\
+            :let env dev
+            :if $env in prod
+            :if always in always -> 10.0.0.1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == [], f"Expected no hosts, got: {hosts!r}"
+
+    def test_inline_does_not_require_end(self, pb, tmp_path):
+        """:if COND -> BODY does not need a matching :end."""
+        content = """\
+            :let env prod
+            :if $env in prod -> 10.0.0.1
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [v for k, v in entries if k == 'error']
+        hosts = [v for k, v in entries if k == 'host']
+        assert errors == [], f"Unexpected errors: {errors!r}"
+        assert '10.0.0.1' in hosts
+
+    def test_inline_named_var_in_for(self, pb, tmp_path):
+        """:if $name in LIST -> host uses named back-ref from :for n in."""
+        content = """\
+            :for n in sensor-hub-{1,2,3}
+            :if $n in 2 -> 10.0.0.$n
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == ['10.0.0.2'], f"Expected ['10.0.0.2'], got: {hosts!r}"
+
+    def test_inline_multiple_per_for(self, pb, tmp_path):
+        """Multiple inline :if lines per :for iteration combine correctly."""
+        content = """\
+            :for hub-{1,2,3}
+            :if $1 in 1 -> 10.0.1.$1
+            :if $1 in 2 -> 10.0.2.$1
+            :if $1 in 3 -> 10.0.3.$1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == ['10.0.1.1', '10.0.2.2', '10.0.3.3']

@@ -648,6 +648,7 @@ _EXAMPLE_HELP = """\
     10.0.$1.1  ## sw$1-router
     10.0.$1.2  ## sw$1-uplink
     ?sw$1-cam               # skipped for hub 3 (no :resolv mapping)
+    :if $1 in 1,2 -> 10.0.$1.9 ## sw$1-activesonar
 :end
 
 ## TCP Port Monitoring
@@ -2047,7 +2048,11 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
         # Local :with context — inherits outer with_context; overridden per body.
         local_with_type = with_context[0] if with_context else None
         local_with_args = with_context[1] if with_context else None
-        for line in body_lines:
+        body_list = list(body_lines)
+        bj = 0
+        while bj < len(body_list):
+            line = body_list[bj]
+            bj += 1
             # ── :let inside loop body ──────────────────────────────────────
             if line.startswith(':'):
                 _parts = line.split(None, 1)
@@ -2102,13 +2107,26 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                 # ── :if/:elif/:else — always handled regardless of skip state ──
                 if cmd_word == 'if':
                     condition_tmpl = parts[1].strip() if len(parts) > 1 else ''
-                    condition = _apply_backref(condition_tmpl, captures, full_str)
-                    if currently_skipping:
-                        if_stack.append({'skipping': True, 'matched': True, 'seen_else': False})
+                    _m_inline = re.match(r'^(.+?) ->(.*)', condition_tmpl)
+                    if _m_inline:
+                        # Inline form: :if COND -> BODY — no block, no :end.
+                        cond_str = _apply_backref(_m_inline.group(1).strip(), captures, full_str)
+                        body_str = _m_inline.group(2).strip()
+                        if not body_str:
+                            if not currently_skipping:
+                                entries.append(('warn', ':if with empty inline body'))
+                        elif not currently_skipping:
+                            if _evaluate_if_condition(cond_str):
+                                body_list.insert(bj, body_str)
+                        # No if_stack/block_open_stack push — no :end to match.
                     else:
-                        result = _evaluate_if_condition(condition)
-                        if_stack.append({'skipping': not result, 'matched': result, 'seen_else': False})
-                    block_open_stack.append('if')
+                        condition = _apply_backref(condition_tmpl, captures, full_str)
+                        if currently_skipping:
+                            if_stack.append({'skipping': True, 'matched': True, 'seen_else': False})
+                        else:
+                            result = _evaluate_if_condition(condition)
+                            if_stack.append({'skipping': not result, 'matched': result, 'seen_else': False})
+                        block_open_stack.append('if')
 
                 elif cmd_word == 'elif':
                     if not if_stack:
@@ -2436,7 +2454,12 @@ class _HostsParser:
                 if text.startswith(':'):
                     cmd_word_raw = text.split(None, 1)[0][1:].lower()
                     if cmd_word_raw == 'if':
-                        if_stack.append({'skipping': True, 'matched': True, 'seen_else': False})
+                        parts_raw = text.split(None, 1)
+                        raw_args = parts_raw[1].strip() if len(parts_raw) > 1 else ''
+                        if not re.match(r'^.+? ->', raw_args):
+                            # Block form: push so :end pops the right frame.
+                            if_stack.append({'skipping': True, 'matched': True, 'seen_else': False})
+                        # Inline form: self-contained; no :end expected — just skip.
                     elif cmd_word_raw in ('end', 'fi'):
                         if_stack.pop()
                     elif cmd_word_raw in ('for', 'with'):
@@ -2513,8 +2536,24 @@ class _HostsParser:
                     folded = m_title.group(2) == '-'
                     entries.append(('section', args, level, folded))
                 elif cmd_word == 'if':
-                    matched = _evaluate_if_condition(args)
-                    if_stack.append({'skipping': not matched, 'matched': matched, 'seen_else': False})
+                    _m_inline = re.match(r'^(.+?) ->(.*)', args)
+                    if _m_inline:
+                        # Inline form: :if COND -> BODY — no block, no :end.
+                        cond_str = _m_inline.group(1)
+                        body_str = _m_inline.group(2).strip()
+                        if not body_str:
+                            entries.append(('warn', ':if with empty inline body'))
+                        else:
+                            if _evaluate_if_condition(cond_str.strip()):
+                                body_text, body_comment = _strip_inline_comment(body_str)
+                                # The ## label may have been stripped from the full line
+                                # by _preprocess; use it if the body has none of its own.
+                                if body_text:
+                                    lines.insert(i, (body_text, body_comment or comment))
+                    else:
+                        # Block form: push frame; closed by :end.
+                        matched = _evaluate_if_condition(args)
+                        if_stack.append({'skipping': not matched, 'matched': matched, 'seen_else': False})
                 elif cmd_word == 'elif':
                     if not if_stack:
                         entries.append(('error', ':elif without :if'))
@@ -2654,7 +2693,13 @@ class _HostsParser:
                     else:
                         return body, errors, i
                 elif cmd in ('with', 'if'):
-                    depth += 1
+                    # Inline :if COND -> BODY is self-contained (no matching :end).
+                    if cmd == 'if':
+                        rest = parts[1].strip() if len(parts) > 1 else ''
+                        if not re.match(r'^.+? ->', rest):
+                            depth += 1
+                    else:
+                        depth += 1
                     # fall through — preserve :with/:if in body
                 elif cmd == 'for':
                     errors.append(('error', "nested :for is not supported"))
