@@ -6027,14 +6027,28 @@ class Application:
                 view_start = 0
             else:
                 view_start = max(0, min(comp_idx, len(completions) - max_popup_rows))
-            for i, candidate in enumerate(completions[view_start:view_start + max_popup_rows]):
+            visible = completions[view_start:view_start + max_popup_rows]
+
+            # Build descriptions for visible items (command names only).
+            descs = [(_CMD_MAP[cand].help or '') if cand in _CMD_MAP else ''
+                     for cand in visible]
+            max_cand_w = max((len(cand) for cand in visible), default=0)
+            desc_col = max_cand_w + 2          # two-space separator
+            desc_width = width - 1 - desc_col  # remaining room for description
+
+            for i, candidate in enumerate(visible):
                 row = height - 1 - max_popup_rows + i
                 if row < 0:
                     continue
                 actual_idx = view_start + i
                 attr = (curses.A_REVERSE | curses.A_BOLD) if actual_idx == comp_idx else curses.A_REVERSE
+                desc = descs[i]
+                if desc_width > 4 and desc:
+                    cell = f"{candidate:<{max_cand_w}}  {desc}"
+                else:
+                    cell = candidate
                 try:
-                    stdscr.addstr(row, 0, candidate.ljust(width - 1)[:width - 1], attr)
+                    stdscr.addstr(row, 0, cell.ljust(width - 1)[:width - 1], attr)
                 except curses.error:
                     pass
 
@@ -6060,7 +6074,7 @@ class Application:
           Ctrl+K         — kill from cursor to end of line
           Ctrl+U         — kill from start of line to cursor
           Ctrl+W         — kill word backward (stop at whitespace boundary)
-          Up / Down      — navigate command history (Up=older, Down=newer)
+          Up / Down      — navigate completion popup (when open); else command history
           printable char — insert at cursor position
         """
         c = self.cmd
@@ -6156,6 +6170,19 @@ class Application:
             n = len(c['completions'])
             idx = c['comp_idx']
             c['comp_idx'] = (n - 1) if idx <= 0 else (idx - 1)
+            c['chars'] = list(c['comp_prefix'])
+            c['cursor'] = len(c['comp_prefix'])
+            self._apply_completion(c, c['completions'][c['comp_idx']])
+            return
+
+        # ── Up/Down when completion popup is open → navigate popup ───────────
+        if c['completions'] and key in (curses.KEY_UP, curses.KEY_DOWN):
+            n = len(c['completions'])
+            idx = c.get('comp_idx', -1)
+            if key == curses.KEY_DOWN:
+                c['comp_idx'] = (idx + 1) % n
+            else:
+                c['comp_idx'] = (n - 1) if idx <= 0 else (idx - 1)
             c['chars'] = list(c['comp_prefix'])
             c['cursor'] = len(c['comp_prefix'])
             self._apply_completion(c, c['completions'][c['comp_idx']])
