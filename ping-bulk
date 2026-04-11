@@ -5345,6 +5345,10 @@ class Application:
             line = "Not in a multiplexer — relaunch inside tmux? [Y/n]: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
+        elif p['type'] == 'mux_new_pane':
+            line = "Open ping-bulk in new pane? [Y/n]: "
+            stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
+            stdscr.move(height - 1, min(len(line), width - 2))
         elif p['type'] == 'script_changed':
             line = "Script changed — [1] re-exec  [2] reload  [3] ignore: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
@@ -5421,6 +5425,11 @@ class Application:
                 else:
                     self.add_event("cmd", "relaunch: tmux/screen not found")
             self.prompt = None
+
+        elif p['type'] == 'mux_new_pane':
+            self.prompt = None
+            if key not in (ord('n'), ord('N'), 27):
+                self._mux_open_pane(p['tokens'], p['direction'], p['backend'])
 
         elif p['type'] == 'script_changed':
             file = p.get('file', '')
@@ -6010,12 +6019,15 @@ class Application:
 
         if not tokens:
             # No command given: relaunch self.
-            # If already inside a multiplexer, open a duplicate in a split/window.
+            # If already inside a multiplexer, ask before opening a duplicate pane.
             # If not inside one, offer to relaunch the whole process inside tmux/screen.
             backend = _resolve_mux_backend(preference)
             is_in_mux = backend is not None and not isinstance(backend, XTermBackend)
             if not is_in_mux:
                 self.prompt = self._mux_relaunch_prompt([])
+                return
+            if self.kiosk_mode:
+                self.add_event("cmd", "mux: self-relaunch not allowed in kiosk mode")
                 return
             tokens = list(sys.argv)
             if (self.highlighted_index is not None
@@ -6023,7 +6035,13 @@ class Application:
                 entry = self.entries[self.highlighted_index]
                 if isinstance(entry, Monitor):
                     tokens += ['--select', entry.host]
-            # fall through to open a split/window with the current invocation
+            self.prompt = {
+                'type': 'mux_new_pane',
+                'tokens': tokens,
+                'direction': direction,
+                'backend': backend,
+            }
+            return
         elif self._mux_from_binding:
             # Auto-inject :prog-options when the command came from a key binding.
             prog = tokens[0]
@@ -6085,6 +6103,24 @@ class Application:
         try:
             # Wrap the command so the pane stays open after the process exits,
             # letting the user see any error output before the pane closes.
+            hold_script = (
+                shlex.join(tokens)
+                + '; _rc=$?;'
+                  ' if [ "$_rc" -ne 0 ]; then'
+                  ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
+                  ' read _ignored; fi'
+            )
+            held_tokens = ['sh', '-c', hold_script]
+            if direction == 'window':
+                backend.new_window(held_tokens)
+            else:
+                backend.split(direction, held_tokens)
+        except RuntimeError as e:
+            self.add_event("cmd", f"mux: {e}")
+
+    def _mux_open_pane(self, tokens, direction, backend):
+        """Open a mux split/window with pre-built command tokens (called after confirmation)."""
+        try:
             hold_script = (
                 shlex.join(tokens)
                 + '; _rc=$?;'

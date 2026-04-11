@@ -324,12 +324,10 @@ class TestCmdMuxNoCommand:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
                 app._cmd_mux('')
-        mock_backend.split.assert_called_once()
-        # _cmd_mux wraps tokens in ['sh', '-c', '<script>']
-        shell_script = mock_backend.split.call_args[0][1][2]
-        assert './ping-bulk' in shell_script
-        assert '-f' in shell_script
-        assert 'hosts.txt' in shell_script
+        assert app.prompt is not None
+        assert app.prompt['type'] == 'mux_new_pane'
+        # The argv should be captured in the prompt
+        assert app.prompt['tokens'] == ['./ping-bulk', '-f', 'hosts.txt']
 
     def test_no_command_in_mux_adds_select_for_highlighted_host(self, pb, tmp_path):
         import sys
@@ -339,9 +337,9 @@ class TestCmdMuxNoCommand:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
                 app._cmd_mux('')
-        shell_script = mock_backend.split.call_args[0][1][2]
-        assert '--select' in shell_script
-        assert '127.0.0.1' in shell_script
+        assert app.prompt['type'] == 'mux_new_pane'
+        assert '--select' in app.prompt['tokens']
+        assert '127.0.0.1' in app.prompt['tokens']
 
     def test_no_command_in_mux_no_select_when_no_highlight(self, pb, tmp_path):
         import sys
@@ -351,8 +349,7 @@ class TestCmdMuxNoCommand:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
                 app._cmd_mux('')
-        shell_script = mock_backend.split.call_args[0][1][2]
-        assert '--select' not in shell_script
+        assert '--select' not in app.prompt['tokens']
 
     def test_no_command_with_direction_flag_in_mux(self, pb, tmp_path):
         import sys
@@ -361,6 +358,57 @@ class TestCmdMuxNoCommand:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
                 app._cmd_mux('-h')
+        assert app.prompt['type'] == 'mux_new_pane'
+        assert app.prompt['direction'] == 'h'
+
+    def test_mux_new_pane_confirm_opens_split(self, pb, tmp_path):
+        """Pressing Y/Enter in mux_new_pane prompt opens the split."""
+        import sys
+        app = _make_app(pb, tmp_path)
+        mock_backend = self._mock_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
+                app._cmd_mux('')
+        assert app.prompt['type'] == 'mux_new_pane'
+        # Confirm with Enter
+        app._handle_prompt_key(ord('\n'))
+        assert app.prompt is None
         mock_backend.split.assert_called_once()
-        direction = mock_backend.split.call_args[0][0]
-        assert direction == 'h'
+        shell_script = mock_backend.split.call_args[0][1][2]
+        assert './ping-bulk' in shell_script
+
+    def test_mux_new_pane_cancel_with_n(self, pb, tmp_path):
+        """Pressing N in mux_new_pane prompt cancels without opening a pane."""
+        import sys
+        app = _make_app(pb, tmp_path)
+        mock_backend = self._mock_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
+                app._cmd_mux('')
+        app._handle_prompt_key(ord('n'))
+        assert app.prompt is None
+        mock_backend.split.assert_not_called()
+
+    def test_mux_new_pane_cancel_with_esc(self, pb, tmp_path):
+        """Pressing Esc in mux_new_pane prompt cancels without opening a pane."""
+        import sys
+        app = _make_app(pb, tmp_path)
+        mock_backend = self._mock_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
+                app._cmd_mux('')
+        app._handle_prompt_key(27)
+        assert app.prompt is None
+        mock_backend.split.assert_not_called()
+
+    def test_mux_new_pane_kiosk_blocked(self, pb, tmp_path):
+        """In kiosk mode, :mux without args is blocked (no prompt shown)."""
+        import sys
+        app = _make_app(pb, tmp_path)
+        app.kiosk_mode = True
+        mock_backend = self._mock_in_mux()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            with patch.object(sys, 'argv', ['./ping-bulk', '-f', 'hosts.txt']):
+                app._cmd_mux('')
+        assert app.prompt is None
+        mock_backend.split.assert_not_called()
