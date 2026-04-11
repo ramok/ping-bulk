@@ -491,7 +491,7 @@ def _format_context(context):
 
 
 _FULL_HELP = [
-    "  ping-bulk — keyboard reference          [?/q/Esc] close  [/] search  [n/N] next/prev",
+    "  ping-bulk — keyboard reference   [?/q/Esc] close  [/] search  [n/N] next/prev  [A] all bindings",
     "-DIVIDER-",
     "  Hotkeys",
     "  [q] / [Q]                     (:quit)  quit",
@@ -4563,56 +4563,25 @@ class Application:
         return value
 
     def _cmd_bindkey_show_user(self):
-        """Emit all user-defined key bindings to the event log."""
-        user_bindings = [(keys, b) for keys, b in self._key_trie
-                         if b.origin == 'user']
-        mode_user = []
-        for mode, mode_dict in self._mode_bindings.items():
-            seen = set()
-            for b in mode_dict.values():
-                if b.origin == 'user' and id(b) not in seen:
-                    seen.add(id(b))
-                    mode_user.append((mode, b))
-        if not user_bindings and not mode_user:
-            self.add_event("bind-key", "no user key bindings")
-            return
-        for _keys, b in user_bindings:
-            cmds = ' \\; '.join(b.commands)
-            suffix = '...' if b.edit_mode else ''
-            ctx_str = _format_context(b.context)
-            desc_str = f'  [{b.desc}]' if b.desc else ''
-            self.add_event("bind-key",
-                           f"{ctx_str}{b.key_notation}  →  {cmds}{suffix}{desc_str}")
-        for mode, b in mode_user:
-            cmds = ' \\; '.join(b.commands)
-            desc_str = f'  [{b.desc}]' if b.desc else ''
-            self.add_event("bind-key",
-                           f"--mode {mode} {b.key_notation}  →  {cmds}{desc_str}")
+        """Open the help overlay scrolled to the Custom bindings section.
+
+        If there are no user bindings, scroll to the top so the user sees
+        the full help text (custom section won't exist).
+        """
+        self._cmd_help()  # opens overlay, resets scroll to 0
+        # Find the "Custom bindings" divider line in the rendered content
+        lines = self._build_help_lines()
+        for i, line in enumerate(lines):
+            if 'Custom bindings' in line:
+                self.help_scroll = max(0, i - 1)
+                return
+        # No user bindings section found — stay at top, the overlay will show
+        # the standard help text which already lists custom bindings info
 
     def _cmd_bindkey_show_all(self):
-        """Emit all key bindings (user + default) to the event log."""
-        seen = set()
-        for keys, b in self._key_trie:
-            dedup = (b.key_notation, tuple(b.commands), _format_context(b.context))
-            if dedup in seen:
-                continue
-            seen.add(dedup)
-            cmds = ' \\; '.join(b.commands)
-            ctx_str = _format_context(b.context)
-            origin = '  [user]' if b.origin == 'user' else ''
-            self.add_event("bind-key",
-                           f"{ctx_str}{b.key_notation}  →  {cmds}{origin}")
-        for mode, mode_dict in self._mode_bindings.items():
-            seen_m = set()
-            for b in mode_dict.values():
-                dedup = (b.key_notation, tuple(b.commands))
-                if dedup in seen_m:
-                    continue
-                seen_m.add(dedup)
-                cmds = ' \\; '.join(b.commands)
-                origin = '  [user]' if b.origin == 'user' else ''
-                self.add_event("bind-key",
-                               f"--mode {mode} {b.key_notation}  →  {cmds}{origin}")
+        """Open the help overlay in all-bindings ([A]) mode."""
+        self._cmd_help()
+        self.help_show_all = True
 
     def _cmd_bindkey(self, args=''):
         """Bind, unbind, or list key bindings.  Also dispatched by :unbind-key.

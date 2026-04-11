@@ -366,17 +366,17 @@ class TestBindkeyCommand:
         assert any('unbound t' in e for e in app.events)
 
     def test_bindkey_list_empty(self, app):
-        """':bindkey' with no user bindings logs 'no user key bindings'."""
-        app.events.clear()
+        """':bindkey' with no user bindings opens help overlay (scrolled to top)."""
         app._cmd_bindkey()
-        assert any('no user key bindings' in e for e in app.events)
+        assert app.help_open
+        assert app.help_show_all is False
 
     def test_bindkey_list_shows_user_bindings(self, app):
-        """After binding, ':bindkey' lists it in events."""
+        """After binding, ':bindkey' opens help overlay scrolled to Custom bindings."""
         app._cmd_bindkey('t :mux mtr')
-        app.events.clear()
         app._cmd_bindkey()
-        assert any('t' in e and ':mux mtr' in e for e in app.events)
+        assert app.help_open
+        assert app.help_show_all is False
 
     def test_bindkey_multi_command(self, app, pb):
         """':bindkey t :set stats down \\; :set dns hostname' creates multi-cmd binding."""
