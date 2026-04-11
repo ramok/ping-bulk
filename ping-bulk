@@ -6240,7 +6240,20 @@ class Application:
         self.threads.clear()
         self.hosts_map.clear()
 
-        self._cmd_source(hosts_file)
+        # Source the file with _monitoring_started temporarily False so that
+        # _apply_hosts_entry does not log spurious "no monitor matched" warnings
+        # when :resolv entries are processed before their host entries (the usual
+        # order in hosts files).  Thread creation is deferred to the loop below.
+        self._monitoring_started = False
+        try:
+            self._cmd_source(hosts_file)
+        finally:
+            self._monitoring_started = True
+
+        for m in self.monitors:
+            thread = threading.Thread(target=m.ping, daemon=True)
+            thread.start()
+            self.threads.append(thread)
 
         for m in self.monitors:
             if m.host in snapshot:

@@ -201,9 +201,9 @@ class TestEditReloadInplace:
         """After reload, only the hosts from the new file are present."""
         hosts = _write_hosts(tmp_path / 'hosts', '10.0.0.1\n10.0.0.2\n')
         app.hosts_file = hosts
-        initial_count = len(app.monitors)
 
-        with patch.object(app, '_cmd_source') as mock_source:
+        with patch.object(app, '_cmd_source') as mock_source, \
+             patch('threading.Thread'):
             app._edit_reload_inplace(hosts)
             mock_source.assert_called_once_with(hosts)
 
@@ -226,7 +226,8 @@ class TestEditReloadInplace:
             app.monitors.append(m_new)
             app.entries.append(m_new)
 
-        with patch.object(app, '_cmd_source', side_effect=fake_source):
+        with patch.object(app, '_cmd_source', side_effect=fake_source), \
+             patch('threading.Thread'):
             app._edit_reload_inplace(hosts)
 
         assert list(m_new.history) == [10.0, 20.0]
@@ -243,7 +244,8 @@ class TestEditReloadInplace:
             app.monitors.append(m_new)
             app.entries.append(m_new)
 
-        with patch.object(app, '_cmd_source', side_effect=fake_source):
+        with patch.object(app, '_cmd_source', side_effect=fake_source), \
+             patch('threading.Thread'):
             app._edit_reload_inplace(hosts)
 
         assert len(m_new.history) == 0
@@ -256,11 +258,23 @@ class TestEditReloadInplace:
         app.highlighted_index = 2
         app.host_scroll = 5
 
-        with patch.object(app, '_cmd_source'):
+        with patch.object(app, '_cmd_source'), patch('threading.Thread'):
             app._edit_reload_inplace(hosts)
 
         assert app.highlighted_index is None
         assert app.host_scroll == 0
+
+    def test_no_resolv_warnings_during_reload(self, app, tmp_path):
+        """_apply_hosts_entry does not log 'no monitor matched' during reload."""
+        hosts = tmp_path / 'hosts'
+        hosts.write_text(':resolv 10.0.0.1 myhost\n10.0.0.1\n')
+        app.hosts_file = str(hosts)
+
+        with patch('threading.Thread'):
+            app._edit_reload_inplace(str(hosts))
+
+        resolv_warnings = [e for e in app.events if 'no monitor matched' in e]
+        assert resolv_warnings == []
 
 
 # ===========================================================================
