@@ -7265,11 +7265,12 @@ class Application:
             "-DIVIDER-",
             "  Normal mode",
         ]
-        seen_b = set()
+        seen = set()
         for keys, b in self._key_trie:
-            if id(b) in seen_b:
+            dedup_key = (b.key_notation, tuple(b.commands), _format_context(b.context))
+            if dedup_key in seen:
                 continue
-            seen_b.add(id(b))
+            seen.add(dedup_key)
             cmds = ' \\; '.join(b.commands)
             origin_tag = '' if b.origin == 'default' else '  [user]'
             ctx_str = _format_context(b.context)
@@ -7279,9 +7280,10 @@ class Application:
             lines.append(f"  {mode} mode")
             seen_m = set()
             for b in self._mode_bindings[mode].values():
-                if id(b) in seen_m:
+                dedup_key = (b.key_notation, tuple(b.commands))
+                if dedup_key in seen_m:
                     continue
-                seen_m.add(id(b))
+                seen_m.add(dedup_key)
                 cmds = ' \\; '.join(b.commands)
                 origin_tag = '' if b.origin == 'default' else '  [user]'
                 lines.append(f"    {b.key_notation:<12} → {cmds}{origin_tag}")
