@@ -227,7 +227,7 @@ class TestMuxProgOptionsInjection:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('ssh myhost')
         mock_backend.split.assert_called_once_with(
-            'v', _held(['ssh', '-o', 'ProxyJump=gw', 'myhost'])
+            'v', _held(['ssh', '-o', 'ProxyJump=gw', 'myhost']), focus=True
         )
 
     def test_disabled_from_binding_aborts(self, pb, tmp_path):
@@ -250,7 +250,7 @@ class TestMuxProgOptionsInjection:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('ssh myhost')
         mock_backend.split.assert_called_once_with(
-            'v', _held(['ssh', 'myhost'])
+            'v', _held(['ssh', 'myhost']), focus=True
         )
 
     def test_flag_reset_after_binding(self, pb, tmp_path):
@@ -290,7 +290,7 @@ class TestMuxProgOptionsInjection:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._execute_binding(binding)
         mock_backend.split.assert_called_once_with(
-            'v', _held(['ssh', '-o', 'StrictHostKeyChecking=no', '10.0.0.1'])
+            'v', _held(['ssh', '-o', 'StrictHostKeyChecking=no', '10.0.0.1']), focus=True
         )
 
 

@@ -148,25 +148,25 @@ class TestCmdMuxDirection:
         app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('ssh host')
-        mock_backend.split.assert_called_once_with('v', self._held(['ssh', 'host']))
+        mock_backend.split.assert_called_once_with('v', self._held(['ssh', 'host']), focus=True)
 
     def test_explicit_v_flag(self, pb, tmp_path):
         app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('-v ssh host')
-        mock_backend.split.assert_called_once_with('v', self._held(['ssh', 'host']))
+        mock_backend.split.assert_called_once_with('v', self._held(['ssh', 'host']), focus=True)
 
     def test_explicit_h_flag(self, pb, tmp_path):
         app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('-h ssh host')
-        mock_backend.split.assert_called_once_with('h', self._held(['ssh', 'host']))
+        mock_backend.split.assert_called_once_with('h', self._held(['ssh', 'host']), focus=True)
 
     def test_window_flag(self, pb, tmp_path):
         app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('-w ssh host')
-        mock_backend.new_window.assert_called_once_with(self._held(['ssh', 'host']))
+        mock_backend.new_window.assert_called_once_with(self._held(['ssh', 'host']), focus=True)
         mock_backend.split.assert_not_called()
 
     def test_mux_split_setting_used(self, pb, tmp_path):
@@ -175,7 +175,35 @@ class TestCmdMuxDirection:
         app.mux_split = 'h'
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('ssh host')
-        mock_backend.split.assert_called_once_with('h', self._held(['ssh', 'host']))
+        mock_backend.split.assert_called_once_with('h', self._held(['ssh', 'host']), focus=True)
+
+    def test_no_focus_split(self, pb, tmp_path):
+        """--no-focus passes focus=False to backend.split."""
+        app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            app._cmd_mux('--no-focus ssh host')
+        mock_backend.split.assert_called_once_with(
+            'v', self._held(['ssh', 'host']), focus=False
+        )
+
+    def test_no_focus_window(self, pb, tmp_path):
+        """--no-focus with -w passes focus=False to backend.new_window."""
+        app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            app._cmd_mux('-w --no-focus ssh host')
+        mock_backend.new_window.assert_called_once_with(
+            self._held(['ssh', 'host']), focus=False
+        )
+        mock_backend.split.assert_not_called()
+
+    def test_no_focus_with_direction(self, pb, tmp_path):
+        """--no-focus combined with -h direction."""
+        app, mock_backend = self._app_with_mock_backend(pb, tmp_path)
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
+            app._cmd_mux('-h --no-focus mtr host')
+        mock_backend.split.assert_called_once_with(
+            'h', self._held(['mtr', 'host']), focus=False
+        )
 
     def test_no_backend_logs_error(self, pb, tmp_path):
         app = _make_app(pb, tmp_path)

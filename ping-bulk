@@ -3019,7 +3019,10 @@ CMD_REGISTRY = [
     CmdDef(['let'],              '_cmd_let',        None,
            '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
     CmdDef(['mux', 'tmux', 'screen'], '_cmd_mux', None,
-           '[--split-v|--split-h|--split-window] [command...]', 'run command in tmux/screen pane; no command = relaunch self (--split-v below, --split-h right, --split-window new)'),
+           '[--split-v|--split-h|--split-window] [--no-focus] [command...]',
+           'run command in tmux/screen pane; no command = relaunch self '
+           '(--split-v below, --split-h right, --split-window new, '
+           '--no-focus keeps ping-bulk active)'),
     CmdDef(['term', 'terminal', 'xterm'], '_cmd_mux', None,
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
     CmdDef(['prog-options'],         '_cmd_prog_options', None,
@@ -3087,12 +3090,18 @@ class TerminalBackend(ABC):
         """True if currently running inside this backend's session."""
 
     @abstractmethod
-    def split(self, direction: str, command: list) -> None:
-        """Open command in a split pane.  direction: 'v' (below) or 'h' (right)."""
+    def split(self, direction: str, command: list, focus: bool = True) -> None:
+        """Open command in a split pane.  direction: 'v' (below) or 'h' (right).
+
+        focus=False — create the pane but keep the current pane active.
+        """
 
     @abstractmethod
-    def new_window(self, command: list) -> None:
-        """Open command in a new window."""
+    def new_window(self, command: list, focus: bool = True) -> None:
+        """Open command in a new window.
+
+        focus=False — create the window but keep the current window active.
+        """
 
     @abstractmethod
     def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
@@ -3124,15 +3133,21 @@ class TmuxBackend(TerminalBackend):
     def is_inside(self) -> bool:
         return bool(os.environ.get('TMUX'))
 
-    def split(self, direction: str, command: list) -> None:
+    def split(self, direction: str, command: list, focus: bool = True) -> None:
         flag = '-v' if direction == 'v' else '-h'
-        r = subprocess.run(['tmux', 'split-window', flag, '--'] + command,
+        cmd = ['tmux', 'split-window', flag]
+        if not focus:
+            cmd.append('-d')
+        r = subprocess.run(cmd + ['--'] + command,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
 
-    def new_window(self, command: list) -> None:
-        r = subprocess.run(['tmux', 'new-window', '--'] + command,
+    def new_window(self, command: list, focus: bool = True) -> None:
+        cmd = ['tmux', 'new-window']
+        if not focus:
+            cmd.append('-d')
+        r = subprocess.run(cmd + ['--'] + command,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
@@ -3163,7 +3178,7 @@ class ScreenBackend(TerminalBackend):
             return tok
         return "'" + tok.replace("'", r"'\''") + "'"
 
-    def split(self, direction: str, command: list) -> None:
+    def split(self, direction: str, command: list, focus: bool = True) -> None:
         # direction='v' → pane below  = screen horizontal split (default 'split')
         # direction='h' → pane right  = screen vertical split ('split -v')
         split_cmd = 'split' if direction == 'v' else 'split -v'
@@ -3172,12 +3187,20 @@ class ScreenBackend(TerminalBackend):
         base = ['screen']
         if sty:
             base += ['-S', sty]
-        r = subprocess.run(base + ['-X', 'eval', split_cmd, 'focus', cmd_str],
+        if focus:
+            eval_args = [split_cmd, 'focus', cmd_str]
+        else:
+            # Split, move focus to the new region to start the command there,
+            # then cycle back ('focus' is cyclic) to the original region.
+            eval_args = [split_cmd, 'focus', cmd_str, 'focus']
+        r = subprocess.run(base + ['-X', 'eval'] + eval_args,
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"screen exited {r.returncode}")
 
-    def new_window(self, command: list) -> None:
+    def new_window(self, command: list, focus: bool = True) -> None:
+        # screen -X screen <cmd> creates a new window without switching to it,
+        # so focus=False is the natural behaviour; focus=True needs a select.
         sty = os.environ.get('STY', '')
         base = ['screen']
         if sty:
@@ -3186,6 +3209,10 @@ class ScreenBackend(TerminalBackend):
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"screen exited {r.returncode}")
+        if focus:
+            # Switch to the newly created window (last window in the list).
+            subprocess.run(base + ['-X', 'other'],
+                           capture_output=True, text=True)
 
     def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
         cmd = ['screen']
@@ -3243,10 +3270,10 @@ class XTermBackend(TerminalBackend):
             return [binary] + command
         return [binary, sep] + command
 
-    def split(self, direction: str, command: list) -> None:
-        self.new_window(command)  # X terminals can't split; open a new window
+    def split(self, direction: str, command: list, focus: bool = True) -> None:
+        self.new_window(command, focus)  # X terminals can't split; open a new window
 
-    def new_window(self, command: list) -> None:
+    def new_window(self, command: list, focus: bool = True) -> None:
         cmd = self._build_cmd(command)
         if not cmd:
             return
@@ -5849,7 +5876,8 @@ class Application:
         elif p['type'] == 'mux_new_pane':
             self.prompt = None
             if key not in (ord('n'), ord('N'), 27):
-                self._mux_open_pane(p['tokens'], p['direction'], p['backend'])
+                self._mux_open_pane(p['tokens'], p['direction'], p['backend'],
+                                    no_focus=p.get('no_focus', False))
 
         elif p['type'] == 'script_changed':
             file = p.get('file', '')
@@ -6465,6 +6493,12 @@ class Application:
                 '-w': 'window', '--split-window': 'window',
             }.get(flag, 'v')
 
+        # Parse --no-focus: open pane/window without switching focus to it.
+        no_focus = False
+        if tokens and tokens[0] == '--no-focus':
+            no_focus = True
+            tokens.pop(0)
+
         if not tokens:
             # No command given: relaunch self.
             # If already inside a multiplexer, ask before opening a duplicate pane.
@@ -6487,6 +6521,7 @@ class Application:
                 'type': 'mux_new_pane',
                 'tokens': tokens,
                 'direction': direction,
+                'no_focus': no_focus,
                 'backend': backend,
             }
             return
@@ -6560,13 +6595,13 @@ class Application:
             )
             held_tokens = ['sh', '-c', hold_script]
             if direction == 'window':
-                backend.new_window(held_tokens)
+                backend.new_window(held_tokens, focus=not no_focus)
             else:
-                backend.split(direction, held_tokens)
+                backend.split(direction, held_tokens, focus=not no_focus)
         except RuntimeError as e:
             self.add_event("cmd", f"mux: {e}")
 
-    def _mux_open_pane(self, tokens, direction, backend):
+    def _mux_open_pane(self, tokens, direction, backend, no_focus=False):
         """Open a mux split/window with pre-built command tokens (called after confirmation)."""
         try:
             hold_script = (
@@ -6578,9 +6613,9 @@ class Application:
             )
             held_tokens = ['sh', '-c', hold_script]
             if direction == 'window':
-                backend.new_window(held_tokens)
+                backend.new_window(held_tokens, focus=not no_focus)
             else:
-                backend.split(direction, held_tokens)
+                backend.split(direction, held_tokens, focus=not no_focus)
         except RuntimeError as e:
             self.add_event("cmd", f"mux: {e}")
 
