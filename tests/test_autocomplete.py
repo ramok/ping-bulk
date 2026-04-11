@@ -111,8 +111,8 @@ class TestGetCompletions:
         """'s' prefix must match all completable commands starting with 's'."""
         result = app._get_completions('s')
         assert set(result) == {'saveconfig', 'screen', 'scroll-history', 'scroll-log',
-                                'seen', 'select', 'set', 'sort', 'source', 'ssh',
-                                'stats', 'sync-history'}, (
+                                'scroll-overlay', 'seen', 'select', 'set', 'sort',
+                                'source', 'ssh', 'stats', 'sync-history'}, (
             f"Unexpected results for 's': {sorted(result)}"
         )
 

@@ -3056,6 +3056,8 @@ class Application:
         self._key_seq = []        # accumulated key codes for multi-key lookup
         self._unbound_defaults = set()  # key notations the user explicitly unbound
         self.multikey_timeout = 0 # ms; 0 = always wait for next key
+        self._current_mode = 'normal'  # current UI mode: normal/help/details/command
+        self._mode_bindings = {}  # mode → {key_code: _Binding} for overlay modes
         self._register_default_bindings()
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
@@ -3073,8 +3075,6 @@ class Application:
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
         self.details_scroll = 0   # Scroll offset for the host details overlay
-        self._current_mode = 'normal'  # current UI mode: normal/help/details/command
-        self._mode_bindings = {}  # mode → {key_code: _Binding} for overlay modes
         self.running = True
         self.threads = []
         self._start_time = None
@@ -3223,7 +3223,19 @@ class Application:
                         cmds = ' \\; '.join(b.commands)
                         suffix = '...' if b.edit_mode else ''
                         ctx_str = _format_context(b.context)
-                        f.write(f":bind-key {ctx_str}{b.key_notation} {cmds}{suffix}\n")
+                        desc_flag = f' --desc "{b.desc}"' if b.desc else ''
+                        hint_flag = f' --hint "{b.hint}"' if b.hint else ''
+                        f.write(f":bind-key{desc_flag}{hint_flag} {ctx_str}{b.key_notation} {cmds}{suffix}\n")
+                # Mode bindings (only user-defined)
+                for mode, mode_dict in self._mode_bindings.items():
+                    seen = set()
+                    for b in mode_dict.values():
+                        if b.origin == 'user' and id(b) not in seen:
+                            seen.add(id(b))
+                            cmds = ' \\; '.join(b.commands)
+                            desc_flag = f' --desc "{b.desc}"' if b.desc else ''
+                            hint_flag = f' --hint "{b.hint}"' if b.hint else ''
+                            f.write(f":bind-key --mode {mode}{desc_flag}{hint_flag} {b.key_notation} {cmds}\n")
         except OSError as e:
             self.add_event("config", f"error saving config: {e}")
             return False
@@ -3952,6 +3964,20 @@ class Application:
             finally:
                 self._mux_from_binding = False
 
+    def _dispatch_mode_key(self, mode, key):
+        """Dispatch a keypress in a non-normal UI mode (help/details/command).
+
+        Looks up *key* in self._mode_bindings[mode] and executes the binding's
+        commands via _dispatch_cmd.  Returns True if a binding was found and
+        executed, False otherwise.
+        """
+        binding = self._mode_bindings.get(mode, {}).get(key)
+        if binding is None:
+            return False
+        for cmd in binding.commands:
+            self._dispatch_cmd(cmd)
+        return True
+
     # ── Binding variable expansion ────────────────────────────────────────
 
     _BINDING_VAR_RE = re.compile(
@@ -4093,14 +4119,15 @@ class Application:
     def _cmd_bindkey(self, args=''):
         """Bind, unbind, or list key bindings.
 
-        :bindkey                     — list all user bindings
-        :bindkey [--%x] <key>        — unbind (remove binding for context)
-        :bindkey [--%x] <key> <cmd>  — bind key to command(s) in context
+        :bindkey                               — list all user bindings
+        :bindkey [--mode MODE] [--%x] <key>    — unbind (remove binding)
+        :bindkey [--mode MODE] [--desc TEXT] [--hint TEXT] [--%x] <key> <cmd>
+                                               — bind key to command(s)
 
-        Context flags: --%h (host selected), --%s (section selected),
-        --%p (port monitor), --%r (connectable target), --%d (SSH dest),
-        --%j (SSH monitor with jump hosts).  Multiple flags combine
-        as AND (all must be present).  Without flags, binding is unconditional.
+        --mode MODE:  normal (default), help, details, command
+        --desc TEXT:  description shown in help overlay custom-bindings section
+        --hint TEXT:  short label shown in the menu bar (e.g. "[t]ool")
+        Context flags (--%h/--%s/--%p/--%r/--%d/--%j) restrict to context.
         """
         if self.kiosk_mode and not getattr(self, '_loading_file', False):
             self.add_event("cmd", "bind-key: blocked in kiosk mode")
@@ -4108,26 +4135,91 @@ class Application:
 
         args = args.strip()
         if not args:
-            # List all user bindings
+            # List all user bindings (trie + mode bindings)
             user_bindings = [(keys, b) for keys, b in self._key_trie
                              if b.origin == 'user']
-            if not user_bindings:
+            mode_user = []
+            for mode, mode_dict in self._mode_bindings.items():
+                seen = set()
+                for b in mode_dict.values():
+                    if b.origin == 'user' and id(b) not in seen:
+                        seen.add(id(b))
+                        mode_user.append((mode, b))
+            if not user_bindings and not mode_user:
                 self.add_event("bind-key", "no user key bindings")
             else:
-                for keys, b in user_bindings:
+                for _keys, b in user_bindings:
                     cmds = ' \\; '.join(b.commands)
                     suffix = '...' if b.edit_mode else ''
                     ctx_str = _format_context(b.context)
+                    desc_str = f'  [{b.desc}]' if b.desc else ''
                     self.add_event("bind-key",
-                                   f"{ctx_str}{b.key_notation}  →  {cmds}{suffix}")
+                                   f"{ctx_str}{b.key_notation}  →  {cmds}{suffix}{desc_str}")
+                for mode, b in mode_user:
+                    cmds = ' \\; '.join(b.commands)
+                    desc_str = f'  [{b.desc}]' if b.desc else ''
+                    self.add_event("bind-key",
+                                   f"--mode {mode} {b.key_notation}  →  {cmds}{desc_str}")
             return
 
-        # Parse context flags (--%h, --%s, --%p, --%j)
-        context, args = _parse_context_flags(args)
-        if context is False:
-            self.add_event("cmd", f"bind-key: {args}")  # args holds error msg
+        # Parse --mode, --desc, --hint flags before context flags
+        bind_mode = 'normal'
+        bind_desc = ''
+        bind_hint = ''
+        # Allow flags in any order, up to 3 passes
+        for _ in range(6):
+            if args.startswith('--mode '):
+                rest = args[7:].lstrip()
+                val, _, args = rest.partition(' ')
+                bind_mode = val.strip()
+                args = args.strip()
+            elif args.startswith('--desc '):
+                rest = args[7:].lstrip()
+                if rest and rest[0] in ('"', "'"):
+                    q = rest[0]
+                    end = rest.find(q, 1)
+                    if end != -1:
+                        bind_desc = rest[1:end]
+                        args = rest[end + 1:].lstrip()
+                    else:
+                        bind_desc = rest[1:]
+                        args = ''
+                else:
+                    parts = rest.split(' --', 1)
+                    bind_desc = parts[0].strip()
+                    args = ('--' + parts[1]) if len(parts) > 1 else ''
+            elif args.startswith('--hint '):
+                rest = args[7:].lstrip()
+                if rest and rest[0] in ('"', "'"):
+                    q = rest[0]
+                    end = rest.find(q, 1)
+                    if end != -1:
+                        bind_hint = rest[1:end]
+                        args = rest[end + 1:].lstrip()
+                    else:
+                        bind_hint = rest[1:]
+                        args = ''
+                else:
+                    parts = rest.split(' --', 1)
+                    bind_hint = parts[0].strip()
+                    args = ('--' + parts[1]) if len(parts) > 1 else ''
+            else:
+                break
+
+        if bind_mode not in ('normal', 'help', 'details', 'command'):
+            self.add_event("cmd",
+                f"bind-key: unknown mode '{bind_mode}' (use normal/help/details/command)")
             return
-        args = args.strip()
+
+        # Parse context flags (--%h, --%s, --%p, --%j) — only for normal mode
+        context = None
+        if bind_mode == 'normal':
+            context, args = _parse_context_flags(args)
+            if context is False:
+                self.add_event("cmd", f"bind-key: {args}")
+                return
+            args = args.strip()
+
         if not args:
             self.add_event("cmd", "bind-key: missing key notation")
             return
@@ -4140,8 +4232,44 @@ class Application:
             self.add_event("cmd", f"bind-key: {e}")
             return
 
+        if bind_mode != 'normal':
+            # Mode bindings: store by key_code in _mode_bindings
+            key_code = key_codes[0] if key_codes else None
+            if key_code is None:
+                self.add_event("cmd", "bind-key: empty key sequence")
+                return
+            if not rest:
+                # Unbind from mode
+                mode_dict = self._mode_bindings.get(bind_mode, {})
+                if key_code in mode_dict:
+                    del mode_dict[key_code]
+                    self.add_event("bind-key", f"unbound --mode {bind_mode} {key_str}")
+                else:
+                    self.add_event("bind-key",
+                                   f"no binding for --mode {bind_mode} {key_str}")
+                return
+            # Bind to mode
+            edit_mode = rest.endswith('...')
+            cmd_text = rest[:-3].rstrip() if edit_mode else rest
+            commands = [c.strip() for c in re.split(r'(?<!\\)\\\;', cmd_text)]
+            commands = [c for c in commands if c]
+            if not commands:
+                self.add_event("cmd", "bind-key: empty command")
+                return
+            b = _Binding(commands, edit_mode=edit_mode, key_notation=key_str,
+                         origin='user', mode=bind_mode, desc=bind_desc,
+                         hint=bind_hint)
+            self._mode_bindings.setdefault(bind_mode, {})[key_code] = b
+            if key_str == '<CR>':
+                for extra in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+                    self._mode_bindings[bind_mode][extra] = b
+            cmds_display = ' \\; '.join(commands)
+            self.add_event("bind-key",
+                           f"--mode {bind_mode} {key_str} → {cmds_display}")
+            return
+
         if not rest:
-            # Unbind
+            # Unbind from normal trie
             removed = self._key_trie.remove(key_codes, context)
             if removed:
                 ctx_str = _format_context(context)
@@ -4168,13 +4296,16 @@ class Application:
 
         binding = _Binding(commands, edit_mode=edit_mode,
                            key_notation=key_str, origin='user',
-                           context=context)
+                           context=context, mode=bind_mode,
+                           desc=bind_desc, hint=bind_hint)
         self._key_trie.insert(key_codes, binding)
         ctx_str = _format_context(context)
         self._unbound_defaults.discard(f"{ctx_str}{key_str}")
         cmds_display = ' \\; '.join(commands)
         suffix = '...' if edit_mode else ''
-        self.add_event("bind-key", f"{ctx_str}{key_str} → {cmds_display}{suffix}")
+        desc_str = f'  [{bind_desc}]' if bind_desc else ''
+        self.add_event("bind-key",
+                       f"{ctx_str}{key_str} → {cmds_display}{suffix}{desc_str}")
 
     @staticmethod
     def _split_bindkey_args(args):
@@ -4363,11 +4494,20 @@ class Application:
             (f"[S]ync:{'on' if self.sync_history else 'off'}", self.sync_history),
             (pause_label, paused_count > 0),
         ]
-        menu_items.extend([
-            ("[C]lear log", False),
-            ("help:[?]", False),
-            ("[q]uit", False),
-        ])
+        # Add hint items from trie bindings (in insertion order, deduplicated)
+        seen_hints = set()
+        for _keys, b in self._key_trie:
+            if b.hint and b.hint not in seen_hints:
+                seen_hints.add(b.hint)
+                menu_items.append((b.hint, False))
+        # Also add hints from mode bindings
+        for mode_dict in self._mode_bindings.values():
+            seen_mb = set()
+            for b in mode_dict.values():
+                if b.hint and b.hint not in seen_hints and id(b) not in seen_mb:
+                    seen_mb.add(id(b))
+                    seen_hints.add(b.hint)
+                    menu_items.append((b.hint, False))
 
         col = 0
 
@@ -7067,39 +7207,22 @@ class Application:
                 except KeyboardInterrupt:
                     key = 3
                 if self.help_open:
-                    if key in (ord('q'), ord('Q'), 27, 3):
+                    if key == 3:  # Ctrl+C always closes overlays
                         self.help_open = False
-                    elif key == curses.KEY_UP:
-                        self.help_scroll = max(0, self.help_scroll - 1)
-                    elif key == curses.KEY_DOWN:
-                        self.help_scroll += 1  # upper bound clamped in _draw_help_overlay
-                    elif key == curses.KEY_PPAGE:
-                        self.help_scroll = max(0, self.help_scroll - 10)
-                    elif key == curses.KEY_NPAGE:
-                        self.help_scroll += 10  # upper bound clamped in _draw_help_overlay
+                        self._current_mode = 'normal'
+                    else:
+                        self._dispatch_mode_key('help', key)
                     continue
                 if self.details_open:
-                    if key in (curses.KEY_ENTER, ord('\n'), ord('\r'),
-                               ord('q'), ord('Q'), 27, 3):
+                    if key == 3:  # Ctrl+C always closes overlays
                         self.details_open = False
                         self.details_monitor = None
+                        self._current_mode = 'normal'
                         continue
-                    elif key == curses.KEY_UP:
-                        self.details_scroll = max(0, self.details_scroll - 1)
-                        continue
-                    elif key == curses.KEY_DOWN:
-                        self.details_scroll += 1
-                        continue
-                    elif key == curses.KEY_PPAGE:
-                        self.details_scroll = max(0, self.details_scroll - 10)
-                        continue
-                    elif key == curses.KEY_NPAGE:
-                        self.details_scroll += 10
-                        continue
-                    elif key == ord('c'):
-                        self.details_open = False
-                        self.details_monitor = None
-                        # fall through to trie dispatch so user-defined bindings fire
+                    was_open = self.details_open
+                    self._dispatch_mode_key('details', key)
+                    if was_open and not self.details_open and key == ord('c'):
+                        pass  # fall through to normal trie dispatch
                     else:
                         continue
                 if self.cmd is not None:
