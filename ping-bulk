@@ -6615,7 +6615,9 @@ class Application:
             # If already inside a multiplexer, ask before opening a duplicate pane.
             # If not inside one, offer to relaunch the whole process inside tmux/screen.
             backend = _resolve_mux_backend(preference)
-            is_in_mux = backend is not None and not isinstance(backend, XTermBackend)
+            is_in_mux = (backend is not None
+                         and not isinstance(backend, XTermBackend)
+                         and backend.is_inside())
             if not is_in_mux:
                 self.prompt = self._mux_relaunch_prompt([])
                 return
