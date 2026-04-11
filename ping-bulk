@@ -6673,6 +6673,8 @@ class Application:
                     tokens, no_focus=no_focus, direction=direction)
                 return
 
+        self.add_event("cmd",
+            f"mux: {shlex.join(tokens)}", level=LEVEL_DEBUG)
         try:
             # Wrap the command so the pane stays open after the process exits,
             # letting the user see any error output before the pane closes.
