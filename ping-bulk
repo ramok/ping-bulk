@@ -493,37 +493,44 @@ _FULL_HELP = [
     "  ping-bulk — keyboard reference                      [q / Esc] close",
     "-DIVIDER-",
     "  Hotkeys",
-    "  [q] / [Q]        quit",
-    "  [D]              cycle DNS display mode",
-    "  [s]              cycle stats column",
-    "  [o] / [O]        cycle sort order forward / backward",
-    "  [H]              cycle ping-history display mode",
-    "  [S]              toggle sync-history (wall-clock alignment)",
-    "  [p]              pause/unpause selected host or section (no-op if nothing selected)",
-    "  [P]              toggle global pause (all monitors)",
-    "  [↑] / [↓]  ([j] / [k])  navigate host list",
-    "  [Enter]          show detailed stats for highlighted host",
-    "  [Space]          insert 'seen' marker (or toggle section fold = za)",
-    "  [C]              clear event log",
-    "  [Esc]            clear host selection",
-    "  [:]              open command line",
-    "  [?]              show this help",
-    "  [←] / [→]        scroll history ← older (step) / → live (step)",
-    "  [Ctrl+←] / [Ctrl+→]  scroll history ← older (page) / → live (page)",
-    "  [↑] / [↓]        scroll event log up / down",
-    "  [PgUp] / [PgDn]  scroll event log by page",
+    "  [q] / [Q]                     (:quit)  quit",
+    "  [D]                            (:dns)   cycle DNS display mode",
+    "  [s]                            (:stats) cycle stats column",
+    "  [o] / [O]                      (:sort / :sort reverse)  cycle sort order forward / backward",
+    "  [H]                            (:ping-view)  cycle ping-history display mode",
+    "  [S]                            (:sync-history)  toggle sync-history (wall-clock alignment)",
+    "  [p]                            (:pause-selected)  pause/unpause selected host or section",
+    "  [P]                            (:pause)  toggle global pause (all monitors)",
+    "  [↑] / [↓]  ([k] / [j])        (:select up/down)  navigate host list",
+    "  [g][g]                         (:select first)  jump to first host",
+    "  [G]                            (:select last)   jump to last host",
+    "  [Enter]                        (:details)  show detailed stats for highlighted host",
+    "  [Space]                        (:seen)  insert 'seen' marker (or :fold toggle on section)",
+    "  [C]                            (:clear)  clear event log",
+    "  [Esc]                          (:select none)  clear host selection",
+    "  [:]                            open command line",
+    "  [?]                            (:help)  show this help  ([A] = show all bindings)",
+    "  [←] / [→]                      (:scroll-history half/half-)  scroll history ← older / → live",
+    "  [Ctrl+←] / [Ctrl+→]            (:scroll-history full/full-)  scroll history ← older (page) / → live (page)",
+    "  [↑] / [↓]                      (:scroll-log page/page-)  scroll event log up / down",
+    "  [PgUp] / [PgDn]                (:scroll-log page/page-)  scroll event log by page",
+    "  [Ctrl+B] / [Ctrl+F]            (:scroll-log page/page-)  vim-style event log scroll",
     "-DIVIDER-",
+    "  Search",
+    "  [/]   open search  (host selected → search hostnames/IPs; no selection → search event log)",
+    "  [n] / [N]  next / previous match (wraps)",
+    "  [Enter]  confirm + jump to first match   [Esc]  cancel search",
     "  Section folding  (highlight a section header, then press)",
-    "  [za] / [Space]   toggle fold of highlighted section",
-    "  [zA] / [Ctrl+Spc]  toggle fold recursively (section + all sub-sections)",
-    "  [zo]             open (unfold) highlighted section",
-    "  [zO]             open highlighted section and all sub-sections",
-    "  [zc]             close (fold) highlighted section",
-    "  [zC]             close highlighted section and all sub-sections",
-    "  [zR] / [\\]]         open (unfold) ALL sections",
-    "  [zM] / [\\[]         close (fold) ALL sections",
-    "  [zr]             open one fold level (deepest closed level)",
-    "  [zm]             close one fold level (shallowest open level)",
+    "  [za] / [Space]   (:fold toggle)        toggle fold of highlighted section",
+    "  [zA] / [Ctrl+Spc]  (:fold toggle-recursive)  toggle fold recursively",
+    "  [zo]             (:fold open)          open (unfold) highlighted section",
+    "  [zO]             (:fold open-recursive)  open section and all sub-sections",
+    "  [zc]             (:fold close)         close (fold) highlighted section",
+    "  [zC]             (:fold close-recursive)  close section and all sub-sections",
+    "  [zR] / [\\]]     (:fold open-all)      open (unfold) ALL sections",
+    "  [zM] / [\\[]     (:fold close-all)     close (fold) ALL sections",
+    "  [zr]             (:fold open-level)    open one fold level (deepest closed)",
+    "  [zm]             (:fold close-level)   close one fold level (shallowest open)",
     "  (type '[z]' → [z] appears bottom-right → press second key)",
     "-DIVIDER-",
     "  Commands",
@@ -591,8 +598,9 @@ _FULL_HELP = [
     "  Key bindings",
     "  :bind-key <key> <cmd>     bind key to command  (auto-execute)",
     "  :bind-key <key> <cmd>...  bind key, fill command line for editing",
-    "  :bind-key <key>           unbind key",
+    "  :bind-key <key>           query: show what is bound to <key>",
     "  :bind-key                 list all user bindings",
+    "  :unbind-key <key>         remove a key binding",
     "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
     "  keys: a-z A-Z 0-9   <CR> <Esc> <Space> <C-x>  <Up>/<Down>/<Left>/<Right>",
     "        <PageUp> <PageDown>  za zc zo …  (arbitrary multi-key sequences)",
@@ -2813,15 +2821,29 @@ CMD_REGISTRY = [
            '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
+    CmdDef(['help-toggle-all'],  '_cmd_help_toggle_all', None,
+           '',                    'toggle all-bindings view in help overlay',
+           completable=False),
+    CmdDef(['search'],           '_cmd_search_open', None,
+           '',                    'open search prompt',
+           completable=False),
+    CmdDef(['search-next'],      '_cmd_search_next', None,
+           '[prev]',              'jump to next (or prev) search match',
+           completable=False),
     CmdDef(['bind-key'],             '_cmd_bindkey',    None,
-           '[key] [command]',    'bind/unbind/list key bindings'),
+           '[key] [command]',    'bind/query/list key bindings'),
+    CmdDef(['unbind-key'],           '_cmd_bindkey',    None,
+           '<key>',              'unbind a key binding'),
     CmdDef(['select'],           '_cmd_select',     ['up', 'down', 'first', 'last', 'none'],
            '[up|down|first|last|none]', 'navigate or clear host selection'),
     CmdDef(['details'],          '_cmd_details',    None,
            '',                    'show detailed stats for highlighted host'),
     CmdDef(['fold'],             '_cmd_fold',
-           ['toggle', 'toggle-recursive', 'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'],
-           '<action>',            'fold action (toggle, za, zO, zR, zM, …)'),
+           ['toggle', 'toggle-recursive',
+            'open', 'close', 'open-recursive', 'close-recursive',
+            'open-all', 'close-all', 'open-level', 'close-level',
+            'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'],
+           '<action>',            'fold action (toggle, open, close, open-all, …)'),
     CmdDef(['scroll-history'],   '_cmd_scroll_history', None,
            '<n|half|half-|full|full->', 'scroll ping history (trailing - = back/older)'),
     CmdDef(['scroll-log'],       '_cmd_scroll_log', None,
@@ -3170,9 +3192,15 @@ class Application:
         self._load_cmd_history()
         self.help_open = False    # True while the help overlay is visible
         self.help_scroll = 0      # first visible line index in the help overlay
+        self.help_show_all = False # True = show auto-generated full binding list
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
         self.details_scroll = 0   # Scroll offset for the host details overlay
+        # Search state
+        self._search_query = ''      # '' = no active search
+        self._search_mode  = 'hosts' # 'hosts' | 'log'
+        self._search_results = []    # entry indices (hosts) or event_list indices (log)
+        self._search_idx = 0         # current position in _search_results
         self.running = True
         self.threads = []
         self._start_time = None
@@ -3326,7 +3354,7 @@ class Application:
                 if user_bindings or self._unbound_defaults:
                     f.write("# Key bindings\n")
                     for notation in sorted(self._unbound_defaults):
-                        f.write(f":bind-key {notation}\n")
+                        f.write(f":unbind-key {notation}\n")
                     for keys, b in user_bindings:
                         cmds = ' \\; '.join(b.commands)
                         suffix = '...' if b.edit_mode else ''
@@ -3869,12 +3897,29 @@ class Application:
                 self._current_mode = 'details'
 
     def _cmd_fold(self, args=''):
-        """Execute a fold action: toggle, toggle-recursive, or z-action name."""
+        """Execute a fold action: word alias, toggle, toggle-recursive, or z-action name.
+
+        Word aliases: open, close, open-recursive, close-recursive,
+                      open-all, close-all, open-level, close-level,
+                      toggle, toggle-recursive.
+        Z-actions: za, zA, zo, zO, zc, zC, zR, zM, zr, zm.
+        """
         if not args:
             self.add_event("cmd", "fold: missing action argument")
             return
         action = args.strip()
-        fold_map = {'toggle': 'za', 'toggle-recursive': 'zA'}
+        fold_map = {
+            'toggle':           'za',
+            'toggle-recursive': 'zA',
+            'open':             'zo',
+            'close':            'zc',
+            'open-recursive':   'zO',
+            'close-recursive':  'zC',
+            'open-all':         'zR',
+            'close-all':        'zM',
+            'open-level':       'zr',
+            'close-level':      'zm',
+        }
         action = fold_map.get(action, action)
         valid = {'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'}
         if action in valid:
@@ -3979,6 +4024,11 @@ class Application:
         _b('<Down>', ':select down')
         _b('k', ':select up')
         _b('j', ':select down')
+        _b('G', ':select last')
+        _b('gg', ':select first')
+        # Ctrl-F/B — vim-style page scroll for event log
+        _b('<C-f>', ':scroll-log page-')
+        _b('<C-b>', ':scroll-log page')
         # Details — register all Enter variants
         _b('<CR>', ':details')
         for code in (ord('\n'), ord('\r')):
@@ -4001,6 +4051,10 @@ class Application:
         # Log scrolling
         _b('<PageUp>', ':scroll-log page')
         _b('<PageDown>', ':scroll-log page-')
+        # Search
+        _b('/', ':search')
+        _b('n', ':search-next')
+        _b('N', ':search-next prev')
 
         self._register_mode_bindings()
 
@@ -4027,6 +4081,7 @@ class Application:
         _mb('help', 'Q',      ':close')
         _mb('help', '<Esc>',  ':close')
         _mb('help', '<CR>',   ':close')
+        _mb('help', 'A',      ':help-toggle-all')
         _mb('help', '<Up>',   ':scroll-overlay up')
         _mb('help', '<Down>', ':scroll-overlay down')
         _mb('help', '<PgUp>', ':scroll-overlay page-')
@@ -4225,12 +4280,13 @@ class Application:
         return value
 
     def _cmd_bindkey(self, args=''):
-        """Bind, unbind, or list key bindings.
+        """Bind, unbind, or list key bindings.  Also dispatched by :unbind-key.
 
         :bind-key                               — list all user bindings
-        :bind-key [--mode MODE] [--%x] <key>    — unbind (remove binding)
+        :bind-key [--mode MODE] [--%x] <key>    — query: show what is bound
         :bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] [--%x] <key> <cmd>
                                                 — bind key to command(s)
+        :unbind-key [--mode MODE] [--%x] <key>  — remove a binding
 
         --mode MODE:  normal (default), help, details, command
         --desc TEXT:  description shown in help overlay custom-bindings section
@@ -4347,14 +4403,25 @@ class Application:
                 self.add_event("cmd", "bind-key: empty key sequence")
                 return
             if not rest:
-                # Unbind from mode
-                mode_dict = self._mode_bindings.get(bind_mode, {})
-                if key_code in mode_dict:
-                    del mode_dict[key_code]
-                    self.add_event("bind-key", f"unbound --mode {bind_mode} {key_str}")
+                # Query or unbind depending on which command was used
+                if getattr(self, '_last_cmd_name', None) == 'unbind-key':
+                    mode_dict = self._mode_bindings.get(bind_mode, {})
+                    if key_code in mode_dict:
+                        del mode_dict[key_code]
+                        self.add_event("bind-key", f"unbound --mode {bind_mode} {key_str}")
+                    else:
+                        self.add_event("bind-key",
+                                       f"no binding for --mode {bind_mode} {key_str}")
                 else:
-                    self.add_event("bind-key",
-                                   f"no binding for --mode {bind_mode} {key_str}")
+                    # :bind-key — query
+                    b = self._mode_bindings.get(bind_mode, {}).get(key_code)
+                    if b:
+                        cmds_display = ' \\; '.join(b.commands)
+                        self.add_event("bind-key",
+                                       f"--mode {bind_mode} {key_str} → {cmds_display}")
+                    else:
+                        self.add_event("bind-key",
+                                       f"no binding for --mode {bind_mode} {key_str}")
                 return
             # Bind to mode
             edit_mode = rest.endswith('...')
@@ -4377,14 +4444,30 @@ class Application:
             return
 
         if not rest:
-            # Unbind from normal trie
-            removed = self._key_trie.remove(key_codes, context)
-            if removed:
-                ctx_str = _format_context(context)
-                self._unbound_defaults.add(f"{ctx_str}{key_str}")
-                self.add_event("bind-key", f"unbound {ctx_str}{key_str}")
+            # Query or unbind depending on which command was used
+            if getattr(self, '_last_cmd_name', None) == 'unbind-key':
+                removed = self._key_trie.remove(key_codes, context)
+                if removed:
+                    ctx_str = _format_context(context)
+                    self._unbound_defaults.add(f"{ctx_str}{key_str}")
+                    self.add_event("bind-key", f"unbound {ctx_str}{key_str}")
+                else:
+                    self.add_event("bind-key", f"no binding for {key_str}")
             else:
-                self.add_event("bind-key", f"no binding for {key_str}")
+                # :bind-key — query: show what is bound to this key
+                ctx_str = _format_context(context)
+                bindings_dict, has_children = self._key_trie.lookup(key_codes)
+                if bindings_dict:
+                    b = next(iter(bindings_dict.values()))
+                    cmds_display = ' \\; '.join(b.commands)
+                    suffix = '...' if b.edit_mode else ''
+                    self.add_event("bind-key",
+                                   f"{ctx_str}{key_str} → {cmds_display}{suffix}")
+                elif has_children:
+                    self.add_event("bind-key",
+                                   f"{ctx_str}{key_str} is a prefix (multi-key sequence)")
+                else:
+                    self.add_event("bind-key", f"no binding for {ctx_str}{key_str}")
             return
 
         # Bind: rest is the command(s)
@@ -4999,12 +5082,15 @@ class Application:
                 except ValueError:
                     actual_entry_index = -1  # not found (shouldn't happen)
 
-            # Check if this entry is highlighted
+            # Check if this entry is highlighted or a search match
             is_highlighted = (self.highlighted_index is not None and
                              actual_entry_index == self.highlighted_index)
+            is_search_match = (bool(self._search_query) and
+                               self._search_mode == 'hosts' and
+                               actual_entry_index in self._search_results)
 
             # Base attribute for the entire row (highlight if selected)
-            row_attr = curses.A_REVERSE if is_highlighted else 0
+            row_attr = curses.A_REVERSE if is_highlighted else (curses.A_BOLD if is_search_match else 0)
 
             # Section label — render header row with status badge, and history when folded
             if isinstance(item, SectionLabel):
@@ -5391,6 +5477,7 @@ class Application:
         if self.log_offset == 0:
             # Live tail mode
             visible = event_list[-page_size:]
+            visible_start = max(0, total - page_size)
             header_title = 'Events'
             header_suffix = ' [SPACE to set "seen" mark]'
             if overflows:
@@ -5399,6 +5486,7 @@ class Application:
             end = total - self.log_offset
             start = max(0, end - page_size)
             visible = event_list[start:end]
+            visible_start = start
             line_start = start + 1
             line_end = end
             header_title = 'Events'
@@ -5411,10 +5499,14 @@ class Application:
         self._draw_column_header(stdscr, start_row, 0, header_title, header_suffix, width)
 
         row = start_row + 1
-        for entry in visible:
+        search_hit_set = (set(self._search_results)
+                          if self._search_query and self._search_mode == 'log' else None)
+        for abs_idx, entry in enumerate(visible, start=visible_start):
             if row >= height - 1:
                 break
             attr = _event_color_attr(entry)
+            if search_hit_set is not None and abs_idx in search_hit_set:
+                attr |= curses.A_BOLD
             stdscr.addstr(row, 0, entry.text[:width - 1], attr)
             row += 1
 
@@ -5463,6 +5555,17 @@ class Application:
             line = "Script changed — [1] re-exec  [2] reload  [3] ignore: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
+        elif p['type'] == 'search':
+            mode_label = 'hosts' if p['mode'] == 'hosts' else 'log'
+            label = f"/{mode_label}/ "
+            text  = ''.join(p['chars'])
+            n_hits = len(self._search_results) if text else 0
+            suffix = f"  [{n_hits} match{'es' if n_hits != 1 else ''}]" if text else \
+                     "  [Enter=confirm  Esc=cancel]"
+            full_line = (label + text + suffix).ljust(width - 1)[:width - 1]
+            stdscr.addstr(height - 1, 0, full_line, curses.A_REVERSE)
+            cursor_x = min(len(label) + len(text), width - 2)
+            stdscr.move(height - 1, cursor_x)
 
     def _handle_prompt_key(self, key):
         """Process one keypress while a prompt is active.
@@ -5552,6 +5655,34 @@ class Application:
                 self.prompt = None
             else:  # 3, Esc, or any other key
                 self.prompt = None
+
+        elif p['type'] == 'search':
+            if key == 27:  # Esc — cancel search
+                self._search_query = ''
+                self._search_results = []
+                self._search_idx = 0
+                self.prompt = None
+            elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+                self._search_query = ''.join(p['chars'])
+                self._search_mode  = p['mode']
+                self._update_search_results()
+                self._search_idx = 0
+                if self._search_results:
+                    self._apply_search_result(0)
+                elif self._search_query:
+                    self.add_event("cmd", f"search: no matches for '{self._search_query}'")
+                self.prompt = None
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if p['chars']:
+                    p['chars'].pop()
+                self._search_query = ''.join(p['chars'])
+                self._search_mode  = p['mode']
+                self._update_search_results()
+            elif 32 <= key < 127:
+                p['chars'].append(chr(key))
+                self._search_query = ''.join(p['chars'])
+                self._search_mode  = p['mode']
+                self._update_search_results()
 
     def save_to_file(self, filename, append=False, write_separator=True):
         """Write the current event log to a file.
@@ -6919,7 +7050,66 @@ class Application:
         """
         self.help_open = True
         self.help_scroll = 0
+        self.help_show_all = False
         self._current_mode = 'help'
+
+    def _cmd_help_toggle_all(self, args=''):
+        """Toggle between curated help and full auto-generated binding list."""
+        self.help_show_all = not self.help_show_all
+        self.help_scroll = 0
+
+    def _update_search_results(self):
+        """Recompute self._search_results from self._search_query and _search_mode."""
+        q = self._search_query.lower()
+        if not q:
+            self._search_results = []
+            return
+        if self._search_mode == 'hosts':
+            dns_mode = DNS_MODES[self.dns_mode]
+            results = []
+            for i, entry in enumerate(self.entries):
+                if isinstance(entry, Monitor):
+                    name = entry.get_display_name(dns_mode).lower()
+                    ip   = (entry.resolved_ip or '').lower()
+                    host = (entry.resolved_hostname or '').lower()
+                    if q in name or q in ip or q in host:
+                        results.append(i)
+            self._search_results = results
+        else:
+            event_list = [e for e in self.events if e.level <= self.loglevel]
+            self._search_results = [i for i, e in enumerate(event_list)
+                                    if q in e.text.lower()]
+
+    def _apply_search_result(self, raw_idx):
+        """Jump to search result at raw_idx (wraps around)."""
+        if not self._search_results:
+            return
+        idx = raw_idx % len(self._search_results)
+        self._search_idx = idx
+        if self._search_mode == 'hosts':
+            self.highlighted_index = self._search_results[idx]
+        else:
+            # Scroll event log so matched entry is visible at bottom of window
+            ev_idx = self._search_results[idx]
+            event_list = [e for e in self.events if e.level <= self.loglevel]
+            total = len(event_list)
+            self.log_offset = max(0, total - ev_idx - 1)
+
+    def _cmd_search_open(self, args=''):
+        """Open the / search prompt.  Mode: hosts if a host is selected, log otherwise."""
+        mode = 'hosts' if self.highlighted_index is not None else 'log'
+        self.prompt = {'type': 'search', 'mode': mode, 'chars': list(self._search_query)}
+
+    def _cmd_search_next(self, args=''):
+        """Jump to next (or prev) search match.  :search-next prev → backward."""
+        if not self._search_query:
+            return
+        if not self._search_results:
+            self.add_event("cmd", f"search: no matches for '{self._search_query}'")
+            return
+        direction = args.strip()
+        step = -1 if direction == 'prev' else 1
+        self._apply_search_result(self._search_idx + step)
 
     def _cmd_close(self, args=''):
         """Close the currently open overlay (help or details)."""
@@ -7029,43 +7219,37 @@ class Application:
     def _draw_help_overlay(self, stdscr, height, width):
         """Draw the help overlay as a centered bordered popup with scroll support.
 
-        Uses _FULL_HELP as content plus any user-defined bindings that have a
-        --desc annotation.  The box uses bold borders and renders each line
-        through _draw_hint_text so ``[key]`` tokens are highlighted in
-        white/bold (same style as the main menu bar).
-        The overlay is closed by pressing q, Q, or Esc (handled in run()).
-
-        Scrolling:
-          self.help_scroll = 0  — top of content
-          self.help_scroll > 0  — scrolled down by that many lines
-        When the content is taller than the terminal the top border embeds a
-        scroll indicator ' ↑↓ n-m/total ' centered in the dashes so the user
-        can see where they are.  The scroll position is clamped by the helper.
+        Normal view: curated _FULL_HELP + user-annotated custom bindings.
+        All-bindings view (help_show_all=True): auto-generated from full key trie.
+        Press [A] inside the overlay to toggle.
         """
-        lines = list(_FULL_HELP)
+        if self.help_show_all:
+            lines = self._build_all_bindings_lines()
+        else:
+            lines = list(_FULL_HELP)
 
-        # Collect user bindings with --desc, grouped by mode
-        by_mode = {}  # mode -> [(key_notation, desc)]
-        for _keys, b in self._key_trie:
-            if b.origin == 'user' and b.desc:
-                by_mode.setdefault(b.mode or 'normal', []).append(
-                    (b.key_notation, b.desc))
-        for mode, mode_dict in self._mode_bindings.items():
-            seen = set()
-            for b in mode_dict.values():
-                if b.origin == 'user' and b.desc and id(b) not in seen:
-                    seen.add(id(b))
-                    by_mode.setdefault(mode, []).append((b.key_notation, b.desc))
+            # Collect user bindings with --desc, grouped by mode
+            by_mode = {}  # mode -> [(key_notation, desc)]
+            for _keys, b in self._key_trie:
+                if b.origin == 'user' and b.desc:
+                    by_mode.setdefault(b.mode or 'normal', []).append(
+                        (b.key_notation, b.desc))
+            for mode, mode_dict in self._mode_bindings.items():
+                seen = set()
+                for b in mode_dict.values():
+                    if b.origin == 'user' and b.desc and id(b) not in seen:
+                        seen.add(id(b))
+                        by_mode.setdefault(mode, []).append((b.key_notation, b.desc))
 
-        if by_mode:
-            lines.append('-DIVIDER-')
-            lines.append('─ Custom bindings ─')
-            for mode in sorted(by_mode):
-                entries = by_mode[mode]
-                if entries:
-                    lines.append(f'  {mode} mode')
-                    for notation, desc in entries:
-                        lines.append(f'    {notation:<10} {desc}')
+            if by_mode:
+                lines.append('-DIVIDER-')
+                lines.append('─ Custom bindings ─')
+                for mode in sorted(by_mode):
+                    entries = by_mode[mode]
+                    if entries:
+                        lines.append(f'  {mode} mode')
+                        for notation, desc in entries:
+                            lines.append(f'    {notation:<10} {desc}')
 
         ideal_w = max(len(line) for line in lines if line != "-DIVIDER-")
         inner_w = min(ideal_w, max(20, width - 4))
@@ -7073,6 +7257,35 @@ class Application:
             stdscr, height, width, lines, self.help_scroll, inner_w,
             handle_dividers=True,
         )
+
+    def _build_all_bindings_lines(self):
+        """Build auto-generated lines listing every key binding (all origins)."""
+        lines = [
+            "  All key bindings  [A] back to help",
+            "-DIVIDER-",
+            "  Normal mode",
+        ]
+        seen_b = set()
+        for keys, b in self._key_trie:
+            if id(b) in seen_b:
+                continue
+            seen_b.add(id(b))
+            cmds = ' \\; '.join(b.commands)
+            origin_tag = '' if b.origin == 'default' else '  [user]'
+            ctx_str = _format_context(b.context)
+            lines.append(f"    {ctx_str}{b.key_notation:<12} → {cmds}{origin_tag}")
+        for mode in sorted(self._mode_bindings):
+            lines.append('-DIVIDER-')
+            lines.append(f"  {mode} mode")
+            seen_m = set()
+            for b in self._mode_bindings[mode].values():
+                if id(b) in seen_m:
+                    continue
+                seen_m.add(id(b))
+                cmds = ' \\; '.join(b.commands)
+                origin_tag = '' if b.origin == 'default' else '  [user]'
+                lines.append(f"    {b.key_notation:<12} → {cmds}{origin_tag}")
+        return lines
 
     def _draw_details_overlay(self, stdscr, height, width):
         """Draw the host details overlay as a centered bordered popup.

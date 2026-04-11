@@ -74,6 +74,7 @@ class TestSaveconfigBothBindkeyAndProgOptions:
             app1 = pb.Application([('host', '127.0.0.1')])
         app1._monitoring_started = True
         # Unbind the default 'q' quit key and add a prog-options rule
+        app1._last_cmd_name = 'unbind-key'
         app1._cmd_bindkey('q')
         app1._cmd_prog_options('ssh kiosk-* --disable')
         with patch.object(pb, '_config_path', return_value=cfg):

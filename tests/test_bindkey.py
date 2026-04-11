@@ -356,8 +356,9 @@ class TestBindkeyCommand:
         assert binding.key_notation == 't'
 
     def test_bindkey_unbind_key(self, app, pb):
-        """After binding, ':bindkey t' (no cmd) removes the binding."""
+        """After binding, ':unbind-key t' removes the binding."""
         app._cmd_bindkey('t :mux mtr')
+        app._last_cmd_name = 'unbind-key'
         app._cmd_bindkey('t')
         keys = pb._parse_key_notation('t')
         binding, _ = app._key_trie.resolve(keys, set())
@@ -446,12 +447,13 @@ class TestBindkeyCommand:
         assert r.commands == [':seen']
 
     def test_bindkey_context_unbind(self, app, pb):
-        """':bindkey --%s <Space>' unbinds only the section-context binding."""
+        """':unbind-key --%s <Space>' unbinds only the section-context binding."""
         # Default Space has --%s :fold toggle and fallback :seen
         keys = pb._parse_key_notation('<Space>')
         r_section, _ = app._key_trie.resolve(keys, {'s'})
         assert r_section.commands == [':fold toggle']
         # Unbind only the section context
+        app._last_cmd_name = 'unbind-key'
         app._cmd_bindkey('--%s <Space>')
         r_section, _ = app._key_trie.resolve(keys, {'s'})
         # Now falls back to :seen
@@ -550,17 +552,18 @@ class TestSaveConfigBindings:
         assert ':bindkey q :quit' not in config_text
 
     def test_saveconfig_includes_unbinds(self, app_with_cfg, pb):
-        """After unbinding a default key, save output contains bare :bind-key <key>."""
+        """After unbinding a default key, save output contains ':unbind-key <key>'."""
         app, cfg = app_with_cfg
-        # Unbind 'q' (a default binding)
+        # Unbind 'q' (a default binding) via :unbind-key
+        app._last_cmd_name = 'unbind-key'
         app._cmd_bindkey('q')
         with patch.object(pb, '_config_path', return_value=cfg):
             success = app._save_config()
         assert success is True
         config_text = open(cfg).read()
-        # Should have ':bind-key q' (without a command) to unbind it
+        # Should have ':unbind-key q' to unbind it
         lines = [line.strip() for line in config_text.splitlines()]
-        assert ':bind-key q' in lines
+        assert ':unbind-key q' in lines
 
 
 # ===========================================================================
