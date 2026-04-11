@@ -2719,8 +2719,26 @@ class _HostsParser:
                     errors.append(('error',
                         f':{cmd} is not supported; use :with/:end syntax'))
                     continue
-            # Preserve inline ## label so _process_for_loop can emit :resolv
-            body.append(text + (' ## ' + ic if ic else ''))
+            # Preserve inline ## label for host lines so _process_for_loop can
+            # emit :resolv mappings.
+            # For inline :if lines (":if COND -> host ## label") the label
+            # belongs to the body host — re-attach it so the inline handler
+            # passes it through correctly.
+            # For other directive lines (":remote-ping relay target ## note")
+            # drop the comment to avoid corrupting command parsing.
+            if not ic:
+                body.append(text)
+            elif not text.startswith(':'):
+                body.append(text + ' ## ' + ic)
+            else:
+                # Directive line — only keep the comment for inline :if forms.
+                _d_parts = text.split(None, 1)
+                _d_cmd = _d_parts[0][1:].lower()
+                if (_d_cmd == 'if' and len(_d_parts) > 1
+                        and re.match(r'^.+? ->', _d_parts[1].strip())):
+                    body.append(text + ' ## ' + ic)
+                else:
+                    body.append(text)
         return body, errors, i  # implicit :end at EOF
 
     # ── :for execution ────────────────────────────────────────────────────

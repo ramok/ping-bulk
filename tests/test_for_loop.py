@@ -935,3 +935,34 @@ class TestForResolv:
             'sh1-cam41', 'sh1-cam42', 'sh1-ps31', 'sh1-ps32',
             'sh2-cam41', 'sh2-cam42', 'sh2-ps31', 'sh2-ps32',
         ]
+
+
+class TestForRemotePingLabel:
+    """Regression tests: ## label on :remote-ping lines inside :for body."""
+
+    def test_remote_ping_label_does_not_corrupt_command(self, pb, tmp_path):
+        """:remote-ping relay target ## label inside :for must NOT include the label
+        in the emitted command — it would corrupt shlex parsing and cause SSH to
+        try to connect to the wrong host."""
+        content = """\
+            :for i in hub-{1..2}
+                10.0.$1.1 ## h$1-router
+                :remote-ping sh$1-relay 10.87.0.1 ## ps-jetson
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmds = [v for k, v in entries if k == 'cmd']
+        errors = [v for k, v in entries if k in ('error', 'warn')]
+
+        assert not errors, f"Unexpected errors/warns: {errors}"
+        # Commands must be clean — no '##' or 'ps-jetson' in the remote-ping cmd.
+        rp_cmds = [c for c in cmds if c.startswith(':remote-ping')]
+        assert ':remote-ping sh1-relay 10.87.0.1' in rp_cmds, (
+            f"Clean :remote-ping for hub-1 not found; got {rp_cmds!r}"
+        )
+        assert ':remote-ping sh2-relay 10.87.0.1' in rp_cmds, (
+            f"Clean :remote-ping for hub-2 not found; got {rp_cmds!r}"
+        )
+        assert all('##' not in c for c in rp_cmds), (
+            f"'##' leaked into :remote-ping commands: {rp_cmds!r}"
+        )
