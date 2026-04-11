@@ -59,6 +59,18 @@ OPTIONS
     Set the ping-history display mode at startup.
     Valid values: ``success``, ``rtt``, ``scaled``.
 
+``--log-level LEVEL``
+    Set the event-log verbosity at startup.
+    Valid values: ``quiet``, ``normal``, ``info``, ``debug``.
+    Default: ``normal``.  See **Log levels** under **COMMANDS**.
+
+``-v``
+    Increase the log level by one step (can be repeated: ``-vv``, ``-vvv``).
+    Applied as an offset on top of ``--log-level`` (or the default).
+
+``-q``
+    Decrease the log level by one step (can be repeated: ``-qq``, ``-qqq``).
+
 ``HOST ...``
     One or more host names, IP addresses, or host:port combinations to monitor.
     If a port is specified (e.g. ``example.com:443``), it will perform a TCP
@@ -213,6 +225,33 @@ Event log
     Set the maximum number of lines kept in the in-memory event log.
     When the limit is reached the oldest lines are discarded.
     Default: ``10000``.  Example: ``:set log-size 50000``.
+
+Log levels
+----------
+
+``:set log-level quiet|normal|info|debug``
+    Control which events appear in the event log panel.  The setting is
+    applied at *display time*, so changing the level immediately reveals
+    or hides previously buffered entries without losing history.  The
+    active level is saved by ``:saveconfig``.
+
+    +-----------+-------+------------------------------------------------------+
+    | Level     | Value | What is visible                                      |
+    +===========+=======+======================================================+
+    | ``quiet`` |   0   | Host status changes only (up / down / recover)       |
+    +-----------+-------+------------------------------------------------------+
+    | ``normal``|   1   | + warnings and errors  *(default)*                   |
+    +-----------+-------+------------------------------------------------------+
+    | ``info``  |   2   | + command output, config, settings, resolv entries   |
+    +-----------+-------+------------------------------------------------------+
+    | ``debug`` |   3   | + key-binding dispatch and all internal events       |
+    +-----------+-------+------------------------------------------------------+
+
+    Event lines are colour-coded: errors are shown in red, warnings in
+    yellow, and debug-level lines are dimmed.
+
+    The level can also be set at startup via ``--log-level`` or the
+    ``-v`` / ``-q`` flags (see **OPTIONS**).
 
 Configuration
 -------------
