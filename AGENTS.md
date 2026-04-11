@@ -55,6 +55,7 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 12 (syntax cleanup)**: `:ssh` renamed to `:remote-ping`, `:ssh-begin`/`:ssh-end` renamed to `:remote-ping-begin`/`:remote-ping-end`. Added `:prog-options-begin <prog>` / `:prog-options-end` block form for grouping multiple prog-options rules under one program. No backward compatibility. 9 new tests added.
 - **Phase 11 (vim-style UX)**: `:unbind-key <key>` removes a binding; `:bind-key <key>` (no cmd) now queries what's bound; `G`/`gg`/`Ctrl-F`/`Ctrl-B` vim navigation defaults; `:fold` word aliases (`open`, `close`, `open-recursive`, etc.); help overlay shows `:command` annotations per hotkey; `A` in help overlay toggles a generated all-bindings view; `/` context-aware search (host list or event log) with `n`/`N` navigation.
 - **Phase 10 (log levels)**: `quiet/normal/info/debug` log levels via `:set loglevel`, `-v`/`-q` flags, event coloring by severity.
 - **Phase 9 (`:edit` improvements + `:resolv` warning fix)**: `:edit` command enhancements, resolv warning deduplication.

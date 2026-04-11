@@ -5,6 +5,8 @@ import shlex
 import pytest
 from unittest.mock import patch, MagicMock
 
+from utils.hosts_helper import write_hosts
+
 
 def _make_app(pb, tmp_path):
     cfg = str(tmp_path / 'ping-bulk' / 'config')
@@ -290,3 +292,110 @@ class TestMuxProgOptionsInjection:
         mock_backend.split.assert_called_once_with(
             'v', _held(['ssh', '-o', 'StrictHostKeyChecking=no', '10.0.0.1'])
         )
+
+
+# ===========================================================================
+# :prog-options-begin / :prog-options-end block form
+# ===========================================================================
+
+class TestProgOptionsBlock:
+    """Parser-level tests for :prog-options-begin / :prog-options-end."""
+
+    def test_basic_block(self, pb, tmp_path):
+        """:prog-options-begin block emits :prog-options commands."""
+        content = (
+            ":prog-options-begin ssh\n"
+            "  *-router -l admin\n"
+            "  *-switch -l root\n"
+            ":prog-options-end\n"
+            "1.2.3.4\n"
+        )
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmds = [e[1] for e in entries if e[0] == 'cmd']
+        assert any(':prog-options ssh *-router -l admin' in c for c in cmds)
+        assert any(':prog-options ssh *-switch -l root' in c for c in cmds)
+        assert ('host', '1.2.3.4') in entries
+
+    def test_block_disable(self, pb, tmp_path):
+        """:prog-options-begin block supports --disable lines."""
+        content = (
+            ":prog-options-begin mtr\n"
+            "  bad-host --disable\n"
+            ":prog-options-end\n"
+        )
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmds = [e[1] for e in entries if e[0] == 'cmd']
+        assert any(':prog-options mtr bad-host --disable' in c for c in cmds)
+
+    def test_block_no_prog_name_is_error(self, pb, tmp_path):
+        """:prog-options-begin with no program name emits an error."""
+        content = ":prog-options-begin\n  * -l admin\n:prog-options-end\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [e for e in entries if e[0] == 'error']
+        assert errors, "expected an error for missing program name"
+
+    def test_end_without_begin_is_error(self, pb, tmp_path):
+        """:prog-options-end without matching begin emits an error."""
+        content = ":prog-options-end\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [e for e in entries if e[0] == 'error']
+        assert errors
+
+    def test_block_applied_to_app(self, pb, tmp_path):
+        """Block form rules are applied when Application loads the hosts file."""
+        cfg = str(tmp_path / 'config')
+        open(cfg, 'w').close()
+        content = (
+            ":prog-options-begin ssh\n"
+            "  *.internal -o ProxyJump=bastion\n"
+            ":prog-options-end\n"
+            "127.0.0.1\n"
+        )
+        hosts_file = write_hosts(tmp_path, content)
+        entries = pb.parse_hosts_file(hosts_file)
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app = pb.Application(entries)
+        disabled, opts = app._match_prog_options('ssh', 'host.internal')
+        assert not disabled
+        assert opts == '-o ProxyJump=bastion'
+
+    def test_block_multiple_programs(self, pb, tmp_path):
+        """Multiple :prog-options-begin blocks for different programs work independently."""
+        content = (
+            ":prog-options-begin ssh\n"
+            "  *.internal -l admin\n"
+            ":prog-options-end\n"
+            ":prog-options-begin mtr\n"
+            "  slow-host --interval 2\n"
+            ":prog-options-end\n"
+        )
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmds = [e[1] for e in entries if e[0] == 'cmd']
+        assert any(':prog-options ssh *.internal -l admin' in c for c in cmds)
+        assert any(':prog-options mtr slow-host --interval 2' in c for c in cmds)
+
+    def test_block_in_for_loop(self, pb, tmp_path):
+        """:prog-options-begin inside :for loop applies back-references."""
+        content = (
+            ":for {router,switch}\n"
+            ":prog-options-begin ssh\n"
+            "  $1 -l admin\n"
+            ":prog-options-end\n"
+            ":done\n"
+        )
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmds = [e[1] for e in entries if e[0] == 'cmd']
+        assert any(':prog-options ssh router -l admin' in c for c in cmds)
+        assert any(':prog-options ssh switch -l admin' in c for c in cmds)
+
+    def test_interactive_begin_shows_error(self, app):
+        """:prog-options-begin called interactively emits an error event."""
+        app._cmd_prog_options_begin('ssh')
+        events = [e for e in app.events if 'prog-options-begin' in e.text]
+        assert events
+
+    def test_interactive_end_shows_error(self, app):
+        """:prog-options-end called interactively emits an error event."""
+        app._cmd_prog_options_end()
+        events = [e for e in app.events if 'prog-options-end' in e.text]
+        assert events

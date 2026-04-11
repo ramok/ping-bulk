@@ -559,11 +559,14 @@ _FULL_HELP = [
     "  :saveconfig               save current settings to config file",
     "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
     "                            ip-pat may use brace expansion; \\N in host = brace group N",
-    "                            :ssh user@hostname resolves hostname, preserves username",
+    "                            :remote-ping user@hostname resolves hostname, preserves username",
     "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
-    "  :ssh \\[opts] <dest> <host> remote ping over SSH (BatchMode, no password)",
-    "  :ssh-begin \\[opts] <dest>  host lines → :ssh \\[opts] <dest> <host>",
-    "  :ssh-end                  close :ssh-begin block (hosts file only)",
+    "  :remote-ping \\[ssh-opts] <relay> <target>  remote ping (runs on relay via SSH)",
+    "  :remote-ping-begin \\[ssh-opts] <relay>     host lines → :remote-ping \\[opts] <relay> <host>",
+    "  :remote-ping-end                            close :remote-ping-begin block (hosts file only)",
+    "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
+    "  :prog-options-begin <prog>                  open :prog-options block; inner lines are <glob> [opts]",
+    "  :prog-options-end                           close :prog-options-begin block (hosts file only)",
     "  :help  or  ?              show this help",
     "-DIVIDER-",
     "  Section headers  (hosts file)",
@@ -576,7 +579,7 @@ _FULL_HELP = [
     "                  (useful in :for loops when some iterations lack a device)",
     "  # comment       inline shell-style comment on any line incl. :resolv, :set",
     "-DIVIDER-",
-    "  Host / range expansion  (hosts file and :ssh ping-host argument)",
+    "  Host / range expansion  (hosts file and :remote-ping target argument)",
     "  10.0.0.{1,2,5}          brace list  → 10.0.0.1, 10.0.0.2, 10.0.0.5",
     "  10.0.0.{1..4}           brace range → 10.0.0.1 … 10.0.0.4",
     "  10.0.0.{1-4}            brace range → 10.0.0.1 … 10.0.0.4  (zsh style)",
@@ -667,12 +670,12 @@ example.com:443
 # ── Remote monitoring over SSH ─────────────────────────────────────────────
 ## Remote sites
 ### Site A (via jump host)
-:ssh-begin -J bastion.example.com ops@remote-a
+:remote-ping-begin -J bastion.example.com ops@remote-a
     10.10.0.{1..4}
-:ssh-end
+:remote-ping-end
 
 ### Site B
-:ssh ops@remote-b 10.20.0.{1..5}
+:remote-ping ops@remote-b 10.20.0.{1..5}
 
 """
 
@@ -1640,7 +1643,7 @@ class SshPingMonitor(Monitor):
                         e.g. ['-J', 'bastion', 'user@remote'] or ['user@remote'].
                         The SSH destination (last token) is extracted for display.
       ping_host       — the host that the remote ping will target (may already be
-                        an IP when a :resolv mapping was applied before :ssh).
+                        an IP when a :resolv mapping was applied before :remote-ping).
       ping_host_label — original (pre-resolv) name of the ping target, used as the
                         display label in dns_mode='off' and 'hostname'.  Defaults
                         to ping_host when not supplied.
@@ -1977,7 +1980,7 @@ class SectionLabel:
 
 
 def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
-                      var_names=None, variables=None):
+                      var_names=None, variables=None, prog_opts_block_prog=None):
     """Expand a ``:for`` loop and return a list of entry tuples.
 
     Applies back-references (``$0``–``$9`` or ``$name``) to each body
@@ -1996,8 +1999,8 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
         Mutable set of already-encountered host/SSH-command strings; updated
         in place so deduplication spans the whole file.
     ssh_block_args : str or None
-        When non-``None`` the loop is nested inside an ``:ssh-begin`` block;
-        plain host lines become ``:ssh <ssh_block_args> <host>`` commands.
+        When non-``None`` the loop is nested inside a ``:remote-ping-begin`` block;
+        plain host lines become ``:remote-ping <ssh_block_args> <host>`` commands.
     var_names : list[str] or None
         When non-``None``, a list of variable names for named back-references
         (e.g. ``['x', 'y']`` from ``:for x,y in pattern``).
@@ -2006,6 +2009,10 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
         ``:let`` variable store from the enclosing parse context.  Each body
         line is passed through ``_expand_let_vars`` before back-reference
         substitution.  A ``None`` value is treated as an empty dict.
+    prog_opts_block_prog : str or None
+        When non-``None`` the loop is nested inside a ``:prog-options-begin``
+        block; plain (non-directive) lines become ``:prog-options <prog> <line>``
+        commands.
 
     Returns
     -------
@@ -2024,9 +2031,13 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
     # Track no-backref body lines already emitted (add-once logic).
     no_backref_emitted = set()
 
-    # Local SSH context tracking for nested :ssh-begin/:ssh-end inside :for
+    # Local SSH context tracking for nested :remote-ping-begin/:remote-ping-end inside :for
     local_ssh_args = None
     in_local_ssh_block = False
+
+    # Local prog-options context tracking for :prog-options-begin/:prog-options-end inside :for
+    local_prog_opts_prog = prog_opts_block_prog  # inherit outer block (if any)
+    in_local_prog_opts_block = prog_opts_block_prog is not None
 
     for iteration_idx, (full_str, captures) in enumerate(rows):
         if var_names is not None:
@@ -2147,35 +2158,49 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                         title_tmpl = parts[1].strip() if len(parts) > 1 else ''
                         title = _apply_backref(title_tmpl, captures, full_str)
                         entries.append(('section', title, level, folded_default))
-                    elif cmd_word == 'ssh-begin':
-                        # Open local SSH block — captures args with back-reference expansion
+                    elif cmd_word == 'remote-ping-begin':
+                        # Open local remote-ping block — captures args with back-reference expansion
                         ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
                         in_local_ssh_block = True
                         local_ssh_args = _apply_backref(ssh_args_tmpl, captures, full_str)
-                        continue  # Don't emit a command entry for :ssh-begin
-                    elif cmd_word == 'ssh-end':
-                        # Close local SSH block
+                        continue  # Don't emit a command entry for :remote-ping-begin
+                    elif cmd_word == 'remote-ping-end':
+                        # Close local remote-ping block
                         in_local_ssh_block = False
                         local_ssh_args = None
-                        continue  # Don't emit a command entry for :ssh-end
-                    elif cmd_word == 'ssh':
-                        # :ssh command inside :for loop
+                        continue  # Don't emit a command entry for :remote-ping-end
+                    elif cmd_word == 'prog-options-begin':
+                        prog_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                        if not prog_tmpl:
+                            entries.append(('error', ':prog-options-begin requires a program name'))
+                        else:
+                            in_local_prog_opts_block = True
+                            local_prog_opts_prog = _apply_backref(prog_tmpl, captures, full_str)
+                        continue
+                    elif cmd_word == 'prog-options-end':
+                        if not in_local_prog_opts_block:
+                            entries.append(('error', ':prog-options-end without :prog-options-begin'))
+                        in_local_prog_opts_block = False
+                        local_prog_opts_prog = prog_opts_block_prog  # restore outer (None if none)
+                        continue
+                    elif cmd_word == 'remote-ping':
+                        # :remote-ping command inside :for loop
                         # If we have an effective SSH context (local or outer), chain them
                         effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
                         inner_ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
                         inner_ssh_args = _apply_backref(inner_ssh_args_tmpl, captures, full_str)
 
                         if effective_ssh_args is not None:
-                            # Chain with -J: :ssh -J <outer> <inner>
-                            chained_cmd = f':ssh -J {effective_ssh_args} {inner_ssh_args}'
+                            # Chain with -J: :remote-ping -J <outer> <inner>
+                            chained_cmd = f':remote-ping -J {effective_ssh_args} {inner_ssh_args}'
                         else:
                             # No outer SSH context, emit as-is
-                            chained_cmd = f':ssh {inner_ssh_args}'
+                            chained_cmd = f':remote-ping {inner_ssh_args}'
 
                         # Deduplicate: use command as key
-                        key = ('ssh', chained_cmd)
+                        key = ('remote-ping', chained_cmd)
                         if key in seen_hosts:
-                            entries.append(('warn', f'duplicate SSH command ignored: {chained_cmd}'))
+                            entries.append(('warn', f'duplicate remote-ping command ignored: {chained_cmd}'))
                         else:
                             seen_hosts.add(key)
                             entries.append(('cmd', chained_cmd))
@@ -2186,6 +2211,11 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
 
             else:
                 if not currently_skipping:
+                    # If inside a prog-options block, treat line as a glob+opts rule.
+                    if in_local_prog_opts_block:
+                        expanded_rule = _apply_backref(line, captures, full_str)
+                        entries.append(('cmd', f':prog-options {local_prog_opts_prog} {expanded_rule}'))
+                        continue
                     # Host line.  A leading '?' marks it as optional: silently skip if the
                     # expanded name has no :resolv mapping at Application init time.
                     optional = line.startswith('?')
@@ -2216,7 +2246,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                                     entries.append(('cmd', f':resolv {host} {label}'))
                                 if effective_ssh_args is not None:
                                     # '?' not supported for SSH hosts inside :for — add normally.
-                                    entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
+                                    entries.append(('cmd', f':remote-ping {effective_ssh_args} {host}'))
                                 else:
                                     # Use the label as host entry so dns_mode='off' shows the
                                     # hostname, matching the behaviour of :resolv IP label + label.
@@ -2244,7 +2274,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                                         label = _apply_backref(label_tmpl, host_captures, host)
                                         entries.append(('cmd', f':resolv {host} {label}'))
                                     if effective_ssh_args is not None:
-                                        entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
+                                        entries.append(('cmd', f':remote-ping {effective_ssh_args} {host}'))
                                     else:
                                         host_entry = label if (label_tmpl and _is_ip(host)) else host
                                         entries.append(('optional_host' if optional else 'host', host_entry))
@@ -2362,7 +2392,8 @@ class _HostsParser:
     def _parse_lines(self, lines):
         """Process a list of ``(text, comment)`` pairs into entry tuples."""
         entries = []
-        ssh_args = None  # :ssh-begin context; None = not in a block
+        remote_ping_args = None  # :remote-ping-begin context; None = not in a block
+        prog_opts_block_prog = None  # :prog-options-begin context; None = not in a block
         if_stack = []   # stack of {'skipping': bool, 'matched': bool, 'seen_else': bool}
 
         i = 0
@@ -2441,7 +2472,8 @@ class _HostsParser:
                     # :let-defined names (e.g. $sh_num) are substituted
                     # before brace-expansion and back-reference extraction.
                     expanded_args = _expand_let_vars(args, self.variables)
-                    entries.extend(self._process_for(expanded_args, body, ssh_args))
+                    entries.extend(self._process_for(expanded_args, body, remote_ping_args,
+                                                    prog_opts_block_prog=prog_opts_block_prog))
                     continue
 
                 # Variable-expand the whole directive line, then re-dispatch.
@@ -2490,15 +2522,24 @@ class _HostsParser:
                         entries.append(('error', ':fi without :if'))
                     else:
                         if_stack.pop()
-                elif cmd_word == 'ssh-begin':
-                    ssh_args = args
-                elif cmd_word == 'ssh-end':
-                    ssh_args = None
+                elif cmd_word == 'remote-ping-begin':
+                    remote_ping_args = args
+                elif cmd_word == 'remote-ping-end':
+                    remote_ping_args = None
+                elif cmd_word == 'prog-options-begin':
+                    if not args:
+                        entries.append(('error', ':prog-options-begin requires a program name'))
+                    else:
+                        prog_opts_block_prog = args
+                elif cmd_word == 'prog-options-end':
+                    if prog_opts_block_prog is None:
+                        entries.append(('error', ':prog-options-end without :prog-options-begin'))
+                    prog_opts_block_prog = None
                 elif cmd_word == 'done':
                     entries.append(('error', ':done without :for'))
-                elif cmd_word == 'ssh' and ssh_args is not None:
-                    # Nested :ssh inside :ssh-begin → chain jump hosts.
-                    entries.append(('cmd', f':ssh -J {ssh_args} {args}'))
+                elif cmd_word == 'remote-ping' and remote_ping_args is not None:
+                    # Nested :remote-ping inside :remote-ping-begin → chain jump hosts.
+                    entries.append(('cmd', f':remote-ping -J {remote_ping_args} {args}'))
                 else:
                     entries.append(('cmd', text))
                 continue
@@ -2507,7 +2548,10 @@ class _HostsParser:
             text = _expand_let_vars(text, self.variables)
             if not text.strip():
                 continue
-            entries.extend(self._parse_host(text, comment, ssh_args))
+            if prog_opts_block_prog is not None:
+                entries.append(('cmd', f':prog-options {prog_opts_block_prog} {text}'))
+            else:
+                entries.extend(self._parse_host(text, comment, remote_ping_args))
 
         return entries
 
@@ -2520,7 +2564,7 @@ class _HostsParser:
 
         * *body_lines* — list of raw text strings (inline comments stripped).
         * *errors* — ``('error', …)`` entries for illegal nested directives
-          (``:for``, ``:ssh-begin``, ``:ssh-end``).
+          (``:for``, ``:remote-ping-begin``, ``:remote-ping-end``).
         * *next_index* — index of the first line after ``:done``.
 
         ``## …`` section headers inside the body are kept unchanged.
@@ -2547,11 +2591,11 @@ class _HostsParser:
                 if cmd == 'for':
                     errors.append(('error', "nested :for is not supported"))
                     continue
-                if cmd == 'ssh-begin':
-                    errors.append(('error', ":ssh-begin inside :for is not supported"))
+                if cmd == 'remote-ping-begin':
+                    errors.append(('error', ":remote-ping-begin inside :for is not supported"))
                     continue
-                if cmd == 'ssh-end':
-                    errors.append(('error', ":ssh-end inside :for is not supported"))
+                if cmd == 'remote-ping-end':
+                    errors.append(('error', ":remote-ping-end inside :for is not supported"))
                     continue
             # Preserve inline ## label so _process_for_loop can emit :resolv
             body.append(text + (' ## ' + ic if ic else ''))
@@ -2559,7 +2603,7 @@ class _HostsParser:
 
     # ── :for execution ────────────────────────────────────────────────────
 
-    def _process_for(self, args, body_lines, ssh_args):
+    def _process_for(self, args, body_lines, ssh_args, prog_opts_block_prog=None):
         """Expand a ``:for`` directive and return its entries."""
         var_names = None
         if ' in ' in args:
@@ -2571,6 +2615,7 @@ class _HostsParser:
         return _process_for_loop(
             pattern, body_lines, self.seen_hosts, ssh_args,
             var_names=var_names, variables=self.variables,
+            prog_opts_block_prog=prog_opts_block_prog,
         )
 
     # ── :let variable assignment ──────────────────────────────────────────
@@ -2625,7 +2670,7 @@ class _HostsParser:
                 continue
             self.seen_hosts.add(key)
             if ssh_args is not None:
-                entries.append(('cmd', f':ssh {ssh_args} {host}'))
+                entries.append(('cmd', f':remote-ping {ssh_args} {host}'))
             else:
                 if inline_comment and _is_ip(host):
                     resolved = _apply_backref(inline_comment, captures, host)
@@ -2654,14 +2699,14 @@ def parse_hosts_file(filename, variables=None):
       :let name val   — define a variable; ``$name`` is substituted in subsequent lines.
                         The name may contain brace expansion (e.g. ``name{1..4}``);
                         ``$N`` in the value is eagerly expanded per brace index.
-      :ssh-begin [ssh-opts] <dest>
-                      — open an SSH block; all plain host lines until :ssh-end are
-                        expanded into ':ssh [ssh-opts] <dest> <host>' commands.
+      :remote-ping-begin [ssh-opts] <relay>
+                      — open a remote-ping block; all plain host lines until :remote-ping-end are
+                        expanded into ':remote-ping [ssh-opts] <relay> <host>' commands.
                         Blocks may not be nested.
-      :ssh-end        — close the current SSH block
+      :remote-ping-end — close the current remote-ping block
       :for pattern    — open a loop; every body line is repeated for each expansion
                         of *pattern*, with back-references (\\N / $N) substituted.
-                        :for may appear inside an :ssh-begin block.
+                        :for may appear inside a :remote-ping-begin block.
       :done           — close the most recent :for loop; if the file ends without
                         :done, an implicit :done is applied at EOF so the loop still
                         produces its entries (useful for :source'd files)
@@ -2670,8 +2715,8 @@ def parse_hosts_file(filename, variables=None):
       # ...           — comment line; ignored entirely
       host1; host2    — semicolons may separate multiple entries on one line
       (empty)         — blank line; ignored
-      anything else   — treated as a host/IP address to ping (or, inside an
-                        :ssh-begin block, expanded to an :ssh command)
+      anything else   — treated as a host/IP address to ping (or, inside a
+                        :remote-ping-begin block, expanded to a :remote-ping command)
     """
     return _HostsParser(variables=variables).parse_file(filename)
 
@@ -2794,12 +2839,12 @@ CMD_REGISTRY = [
            '<ip> <host>',         'static name→IP mapping (overrides DNS for ping and SSH)'),
     CmdDef(['resolv-port'],      '_cmd_resolv_port', None,
            '<port> <service>',    'static port→service mapping (overrides default port names from /etc/services)'),
-    CmdDef(['ssh'],              '_cmd_ssh',        None,
-           '[opts] <dest> <host>', 'remote ping over SSH (BatchMode, no password)'),
-    CmdDef(['ssh-begin'],        '_cmd_ssh_begin',  None,
-           '[opts] <dest>',       'open SSH block (hosts file only)',       completable=False),
-    CmdDef(['ssh-end'],          '_cmd_ssh_end',    None,
-           '',                    'close SSH block (hosts file only)',       completable=False),
+    CmdDef(['remote-ping'],      '_cmd_remote_ping',  None,
+           '[ssh-opts] <relay>', 'add remote ping monitor (runs ping on relay via SSH)', completable=False),
+    CmdDef(['remote-ping-begin'],'_cmd_remote_ping_begin', None,
+           '[ssh-opts] <relay>', 'open remote-ping block (hosts file only)', completable=False),
+    CmdDef(['remote-ping-end'],  '_cmd_remote_ping_end',   None,
+           '',                   'close remote-ping block (hosts file only)', completable=False),
     CmdDef(['fold-all'],         '_cmd_fold_all',   None,
            '',                    'fold (collapse) all sections  [alias: zM / []'),
     CmdDef(['unfold-all'],       '_cmd_unfold_all', None,
@@ -2815,8 +2860,14 @@ CMD_REGISTRY = [
            '[--split-v|--split-h|--split-window] [command...]', 'run command in tmux/screen pane; no command = relaunch self (--split-v below, --split-h right, --split-window new)'),
     CmdDef(['term', 'terminal', 'xterm'], '_cmd_mux', None,
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
-    CmdDef(['prog-options'],     '_cmd_prog_options', None,
+    CmdDef(['prog-options'],         '_cmd_prog_options', None,
            '<prog> <glob> <opts>', 'per-program options for :mux'),
+    CmdDef(['prog-options-begin'],   '_cmd_prog_options_begin', None,
+           '<prog>', 'open a :prog-options block (hosts-file only)',
+           completable=False),
+    CmdDef(['prog-options-end'],     '_cmd_prog_options_end',   None,
+           '',      'close a :prog-options block (hosts-file only)',
+           completable=False),
     CmdDef(['edit'],             '_cmd_edit',       None,
            '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
@@ -3137,7 +3188,7 @@ class Application:
                         hosts_map by an earlier :resolv command is applied immediately.
           • 'section' — creates a SectionLabel display row.
           • 'cmd'     — dispatched inline via _dispatch_cmd() so that structural
-                        commands (:ssh) appear at their correct position in the
+                        commands (:remote-ping) appear at their correct position in the
                         display list, and configuration commands (:dns, :resolv, …)
                         take effect at the point they are encountered in the file.
         """
@@ -6454,6 +6505,16 @@ class Application:
             status = '--disable' if opts is None else f'opts={opts_str!r}'
             self.add_event("cmd", f"prog-options: '{prog}' '{pattern}' → {status}")
 
+    def _cmd_prog_options_begin(self, args=''):
+        """:prog-options-begin is a hosts-file-only directive; cannot be used interactively."""
+        self.add_event("cmd",
+            "prog-options-begin: this directive is only valid in a hosts file, not interactively")
+
+    def _cmd_prog_options_end(self, args=''):
+        """:prog-options-end is a hosts-file-only directive; cannot be used interactively."""
+        self.add_event("cmd",
+            "prog-options-end: this directive is only valid in a hosts file, not interactively")
+
     def _match_prog_options(self, prog, host, resolved_hostname=''):
         """Return (disabled, opts_str) for prog + host by matching prog_options rules.
 
@@ -6902,20 +6963,20 @@ class Application:
                     self.port_map[port_num] = service
                     self.port_map[service] = port_num
 
-    def _cmd_ssh(self, args=''):
-        """Add a remote-ping monitor: :ssh [opts] <dest> <ping-host>."""
+    def _cmd_remote_ping(self, args=''):
+        """Add a remote-ping monitor: :remote-ping [ssh-opts] <relay> <target>."""
         if not args:
             self.add_event("cmd",
-                "ssh: usage: :ssh [opts] <dest> <ping-host>")
+                "remote-ping: usage: :remote-ping [ssh-opts] <relay> <target>")
         else:
             try:
                 tokens = shlex.split(args)
             except ValueError as e:
-                self.add_event("cmd", f"ssh: parse error: {e}")
+                self.add_event("cmd", f"remote-ping: parse error: {e}")
             else:
                 if len(tokens) < 2:
                     self.add_event("cmd",
-                        "ssh: usage: :ssh [opts] <dest> <ping-host>")
+                        "remote-ping: usage: :remote-ping [ssh-opts] <relay> <target>")
                 else:
                     ping_host_pattern = tokens[-1]
                     ssh_args = tokens[:-1]
@@ -7004,7 +7065,7 @@ class Application:
                     try:
                         expanded_hosts = _expand_host(ping_host_pattern)
                     except ValueError as e:
-                        self.add_event("cmd", f"ssh: brace expansion error: {e}")
+                        self.add_event("cmd", f"remote-ping: brace expansion error: {e}")
                     else:
                         for ping_host in expanded_hosts:
                             actual_ping_host = (self.hosts_map[ping_host][0]
@@ -7023,15 +7084,15 @@ class Application:
                                 thread.start()
                                 self.threads.append(thread)
 
-    def _cmd_ssh_begin(self, args=''):
-        """Report that :ssh-begin is a hosts-file-only directive."""
+    def _cmd_remote_ping_begin(self, args=''):
+        """Report that :remote-ping-begin is a hosts-file-only directive."""
         self.add_event("cmd",
-            "ssh-begin: only supported in hosts files — use :ssh for interactive SSH")
+            "remote-ping-begin: only supported in hosts files — use :remote-ping interactively")
 
-    def _cmd_ssh_end(self, args=''):
-        """Report that :ssh-end is a hosts-file-only directive."""
+    def _cmd_remote_ping_end(self, args=''):
+        """Report that :remote-ping-end is a hosts-file-only directive."""
         self.add_event("cmd",
-            "ssh-end: only supported in hosts files — use :ssh for interactive SSH")
+            "remote-ping-end: only supported in hosts files — use :remote-ping interactively")
 
     def _cmd_fold_all(self, args=''):
         """Fold (collapse) all sections."""
@@ -7783,9 +7844,9 @@ hosts file format:
   10.0.0.1                  — host or IP to ping
   10.0.0.{1..5}             — brace range expansion (5 hosts)
   :resolv <ip> <hostname>   — static DNS override
-  :ssh [opts] <dest> <host> — ping via SSH
-  :ssh-begin [opts] <dest>  — open SSH block (plain lines → :ssh commands)
-  :ssh-end                  — close SSH block
+  :remote-ping [ssh-opts] <relay> <target> — ping via SSH (run on relay host)
+  :remote-ping-begin [ssh-opts] <relay>    — open block (plain lines → :remote-ping commands)
+  :remote-ping-end                         — close remote-ping block
 
 press '?' inside the app for the full keyboard reference.\
 """,

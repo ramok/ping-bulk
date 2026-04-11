@@ -430,7 +430,7 @@ Hosts and DNS
     * ``$0`` — the full expanded IP address for this iteration.
 
     Mappings work for both local ping targets and SSH destinations.
-    When using ``user@hostname`` format with ``:ssh``, the hostname
+    When using ``user@hostname`` format with ``:remote-ping``, the hostname
     portion is resolved while the username is preserved.
 
     Examples::
@@ -447,7 +447,7 @@ Hosts and DNS
     ``10.2.1.0``→``dc2-rack1``, etc.  (8 mappings total from a single line.) ::
 
         :resolv 192.168.1.10 remote-server
-        :ssh user@remote-server localhost
+        :remote-ping user@remote-server localhost
 
     The SSH destination becomes ``user@192.168.1.10`` while preserving
     the username.
@@ -461,27 +461,27 @@ Hosts and DNS
         :resolv-port 8080 http-alt
         :resolv-port 8443 https-alt
 
-Monitoring via SSH JumpHost
---------------
+Monitoring via SSH
+------------------
 
-``:ssh [opts] <dest> <ping-host>``
-    Add a monitor that runs ``ping -O -D <ping-host>`` on the remote
-    machine *dest* via ``ssh -o BatchMode=yes``.  *opts* may include any
-    SSH flags (e.g. ``-J bastion``).  The last token is always the
-    ping target; everything else is the SSH command line.
+``:remote-ping [ssh-opts] <relay> <target>``
+    Add a monitor that runs ``ping -O -D <target>`` on the remote
+    machine *relay* via ``ssh -o BatchMode=yes``.  *ssh-opts* may include
+    any SSH flags (e.g. ``-J bastion``).  The last token is always the
+    ping target; everything before the last token is the SSH command line.
 
     Examples::
 
-        :ssh user@remote 8.8.8.8
-        :ssh -J bastion ops@remote-a 10.10.0.1
+        :remote-ping user@remote 8.8.8.8
+        :remote-ping -J bastion ops@remote-a 10.10.0.1
 
-``:ssh-begin [opts] <dest>``
-    Open an SSH block.  Every plain host line that follows (until
-    ``:ssh-end``) is automatically wrapped as
-    ``:ssh [opts] <dest> <host>``.  Only valid inside a hosts file.
+``:remote-ping-begin [ssh-opts] <relay>``
+    Open a remote-ping block.  Every plain host line that follows (until
+    ``:remote-ping-end``) is automatically wrapped as
+    ``:remote-ping [ssh-opts] <relay> <host>``.  Only valid inside a hosts file.
 
-``:ssh-end``
-    Close the current ``:ssh-begin`` block.  Only valid inside a
+``:remote-ping-end``
+    Close the current ``:remote-ping-begin`` block.  Only valid inside a
     hosts file.
 
 Help
@@ -622,7 +622,7 @@ Format
     for named) in body lines are substituted with the value produced by
     brace group *N* of the expanded pattern.  ``$0`` / ``${0}`` is the
     entire expanded string.  Body lines without any back-reference are
-    included only once.  ``:for`` may appear inside an ``:ssh-begin`` block.
+    included only once.  ``:for`` may appear inside a ``:remote-ping-begin`` block.
 
 ``:done``
     Close the current ``:for`` loop.  If the file ends without a ``:done``
@@ -770,6 +770,20 @@ Format
         :prog-options ssh restricted.example.com  --disable
         :prog-options ssh 1.1.1.1                 --disable
 
+    When there are many rules for one program, the block form avoids
+    repeating the program name on every line::
+
+        :prog-options-begin ssh
+          *.internal.example.com  -o ProxyJump=bastion
+          *-router                -l admin
+          *-comm-mod              -l root
+          restricted.example.com  --disable
+        :prog-options-end
+
+    Each inner line is ``<glob> [opts|--disable]`` — identical to the
+    last two arguments of the inline form.  The inline form continues
+    to work; the block form is purely syntactic sugar.
+
     Additional forms:
 
     ``:prog-options <prog> <glob>``
@@ -781,6 +795,16 @@ Format
     ``:prog-options``
         List all rules for all programs.
 
+``:prog-options-begin <prog>``
+    Open a :prog-options block for *prog*.  Every non-directive line
+    until ``:prog-options-end`` is treated as ``<glob> [opts|--disable]``
+    and applied as ``:prog-options <prog> <glob> [opts]``.
+    Only valid inside a hosts file.
+
+``:prog-options-end``
+    Close the current ``:prog-options-begin`` block.
+    Only valid inside a hosts file.
+
 ``c`` hotkey (SSH connect)
 --------------------------
 
@@ -790,12 +814,12 @@ pre-fills the command line for editing and executes after **Enter**.
 The default ``c`` binding behaves as follows:
 
 - For ``SshPingMonitor`` hosts (those that have an SSH destination
-  ``%d``, e.g. hosts added via ``:ssh`` or ``:ssh-begin``)::
+  ``%d``, e.g. hosts added via ``:remote-ping`` or ``:remote-ping-begin``)::
 
       :mux ssh%{j? -J %{j: -J }} %d
 
   This reconnects to the SSH gateway, automatically appending any
-  ``-J`` jump-host flags that were used in the original ``:ssh``
+  ``-J`` jump-host flags that were used in the original ``:remote-ping``
   directive.
 
 - For plain ICMP/TCP hosts::
@@ -898,7 +922,7 @@ user requires login authentication.
 
 Security features in kiosk mode:
 
-- All SSH connections (both monitoring via ``:ssh`` and interactive via
+- All SSH connections (both monitoring via ``:remote-ping`` and interactive via
   ``c``) prepend ``-F none -o IdentityFile=none -o IdentitiesOnly=yes``
   to ignore ``~/.ssh/`` entirely.
 - If ``/etc/ping-bulk/id_ed25519`` exists it is used as the sole
@@ -1277,7 +1301,7 @@ Run an executable hosts file directly::
 
 Monitor remote hosts via an SSH jump host::
 
-    :ssh -J bastion.example.com ops@remote 10.10.0.{1..8}
+    :remote-ping -J bastion.example.com ops@remote 10.10.0.{1..8}
 
 
 FILES

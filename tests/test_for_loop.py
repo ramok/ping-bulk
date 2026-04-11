@@ -8,8 +8,8 @@ Covers:
   - unclosed :for at EOF  → implicit :done (hosts produced, no error)
   - :done without :for    → error entry
   - nested :for           → error entry
-  - :ssh-begin/:ssh-end inside :for → error entries
-  - :for inside :ssh-begin block    → SSH commands emitted
+  - :remote-ping-begin/:remote-ping-end inside :for → error entries
+  - :for inside :remote-ping-begin block    → SSH commands emitted
   - section headers (## / :title) inside :for, with and without backrefs
   - comment lines (#) inside :for body are skipped
   - generic commands (:cmd …) inside :for body
@@ -500,10 +500,10 @@ class TestForLoopErrors:
         )
 
     def test_ssh_begin_inside_for_produces_error(self, pb, tmp_path):
-        """:ssh-begin inside a :for body produces an error entry."""
+        """:remote-ping-begin inside a :for body produces an error entry."""
         content = """\
             :for dc{1,2}
-            :ssh-begin user@dc$1
+            :remote-ping-begin user@dc$1
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -512,15 +512,15 @@ class TestForLoopErrors:
         assert len(error_entries) >= 1, (
             f"Expected at least one error; got {entries!r}"
         )
-        assert any('ssh-begin' in v.lower() for _, v in error_entries), (
-            f"Error should mention 'ssh-begin'; got {error_entries!r}"
+        assert any('remote-ping-begin' in v.lower() for _, v in error_entries), (
+            f"Error should mention 'remote-ping-begin'; got {error_entries!r}"
         )
 
     def test_ssh_end_inside_for_produces_error(self, pb, tmp_path):
-        """:ssh-end inside a :for body produces an error entry."""
+        """:remote-ping-end inside a :for body produces an error entry."""
         content = """\
             :for dc{1,2}
-            :ssh-end
+            :remote-ping-end
             :done
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
@@ -529,8 +529,8 @@ class TestForLoopErrors:
         assert len(error_entries) >= 1, (
             f"Expected at least one error; got {entries!r}"
         )
-        assert any('ssh-end' in v.lower() for _, v in error_entries), (
-            f"Error should mention 'ssh-end'; got {error_entries!r}"
+        assert any('remote-ping-end' in v.lower() for _, v in error_entries), (
+            f"Error should mention 'remote-ping-end'; got {error_entries!r}"
         )
 
     def test_invalid_brace_in_for_pattern_produces_error(self, pb, tmp_path):
@@ -553,24 +553,24 @@ class TestForLoopErrors:
 # ===========================================================================
 
 class TestForLoopInsideSshBlock:
-    """:for loop inside an :ssh-begin / :ssh-end block."""
+    """:for loop inside an :remote-ping-begin / :remote-ping-end block."""
 
     def test_for_inside_ssh_block_emits_ssh_commands(self, pb, tmp_path):
-        """Host lines with back-references inside :for / :ssh-begin emit :ssh commands."""
+        """Host lines with back-references inside :for / :remote-ping-begin emit :remote-ping commands."""
         content = """\
-            :ssh-begin user@gateway
+            :remote-ping-begin user@gateway
             :for node{1,2}
             192.168.1.$1
             :done
-            :ssh-end
+            :remote-ping-end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
 
-        assert ':ssh user@gateway 192.168.1.1' in cmd_entries, (
+        assert ':remote-ping user@gateway 192.168.1.1' in cmd_entries, (
             f"Expected SSH command for node1; got {cmd_entries!r}"
         )
-        assert ':ssh user@gateway 192.168.1.2' in cmd_entries, (
+        assert ':remote-ping user@gateway 192.168.1.2' in cmd_entries, (
             f"Expected SSH command for node2; got {cmd_entries!r}"
         )
         # No 'host' entries should be produced — all go through SSH
@@ -581,19 +581,19 @@ class TestForLoopInsideSshBlock:
     def test_for_inside_ssh_block_deduplication(self, pb, tmp_path):
         """Duplicate SSH hosts from :for are warned and deduplicated."""
         content = """\
-            :ssh-begin jump@bastion
+            :remote-ping-begin jump@bastion
             :for group{1,1,2}
             app$1.internal
             :done
-            :ssh-end
+            :remote-ping-end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
         warn_entries = [v for k, v in entries if k == 'warn']
 
         # app1.internal appears twice (group {1,1} → same host); app2.internal once
-        ssh1 = ':ssh jump@bastion app1.internal'
-        ssh2 = ':ssh jump@bastion app2.internal'
+        ssh1 = ':remote-ping jump@bastion app1.internal'
+        ssh2 = ':remote-ping jump@bastion app2.internal'
         assert cmd_entries.count(ssh1) == 1, (
             f"app1.internal SSH command should appear once; got {cmd_entries!r}"
         )
@@ -607,17 +607,17 @@ class TestForLoopInsideSshBlock:
     def test_no_backref_inside_for_inside_ssh_block(self, pb, tmp_path):
         """No-backref host in :for inside SSH block: added once as SSH command."""
         content = """\
-            :ssh-begin user@gw
+            :remote-ping-begin user@gw
             :for zone{1,2}
             fixed.host
             :done
-            :ssh-end
+            :remote-ping-end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         cmd_entries = [v for k, v in entries if k == 'cmd']
         warn_entries = [v for k, v in entries if k == 'warn']
 
-        ssh_cmd = ':ssh user@gw fixed.host'
+        ssh_cmd = ':remote-ping user@gw fixed.host'
         assert cmd_entries.count(ssh_cmd) == 1, (
             f"fixed.host SSH command should appear once; got {cmd_entries!r}"
         )
@@ -773,11 +773,11 @@ class TestForLoopMixed:
         are NOT considered duplicates (different dedup keys)."""
         content = """\
             target.host
-            :ssh-begin user@gw
+            :remote-ping-begin user@gw
             :for x{1}
             target.host
             :done
-            :ssh-end
+            :remote-ping-end
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         host_entries = [v for k, v in entries if k == 'host']
@@ -788,7 +788,7 @@ class TestForLoopMixed:
             f"Expected one plain host; got {host_entries!r}"
         )
         # The SSH command uses 'target.host' as the no-backref line → warn, added once
-        ssh_cmd = ':ssh user@gw target.host'
+        ssh_cmd = ':remote-ping user@gw target.host'
         assert ssh_cmd in cmd_entries, (
             f"Expected SSH command; got {cmd_entries!r}"
         )

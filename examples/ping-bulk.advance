@@ -171,28 +171,34 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # ── Remote monitoring over SSH ─────────────────────────────────────────────
 # Ping hosts on a remote network segment as seen from a remote server.
 # Requires passwordless SSH access (key or agent).
-# Nested sections work inside :ssh-begin blocks too.
+# Nested sections work inside :remote-ping-begin blocks too.
 
 ## Remote sites
 ### Remote site A (via ssh jump)
-:ssh-begin -J bastion.example.com ops@remote-a
+:remote-ping-begin -J bastion.example.com ops@remote-a
     10.10.0.{1..3}
-:ssh-end
+:remote-ping-end
 
 ### Remote site B
-:ssh ops@remote-b 10.20.0.1
-:ssh ops@remote-b 10.20.0.{2..3}
+:remote-ping ops@remote-b 10.20.0.1
+:remote-ping ops@remote-b 10.20.0.{2..3}
 
 # ── :prog-options ─────────────────────────────────────────────────────────
 # Map hostname globs to SSH flags injected automatically by :mux.
 # Rules are evaluated in order; last match wins.
 #
-# Syntax:
-#   :prog-options <prog> <glob> <opts>   — add/replace rule
+# Inline syntax:
+#   :prog-options <prog> <glob> <opts>    — add/replace rule
 #   :prog-options <prog> <glob> --disable — disable prog for matching hosts
-#   :prog-options <prog> <glob>          — remove rule for that pattern
-#   :prog-options <prog>                 — list rules for that program
-#   :prog-options                        — list all rules
+#   :prog-options <prog> <glob>           — remove rule for that pattern
+#   :prog-options <prog>                  — list rules for that program
+#   :prog-options                         — list all rules
+#
+# Block syntax (handy when many rules share one program):
+#   :prog-options-begin <prog>
+#     <glob> <opts>
+#     ...
+#   :prog-options-end
 #
 # Options are auto-injected when :mux <prog> is run from a key binding.
 
@@ -213,7 +219,6 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 
 # ── Key bindings ──────────────────────────────────────────────────────────
 # :bind-key assigns a command (or chain of commands) to a key sequence.
-# (:bindkey is accepted as a backward-compatible alias.)
 # Vim-like notation: <C-x> = Ctrl+x, <CR> = Enter, <Space>, <Up>, etc.
 # Multi-key sequences work naturally: za, gg, gt, etc.
 #

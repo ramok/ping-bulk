@@ -5,7 +5,7 @@ Covers:
   - get_display_name() for all three dns_mode values
   - resolve_dns() targeting the ping host (not the SSH destination)
   - _build_ping_cmd() output
-  - creation via Application._cmd_ssh() (the ':ssh' command)
+  - creation via Application._cmd_remote_ping() (the ':ssh' command)
 """
 
 import pytest
@@ -210,42 +210,42 @@ class TestSshPingMonitorBuildPingCmd:
 class TestSshPingMonitorViaCmd:
     def test_cmd_ssh_creates_monitor(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('user@remote target.host')
+        app._cmd_remote_ping('user@remote target.host')
         assert len(app.monitors) == 1
         assert isinstance(app.monitors[0], pb.SshPingMonitor)
 
     def test_cmd_ssh_ping_host_label(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('user@remote target.host')
+        app._cmd_remote_ping('user@remote target.host')
         assert app.monitors[0]._ping_host_label == 'target.host'
 
     def test_cmd_ssh_ssh_args(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('user@remote target.host')
+        app._cmd_remote_ping('user@remote target.host')
         assert app.monitors[0]._ssh_args == ['user@remote']
 
     def test_cmd_ssh_jump_host(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('-J bastion user@remote target.host')
+        app._cmd_remote_ping('-J bastion user@remote target.host')
         m = app.monitors[0]
         assert m._ssh_args == ['-J', 'bastion', 'user@remote']
         assert m._ping_host == 'target.host'
 
     def test_cmd_ssh_too_few_args_logs_error(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('user@remote')
+        app._cmd_remote_ping('user@remote')
         assert len(app.monitors) == 0
         assert any('usage' in e for e in app.events)
 
     def test_cmd_ssh_no_args_logs_error(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('')
+        app._cmd_remote_ping('')
         assert len(app.monitors) == 0
         assert any('usage' in e for e in app.events)
 
     def test_cmd_ssh_brace_expansion(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('user@remote target.{1,2}')
+        app._cmd_remote_ping('user@remote target.{1,2}')
         assert len(app.monitors) == 2
         hosts = [m._ping_host for m in app.monitors]
         assert 'target.1' in hosts
@@ -255,7 +255,7 @@ class TestSshPingMonitorViaCmd:
         """When a :resolv mapping exists, :ssh uses the resolved IP as ping_host."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.0.0.5 web01')
-        app._cmd_ssh('user@remote web01')
+        app._cmd_remote_ping('user@remote web01')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ping_host == '10.0.0.5'
@@ -265,7 +265,7 @@ class TestSshPingMonitorViaCmd:
         """When :resolv mapping exists, :ssh user@hostname resolves hostname to IP."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('192.168.1.10 ps-supervisor')
-        app._cmd_ssh('komar@ps-supervisor localhost')
+        app._cmd_remote_ping('komar@ps-supervisor localhost')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         # SSH destination should be resolved to user@IP
@@ -277,7 +277,7 @@ class TestSshPingMonitorViaCmd:
         """When :resolv mapping exists for bare hostname (no @), it should be resolved."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('192.168.1.10 ps-supervisor')
-        app._cmd_ssh('ps-supervisor localhost')
+        app._cmd_remote_ping('ps-supervisor localhost')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         # SSH destination should be resolved to IP (bare hostname)
@@ -286,7 +286,7 @@ class TestSshPingMonitorViaCmd:
 
     def test_cmd_ssh_monitor_added_to_entries(self, pb, tmp_path):
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('user@remote target.host')
+        app._cmd_remote_ping('user@remote target.host')
         assert app.monitors[0] in app.entries
 
 
@@ -299,7 +299,7 @@ class TestSshProxyJumpResolution:
         """Jump host specified with -J should be resolved via :resolv mapping."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion')
-        app._cmd_ssh('-J bastion user@remote target.host')
+        app._cmd_remote_ping('-J bastion user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', '10.10.1.100', 'user@remote']
@@ -308,7 +308,7 @@ class TestSshProxyJumpResolution:
         """Jump host with user@host format should preserve username."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion')
-        app._cmd_ssh('-J admin@bastion user@remote target.host')
+        app._cmd_remote_ping('-J admin@bastion user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', 'admin@10.10.1.100', 'user@remote']
@@ -318,7 +318,7 @@ class TestSshProxyJumpResolution:
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion1')
         app._cmd_resolv('10.10.1.101 bastion2')
-        app._cmd_ssh('-J bastion1,bastion2 user@remote target.host')
+        app._cmd_remote_ping('-J bastion1,bastion2 user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', '10.10.1.100,10.10.1.101', 'user@remote']
@@ -328,7 +328,7 @@ class TestSshProxyJumpResolution:
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion1')
         app._cmd_resolv('10.10.1.101 bastion2')
-        app._cmd_ssh('-J user@bastion1,bastion2 user@remote target.host')
+        app._cmd_remote_ping('-J user@bastion1,bastion2 user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', 'user@10.10.1.100,10.10.1.101', 'user@remote']
@@ -336,7 +336,7 @@ class TestSshProxyJumpResolution:
     def test_cmd_ssh_resolv_J_option_unmapped_passthrough(self, pb, tmp_path):
         """Unmapped jump host should pass through unchanged."""
         app = make_app(pb, tmp_path)
-        app._cmd_ssh('-J unmapped-bastion user@remote target.host')
+        app._cmd_remote_ping('-J unmapped-bastion user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', 'unmapped-bastion', 'user@remote']
@@ -345,7 +345,7 @@ class TestSshProxyJumpResolution:
         """-oProxyJump=host (no space) should be resolved."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion')
-        app._cmd_ssh('-oProxyJump=bastion user@remote target.host')
+        app._cmd_remote_ping('-oProxyJump=bastion user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-oProxyJump=10.10.1.100', 'user@remote']
@@ -354,7 +354,7 @@ class TestSshProxyJumpResolution:
         """-o ProxyJump=host (with space) should be resolved."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion')
-        app._cmd_ssh('-o ProxyJump=bastion user@remote target.host')
+        app._cmd_remote_ping('-o ProxyJump=bastion user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-o', 'ProxyJump=10.10.1.100', 'user@remote']
@@ -364,7 +364,7 @@ class TestSshProxyJumpResolution:
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion1')
         app._cmd_resolv('10.10.1.101 bastion2')
-        app._cmd_ssh('-o ProxyJump=bastion1,bastion2 user@remote target.host')
+        app._cmd_remote_ping('-o ProxyJump=bastion1,bastion2 user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-o', 'ProxyJump=10.10.1.100,10.10.1.101', 'user@remote']
@@ -373,7 +373,7 @@ class TestSshProxyJumpResolution:
         """-o ProxyJump=user@host should preserve username."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion')
-        app._cmd_ssh('-o ProxyJump=admin@bastion user@remote target.host')
+        app._cmd_remote_ping('-o ProxyJump=admin@bastion user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-o', 'ProxyJump=admin@10.10.1.100', 'user@remote']
@@ -383,7 +383,7 @@ class TestSshProxyJumpResolution:
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion')
         app._cmd_resolv('192.168.1.10 ps-supervisor')
-        app._cmd_ssh('-J bastion ps-supervisor localhost')
+        app._cmd_remote_ping('-J bastion ps-supervisor localhost')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', '10.10.1.100', '192.168.1.10']
@@ -394,7 +394,7 @@ class TestSshProxyJumpResolution:
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion')
         app._cmd_resolv('192.168.1.10 ps-supervisor')
-        app._cmd_ssh('-J admin@bastion komar@ps-supervisor localhost')
+        app._cmd_remote_ping('-J admin@bastion komar@ps-supervisor localhost')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', 'admin@10.10.1.100', 'komar@192.168.1.10']
@@ -404,7 +404,7 @@ class TestSshProxyJumpResolution:
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion1')
         app._cmd_resolv('10.10.1.101 bastion2')
-        app._cmd_ssh('-J bastion1, bastion2 user@remote target.host')
+        app._cmd_remote_ping('-J bastion1, bastion2 user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', '10.10.1.100,10.10.1.101', 'user@remote']
@@ -415,7 +415,7 @@ class TestSshProxyJumpResolution:
         app._cmd_resolv('10.10.1.100 bastion1')
         app._cmd_resolv('10.10.1.101 bastion2')
         # Note: SSH doesn't actually support multiple -J but we handle it anyway
-        app._cmd_ssh('-J bastion1 -J bastion2 user@remote target.host')
+        app._cmd_remote_ping('-J bastion1 -J bastion2 user@remote target.host')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-J', '10.10.1.100', '-J', '10.10.1.101', 'user@remote']
@@ -424,7 +424,7 @@ class TestSshProxyJumpResolution:
         """-J at end of args (no value) should be handled safely without crash."""
         app = make_app(pb, tmp_path)
         # This is malformed but shouldn't crash
-        app._cmd_ssh('user@remote target.host -J')
+        app._cmd_remote_ping('user@remote target.host -J')
         # The parsing treats last token '-J' as ping_host_pattern, 'target.host' as ssh_dest
         # This creates a monitor that will ping '-J' (weird but safe - no crash)
         assert len(app.monitors) == 1
@@ -436,7 +436,7 @@ class TestSshProxyJumpResolution:
         """-o with non-ProxyJump option should pass through unchanged."""
         app = make_app(pb, tmp_path)
         app._cmd_resolv('192.168.1.10 ps-supervisor')
-        app._cmd_ssh('-o StrictHostKeyChecking=no ps-supervisor localhost')
+        app._cmd_remote_ping('-o StrictHostKeyChecking=no ps-supervisor localhost')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == ['-o', 'StrictHostKeyChecking=no', '192.168.1.10']
@@ -446,7 +446,7 @@ class TestSshProxyJumpResolution:
         app = make_app(pb, tmp_path)
         app._cmd_resolv('10.10.1.100 bastion')
         app._cmd_resolv('192.168.1.10 ps-supervisor')
-        app._cmd_ssh('-o ConnectTimeout=10 -J bastion -p 2222 ps-supervisor localhost')
+        app._cmd_remote_ping('-o ConnectTimeout=10 -J bastion -p 2222 ps-supervisor localhost')
         assert len(app.monitors) == 1
         m = app.monitors[0]
         assert m._ssh_args == [
