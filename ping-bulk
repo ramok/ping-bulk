@@ -698,6 +698,14 @@ _FATAL_SSH_ERRORS = (
     'no supported authentication methods available',
 )
 
+# First words that strongly suggest a mistyped directive (missing ':').
+# Used to produce a helpful warning when a host line contains spaces.
+_DIRECTIVE_KEYWORDS = frozenset({
+    'if', 'elif', 'else', 'end', 'for', 'with', 'let',
+    'resolv', 'resolv-port', 'title', 'title2', 'title3',
+    'remote-ping', 'source', 'log', 'edit', 'bind-key', 'section',
+})
+
 
 def _strip_inline_comment(line):
     """Strip an inline comment from *line* and return ``(main, comment)``.
@@ -2229,6 +2237,15 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                     label_tmpl = host_line[_m_label.end():] if _m_label else None
                     if _m_label:
                         host_line = host_line[:_m_label.start()].rstrip()
+                    # A valid hostname/IP pattern never contains spaces (checked after
+                    # the inline ## label has been stripped so labels don't false-fire).
+                    if ' ' in host_line:
+                        first = host_line.split(None, 1)[0].lower()
+                        hint = (f" — did you mean ':{host_line.split(None, 1)[0]}'?"
+                                if first in _DIRECTIVE_KEYWORDS else '')
+                        entries.append(('warn',
+                            f'host line with spaces ignored{hint}: {host_line!r}'))
+                        continue
                     if _has_backref(host_line) or _line_was_dynamic:
                         # Substitute for-loop back-references then expand remaining brace groups.
                         expanded_tmpl = _apply_backref(host_line, captures, full_str)
@@ -2569,6 +2586,17 @@ class _HostsParser:
             # ── Host line ─────────────────────────────────────────────────
             text = _expand_let_vars(text, self.variables)
             if not text.strip():
+                continue
+            # A valid hostname/IP never contains spaces.  If the line does,
+            # it is almost certainly a directive with a missing ':'.
+            # Emit a warning and skip — but only for real host lines, not
+            # :prog-options body lines which legitimately contain spaces.
+            if ' ' in text and not (with_stack and with_stack[-1][0] == 'prog-options'):
+                first = text.split(None, 1)[0].lower()
+                hint = (f" — did you mean ':{text.split(None, 1)[0]}'?"
+                        if first in _DIRECTIVE_KEYWORDS else '')
+                entries.append(('warn',
+                    f'host line with spaces ignored{hint}: {text!r}'))
                 continue
             if with_stack:
                 w_type, w_args = with_stack[-1]

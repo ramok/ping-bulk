@@ -384,3 +384,49 @@ class TestSemicolonSeparator:
         assert entries == [('host', 'host1'), ('host', 'host2')], (
             f"trailing/double ; produced unexpected entries; got {entries!r}"
         )
+
+
+class TestSpacedHostWarning:
+    """Host lines containing spaces are not valid hostnames — should warn and skip."""
+
+    def test_mistyped_if_directive_warns(self, pb, tmp_path):
+        """'if cond' without ':' emits a warning mentioning ':if' and skips the line."""
+        content = "if 1 in 1,2\n1.1.1.1\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [v for k, v in entries if k == 'warn']
+        hosts = [v for k, v in entries if k == 'host']
+        assert any(':if' in w for w in warns), f"expected ':if' hint in warning; got {warns!r}"
+        assert '1.1.1.1' in hosts, "subsequent host should still be parsed"
+
+    def test_mistyped_for_directive_warns(self, pb, tmp_path):
+        """'for pattern' without ':' emits a warning mentioning ':for'."""
+        content = "for host{1,2}\n1.1.1.1\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [v for k, v in entries if k == 'warn']
+        assert any(':for' in w for w in warns), f"expected ':for' hint; got {warns!r}"
+
+    def test_spaced_line_unknown_keyword_warns(self, pb, tmp_path):
+        """Any host line with spaces (non-directive first word) warns and skips."""
+        content = "some invalid host line\n1.1.1.1\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [v for k, v in entries if k == 'warn']
+        hosts = [v for k, v in entries if k == 'host']
+        assert warns, "expected a warning for spaced host line"
+        assert '1.1.1.1' in hosts
+
+    def test_prog_options_body_spaces_not_warned(self, pb, tmp_path):
+        """:with prog-options body lines with spaces are NOT warned (they're valid)."""
+        content = ":with prog-options ssh\n  *-router -l admin\n:end\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [v for k, v in entries if k == 'warn']
+        errors = [v for k, v in entries if k == 'error']
+        assert not warns and not errors, f"unexpected warn/error: {warns!r} {errors!r}"
+
+    def test_normal_hosts_unaffected(self, pb, tmp_path):
+        """Regular hostnames and IPs without spaces are not warned."""
+        content = "8.8.8.8\nhostname.local\n10.0.0.{1,2}\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [v for k, v in entries if k == 'warn']
+        hosts = [v for k, v in entries if k == 'host']
+        assert not warns
+        assert len(hosts) == 4
