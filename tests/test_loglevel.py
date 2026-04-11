@@ -1,0 +1,356 @@
+"""Unit tests for the log level system.
+
+Covers:
+  - EventEntry: level, category, text fields; string-delegation behaviour
+  - _CATEGORY_LEVELS: category → level inference in add_event
+  - add_event: explicit level= override
+  - draw_events: display-time filtering by self.loglevel
+  - _event_color_attr: colour selection per level/category
+  - _cmd_loglevel: :set log-level command
+  - -v / -q CLI flag level offset (via _parse_args-style test)
+  - _save_config / config round-trip for log-level
+"""
+
+import os
+import pytest
+from unittest.mock import patch
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_app(pb, tmp_path, config=''):
+    cfg = str(tmp_path / 'ping-bulk' / 'config')
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    with open(cfg, 'w') as f:
+        f.write(config)
+    with patch.object(pb, '_config_path', return_value=cfg):
+        app = pb.Application([('host', '127.0.0.1')])
+    return app, cfg
+
+
+# ===========================================================================
+# EventEntry
+# ===========================================================================
+
+class TestEventEntry:
+
+    def test_fields(self, pb):
+        e = pb.EventEntry(pb.LEVEL_INFO, 'cmd', 'timestamp   cmd   hello')
+        assert e.level    == pb.LEVEL_INFO
+        assert e.category == 'cmd'
+        assert e.text     == 'timestamp   cmd   hello'
+
+    def test_contains_delegates_to_text(self, pb):
+        e = pb.EventEntry(pb.LEVEL_NORMAL, 'host', 'ts   myhost   host down')
+        assert 'host down' in e
+        assert 'xyz' not in e
+
+    def test_lower_delegates_to_text(self, pb):
+        e = pb.EventEntry(pb.LEVEL_NORMAL, 'cmd', 'ts   CMD   ERROR')
+        assert 'error' in e.lower()
+
+    def test_startswith_delegates_to_text(self, pb):
+        e = pb.EventEntry(pb.LEVEL_INFO, 'cmd', '2026-')
+        assert e.startswith('2026-')
+
+    def test_eq_string(self, pb):
+        e = pb.EventEntry(pb.LEVEL_QUIET, 'host', 'exact text')
+        assert e == 'exact text'
+        assert e != 'other text'
+
+    def test_in_list_with_str(self, pb):
+        e = pb.EventEntry(pb.LEVEL_QUIET, 'host', 'needle text')
+        lst = [e]
+        assert 'needle text' in lst   # uses e.__eq__(str)
+
+    def test_str_returns_text(self, pb):
+        e = pb.EventEntry(pb.LEVEL_DEBUG, 'bind-key', 'the text')
+        assert str(e) == 'the text'
+
+
+# ===========================================================================
+# Level constants
+# ===========================================================================
+
+class TestLevelConstants:
+
+    def test_levels_ordered(self, pb):
+        assert pb.LEVEL_QUIET < pb.LEVEL_NORMAL < pb.LEVEL_INFO < pb.LEVEL_DEBUG
+
+    def test_quiet_is_zero(self, pb):
+        assert pb.LEVEL_QUIET == 0
+
+    def test_debug_is_three(self, pb):
+        assert pb.LEVEL_DEBUG == 3
+
+
+# ===========================================================================
+# Category level inference
+# ===========================================================================
+
+class TestCategoryLevels:
+
+    def test_host_event_is_quiet(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('10.0.0.1', 'host down')
+        e = list(app.events)[-1]
+        assert e.level == pb.LEVEL_QUIET
+
+    def test_cmd_event_is_info(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'fold: missing action argument')
+        e = list(app.events)[-1]
+        assert e.level == pb.LEVEL_INFO
+
+    def test_bind_key_event_is_debug(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('bind-key', 't → :mux mtr %i')
+        e = list(app.events)[-1]
+        assert e.level == pb.LEVEL_DEBUG
+
+    def test_warn_event_is_normal(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('warn', 'something wrong')
+        e = list(app.events)[-1]
+        assert e.level == pb.LEVEL_NORMAL
+
+    def test_resolv_event_is_normal(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('resolv', 'no monitor matched')
+        e = list(app.events)[-1]
+        assert e.level == pb.LEVEL_NORMAL
+
+    def test_explicit_level_overrides(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'some msg', level=pb.LEVEL_DEBUG)
+        e = list(app.events)[-1]
+        assert e.level == pb.LEVEL_DEBUG
+
+    def test_host_error_is_normal(self, pb, tmp_path):
+        """Monitor process errors use explicit level=LEVEL_NORMAL."""
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('10.0.0.1', 'error: unreachable', level=pb.LEVEL_NORMAL)
+        e = list(app.events)[-1]
+        assert e.level == pb.LEVEL_NORMAL
+
+    def test_seen_marker_is_quiet(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.mark_seen()
+        e = list(app.events)[-1]
+        assert e.level == pb.LEVEL_QUIET
+        assert e.category == 'seen'
+
+
+# ===========================================================================
+# draw_events filtering
+# ===========================================================================
+
+class TestDrawEventsFiltering:
+
+    def _add_entries(self, pb, app):
+        app.add_event('10.0.0.1', 'host down')                           # QUIET
+        app.add_event('resolv', 'no monitor matched')                     # NORMAL
+        app.add_event('cmd', 'fold toggled')                              # INFO
+        app.add_event('bind-key', 't → :mux mtr %i')                     # DEBUG
+
+    def _visible(self, pb, app):
+        """Return list of texts visible at current loglevel."""
+        return [e.text for e in app.events if e.level <= app.loglevel]
+
+    def test_default_loglevel_is_normal(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        assert app.loglevel == pb.LEVEL_NORMAL
+
+    def test_quiet_hides_warn_and_info(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        self._add_entries(pb, app)
+        app.loglevel = pb.LEVEL_QUIET
+        visible = self._visible(pb, app)
+        assert any('host down' in t for t in visible)
+        assert not any('no monitor matched' in t for t in visible)
+        assert not any('fold toggled' in t for t in visible)
+        assert not any('mux mtr' in t for t in visible)
+
+    def test_normal_shows_warn_hides_info(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        self._add_entries(pb, app)
+        app.loglevel = pb.LEVEL_NORMAL
+        visible = self._visible(pb, app)
+        assert any('host down' in t for t in visible)
+        assert any('no monitor matched' in t for t in visible)
+        assert not any('fold toggled' in t for t in visible)
+        assert not any('mux mtr' in t for t in visible)
+
+    def test_info_shows_cmd_hides_debug(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        self._add_entries(pb, app)
+        app.loglevel = pb.LEVEL_INFO
+        visible = self._visible(pb, app)
+        assert any('fold toggled' in t for t in visible)
+        assert not any('mux mtr' in t for t in visible)
+
+    def test_debug_shows_all(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        self._add_entries(pb, app)
+        app.loglevel = pb.LEVEL_DEBUG
+        visible = self._visible(pb, app)
+        assert any('mux mtr' in t for t in visible)
+
+    def test_switch_level_reveals_history(self, pb, tmp_path):
+        """Switching loglevel up reveals previously hidden entries."""
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'some cmd output')
+        app.loglevel = pb.LEVEL_NORMAL
+        assert not any('some cmd output' in t for t in self._visible(pb, app))
+        app.loglevel = pb.LEVEL_INFO
+        assert any('some cmd output' in t for t in self._visible(pb, app))
+
+
+# ===========================================================================
+# _event_color_attr
+# ===========================================================================
+
+class TestEventColorAttr:
+
+    def _entry(self, pb, level, category, msg='some msg'):
+        text = f'ts   {category}   {msg}'
+        return pb.EventEntry(level, category, text)
+
+    def test_debug_gets_dim(self, pb):
+        import curses
+        e = self._entry(pb, pb.LEVEL_DEBUG, 'bind-key', 't → :mux')
+        assert pb._event_color_attr(e) == curses.A_DIM
+
+    def test_quiet_gets_no_color(self, pb):
+        e = self._entry(pb, pb.LEVEL_QUIET, '10.0.0.1', 'host down')
+        assert pb._event_color_attr(e) == 0
+
+    def test_info_gets_no_color(self, pb):
+        e = self._entry(pb, pb.LEVEL_INFO, 'cmd', 'fold toggled')
+        assert pb._event_color_attr(e) == 0
+
+    def test_normal_error_gets_red(self, pb):
+        # Use side_effect so we can distinguish color pair numbers
+        with patch('curses.color_pair', side_effect=lambda n: n):
+            e = self._entry(pb, pb.LEVEL_NORMAL, 'save', 'error: disk full')
+            assert pb._event_color_attr(e) == 2   # pair 2 = red
+
+    def test_normal_error_msg_gets_red(self, pb):
+        with patch('curses.color_pair', side_effect=lambda n: n):
+            e = self._entry(pb, pb.LEVEL_NORMAL, '10.0.0.1', 'error: unreachable')
+            assert pb._event_color_attr(e) == 2
+
+    def test_normal_warning_gets_yellow(self, pb):
+        with patch('curses.color_pair', side_effect=lambda n: n):
+            e = self._entry(pb, pb.LEVEL_NORMAL, 'resolv', 'no monitor matched')
+            assert pb._event_color_attr(e) == 3   # pair 3 = yellow
+
+
+# ===========================================================================
+# :set log-level command
+# ===========================================================================
+
+class TestCmdLoglevel:
+
+    def test_set_quiet(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set log-level quiet')
+        assert app.loglevel == pb.LEVEL_QUIET
+
+    def test_set_info(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set log-level info')
+        assert app.loglevel == pb.LEVEL_INFO
+
+    def test_set_debug(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set log-level debug')
+        assert app.loglevel == pb.LEVEL_DEBUG
+
+    def test_set_normal(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.loglevel = pb.LEVEL_DEBUG
+        app._dispatch_cmd(':set log-level normal')
+        assert app.loglevel == pb.LEVEL_NORMAL
+
+    def test_invalid_value_logs_error(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set log-level verbose')
+        assert any('unknown value' in e for e in app.events)
+
+    def test_no_args_shows_current(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.loglevel = pb.LEVEL_INFO
+        app._dispatch_cmd(':set log-level')
+        assert any('info' in e for e in app.events)
+
+    def test_set_resets_log_offset(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.log_offset = 10
+        app._dispatch_cmd(':set log-level quiet')
+        assert app.log_offset == 0
+
+
+# ===========================================================================
+# Config save/load round-trip
+# ===========================================================================
+
+class TestLogLevelConfig:
+
+    def test_saved_to_config(self, pb, tmp_path):
+        app, cfg = _make_app(pb, tmp_path)
+        app.loglevel = pb.LEVEL_INFO
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app._save_config()
+        with open(cfg) as f:
+            text = f.read()
+        assert ':set log-level info' in text
+
+    def test_loaded_from_config(self, pb, tmp_path):
+        app, cfg = _make_app(pb, tmp_path, ':set log-level debug\n')
+        assert app.loglevel == pb.LEVEL_DEBUG
+
+    def test_default_level_not_changed_if_absent(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path, '')
+        assert app.loglevel == pb.LEVEL_NORMAL
+
+
+# ===========================================================================
+# CLI -v / -q flag offset
+# ===========================================================================
+
+class TestLogLevelCliFlags:
+    """Test that -v/-q correctly offset the base log level."""
+
+    def _apply(self, pb, log_level=None, verbose=0, quiet=0):
+        """Simulate what main() does when applying CLI args."""
+        level_names = {'quiet': pb.LEVEL_QUIET, 'normal': pb.LEVEL_NORMAL,
+                       'info': pb.LEVEL_INFO, 'debug': pb.LEVEL_DEBUG}
+        base = level_names.get(log_level, pb.LEVEL_NORMAL)
+        return max(pb.LEVEL_QUIET, min(pb.LEVEL_DEBUG, base + verbose - quiet))
+
+    def test_default_is_normal(self, pb):
+        assert self._apply(pb) == pb.LEVEL_NORMAL
+
+    def test_v_gives_info(self, pb):
+        assert self._apply(pb, verbose=1) == pb.LEVEL_INFO
+
+    def test_vv_gives_debug(self, pb):
+        assert self._apply(pb, verbose=2) == pb.LEVEL_DEBUG
+
+    def test_vvv_clamped_at_debug(self, pb):
+        assert self._apply(pb, verbose=10) == pb.LEVEL_DEBUG
+
+    def test_q_gives_quiet(self, pb):
+        assert self._apply(pb, quiet=1) == pb.LEVEL_QUIET
+
+    def test_qq_clamped_at_quiet(self, pb):
+        assert self._apply(pb, quiet=10) == pb.LEVEL_QUIET
+
+    def test_explicit_log_level_plus_v(self, pb):
+        assert self._apply(pb, log_level='quiet', verbose=1) == pb.LEVEL_NORMAL
+
+    def test_explicit_log_level_minus_q(self, pb):
+        assert self._apply(pb, log_level='info', quiet=1) == pb.LEVEL_NORMAL

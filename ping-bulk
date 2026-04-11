@@ -23,6 +23,79 @@ from collections import deque
 from datetime import datetime
 from threading import Thread
 
+# ── Event log levels ─────────────────────────────────────────────────────────
+
+LEVEL_QUIET  = 0   # host status changes only (up / down / recover)
+LEVEL_NORMAL = 1   # + warnings and errors  (default)
+LEVEL_INFO   = 2   # + cmd output, config, settings, resolv
+LEVEL_DEBUG  = 3   # + bind-key dispatch and all internal events
+
+# Maps well-known category strings → minimum level at which they appear.
+# Any category not listed here is treated as a host-monitor event → LEVEL_QUIET.
+_CATEGORY_LEVELS = {
+    # shown at NORMAL+
+    'warn':    LEVEL_NORMAL,
+    'save':    LEVEL_NORMAL,
+    'hosts':   LEVEL_NORMAL,
+    'resolv':  LEVEL_NORMAL,
+    # shown at INFO+
+    'cmd':               LEVEL_INFO,
+    'config':            LEVEL_INFO,
+    'log':               LEVEL_INFO,
+    'log-size':          LEVEL_INFO,
+    'history-size':      LEVEL_INFO,
+    'sync-history':      LEVEL_INFO,
+    'source':            LEVEL_INFO,
+    'multikey-timeout':  LEVEL_INFO,
+    # shown at DEBUG+
+    'bind-key':  LEVEL_DEBUG,
+}
+
+# Lightweight record stored in the events deque.
+class EventEntry:
+    """An entry in the event log deque.
+
+    Behaves like a string for ``in``, ``lower()``, ``startswith()``, and
+    equality checks so that existing code that treats events as plain text
+    continues to work transparently.
+    """
+    __slots__ = ('level', 'category', 'text')
+
+    def __init__(self, level, category, text):
+        self.level    = level
+        self.category = category
+        self.text     = text
+
+    # --- string-delegation helpers -------------------------------------------
+
+    def __contains__(self, item):
+        return item in self.text
+
+    def lower(self):
+        return self.text.lower()
+
+    def startswith(self, prefix):
+        return self.text.startswith(prefix)
+
+    def __str__(self):
+        return self.text
+
+    # Allow ``'substring' in event_list`` (list.__contains__ uses __eq__)
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return self.text == other
+        if isinstance(other, EventEntry):
+            return (self.level, self.category, self.text) == \
+                   (other.level, other.category, other.text)
+        return NotImplemented
+
+    def __hash__(self):
+        return hash((self.level, self.category, self.text))
+
+    def __repr__(self):
+        return (f"EventEntry(level={self.level!r}, "
+                f"category={self.category!r}, text={self.text!r})")
+
 # Stats column modes cycled with [s]; 'off' means hidden
 STATS_MODES = ['off', 'Down', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', 'All']
 
@@ -115,6 +188,9 @@ SET_PARAMS = [
     SetParam('multikey-timeout', '_cmd_multikey_timeout',
              ['0', '200', '500', '1000'],
              'ms to wait for follow-up key in multi-key binding (0 = wait forever)'),
+    SetParam('log-level', '_cmd_loglevel',
+             ['quiet', 'normal', 'info', 'debug'],
+             'event log verbosity (quiet=host status only, normal=+errors/warnings, info=+cmd/config, debug=all)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -2966,7 +3042,28 @@ _MUX_BACKENDS: dict[str, TerminalBackend] = {
 }
 
 
-def _resolve_mux_backend(preference: str = None) -> TerminalBackend | None:
+def _event_color_attr(entry: 'EventEntry') -> int:
+    """Return the curses attribute for displaying an event log entry.
+
+    Color rules:
+      LEVEL_QUIET  → 0  (host status changes — intentionally no color)
+      LEVEL_NORMAL → red for errors, yellow for warnings
+      LEVEL_INFO   → 0  (cmd/config output — default)
+      LEVEL_DEBUG+ → A_DIM
+    """
+    if entry.level >= LEVEL_DEBUG:
+        return curses.A_DIM
+    if entry.level != LEVEL_NORMAL:
+        return 0
+    # LEVEL_NORMAL: distinguish errors from warnings
+    parts = entry.text.split('   ', 2)
+    msg = parts[2].lstrip() if len(parts) >= 3 else ''
+    if entry.category == 'save' or msg.startswith('error:'):
+        return curses.color_pair(2)   # red
+    return curses.color_pair(3)       # yellow (warnings are normal-level non-errors)
+
+
+def _resolve_mux_backend(preference: str = None) -> 'TerminalBackend | None':
     """Return the TerminalBackend to use, or None if none is available.
 
     If already inside a specific multiplexer, always use that one.
@@ -3030,6 +3127,7 @@ class Application:
         self.sync_history = False  # align history bars to wall-clock time (off by default)
         self.log_size = 10000
         self.events = deque(maxlen=self.log_size)
+        self.loglevel = LEVEL_NORMAL   # LEVEL_QUIET/NORMAL/INFO/DEBUG
         self.dns_mode = 0      # index into DNS_MODES; 0 = off (as-is)
         self.stats_mode = 0    # index into STATS_MODES; 0 = off
         self.stats_custom = None  # list[str] of canonical stat names when in custom mode, else None
@@ -3124,16 +3222,24 @@ class Application:
             elif kind == 'error':
                 self.add_event("hosts", f"expansion error: {value}")
 
-    def add_event(self, host, message):
+    def add_event(self, category, message, level=None):
         """Add an event to the in-memory log and, if a log file is configured,
         append it immediately to that file.
 
+        category — the first-column label (a well-known category string such as
+                   'cmd', 'bind-key', or a host display name).
+        message  — the event text.
+        level    — explicit LEVEL_* constant; if None, inferred from category.
+
         Timestamp format: ISO 8601 with timezone offset (e.g. 2026-03-20T14:05:32+0200).
         """
+        if level is None:
+            level = _CATEGORY_LEVELS.get(category, LEVEL_QUIET)
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-        max_host_len = max((len(m.get_display_name(dns_mode='off')) for m in self.monitors), default=len(host))
-        line = f"{timestamp}   {host:<{max_host_len}} {message}"
-        self.events.append(line)
+        max_host_len = max((len(m.get_display_name(dns_mode='off')) for m in self.monitors), default=len(category))
+        line = f"{timestamp}   {category:<{max_host_len}} {message}"
+        entry = EventEntry(level=level, category=category, text=line)
+        self.events.append(entry)
         if self.log_file:
             try:
                 with open(self.log_file, 'a') as f:
@@ -3197,6 +3303,8 @@ class Application:
                 f.write(f":set history-size {self.history_size}\n")
                 f.write(f":set sync-history {'on' if self.sync_history else 'off'}\n")
                 f.write(f":set mux-split {self.mux_split}\n")
+                label = self._LOGLEVEL_LABELS.get(self.loglevel, 'normal')
+                f.write(f":set log-level {label}\n")
                 if self.terminal_emulator != 'auto':
                     f.write(f":set terminal {self.terminal_emulator}\n")
                 if self.log_file:
@@ -3443,7 +3551,8 @@ class Application:
                     display_name = monitor.get_display_name(dns_mode='off')
                     for err_line in monitor.error.splitlines():
                         if err_line.strip():
-                            self.add_event(display_name, f"error: {err_line.strip()}")
+                            self.add_event(display_name, f"error: {err_line.strip()}",
+                                           level=LEVEL_NORMAL)
 
                 current_state = monitor.alive
                 if monitor.last_state is None:
@@ -3593,7 +3702,8 @@ class Application:
         """
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
         line = f"{timestamp}   ══════════════════ seen ══════════════════"
-        self.events.append(line)
+        entry = EventEntry(level=LEVEL_QUIET, category='seen', text=line)
+        self.events.append(entry)
         if self.log_file:
             try:
                 with open(self.log_file, 'a') as f:
@@ -5274,8 +5384,9 @@ class Application:
         log_offset>0  -> scrolled back; header shows position and resume hint
         """
         page_size = max(1, height - start_row - 2)  # rows available for event lines
-        total = len(self.events)
-        event_list = list(self.events)
+        # Filter by current log level (display-time filtering; file always unfiltered)
+        event_list = [e for e in self.events if e.level <= self.loglevel]
+        total = len(event_list)
 
         overflows = total > page_size  # True when the log cannot fit on screen
 
@@ -5302,10 +5413,11 @@ class Application:
         self._draw_column_header(stdscr, start_row, 0, header_title, header_suffix, width)
 
         row = start_row + 1
-        for event in visible:
+        for entry in visible:
             if row >= height - 1:
                 break
-            stdscr.addstr(row, 0, event[:width - 1])
+            attr = _event_color_attr(entry)
+            stdscr.addstr(row, 0, entry.text[:width - 1], attr)
             row += 1
 
     def _open_prompt_save(self):
@@ -5463,12 +5575,12 @@ class Application:
                     if write_separator:
                         f.write(f"\n# ========== appended {timestamp} ==========\n")
                     for event in self.events:
-                        f.write(event + "\n")
+                        f.write(event.text + "\n")
             else:
                 with open(filename, 'w') as f:
                     f.write(f"# ping-bulk event log — saved {timestamp}\n")
                     for event in self.events:
-                        f.write(event + "\n")
+                        f.write(event.text + "\n")
         except OSError as e:
             self.add_event("save", f"error: {e}")
 
@@ -6590,6 +6702,28 @@ class Application:
         if self._monitoring_started:
             self.add_event("sync-history", f"wall-clock history alignment {state}")
 
+    _LOGLEVEL_NAMES = {'quiet': LEVEL_QUIET, 'normal': LEVEL_NORMAL,
+                       'info': LEVEL_INFO, 'debug': LEVEL_DEBUG}
+    _LOGLEVEL_LABELS = {LEVEL_QUIET: 'quiet', LEVEL_NORMAL: 'normal',
+                        LEVEL_INFO: 'info', LEVEL_DEBUG: 'debug'}
+
+    def _cmd_loglevel(self, args=''):
+        """Set or display the event log verbosity level."""
+        val = args.strip().lower()
+        if not val:
+            label = self._LOGLEVEL_LABELS.get(self.loglevel, str(self.loglevel))
+            self.add_event("log-level", f"current log level: {label}")
+            return
+        if val not in self._LOGLEVEL_NAMES:
+            self.add_event("cmd", f"log-level: unknown value '{val}'; "
+                           "choices: quiet normal info debug")
+            return
+        self.loglevel = self._LOGLEVEL_NAMES[val]
+        # Reset scroll so new level is immediately visible from tail
+        self.log_offset = 0
+        if self._monitoring_started:
+            self.add_event("log-level", f"log level set to: {val}")
+
     def _cmd_saveconfig(self, args=''):
         """Save current settings to config file."""
         if self._save_config():
@@ -7103,13 +7237,13 @@ class Application:
         for event in self.events:
             # Events look like: "2026-03-20T14:05:32+0200   hostname   message"
             # We split by '   ' (3 spaces) which add_event uses
-            parts = event.split('   ', 1)
+            parts = event.text.split('   ', 1)
             if len(parts) == 2:
                 rest = parts[1]
                 # Hostname is padded with spaces, so we just check if it starts with the log_name followed by space
                 # Or just do a simple search
-                if f" {log_name} " in event or event.startswith(f"{parts[0]}   {log_name}"):
-                    host_events.append(event)
+                if f" {log_name} " in event.text or event.text.startswith(f"{parts[0]}   {log_name}"):
+                    host_events.append(event.text)
 
         if host_events:
             lines.append("  Recent Events:")
@@ -7454,6 +7588,13 @@ press '?' inside the app for the full keyboard reference.\
                         help='run in kiosk mode: auto-launch tmux, restrict commands, use rnano/rvim')
     parser.add_argument('--select', metavar='HOST', dest='select_host',
                         help=argparse.SUPPRESS)  # internal: pre-select a host by name at startup
+    parser.add_argument('--log-level', metavar='LEVEL', dest='log_level',
+                        choices=['quiet', 'normal', 'info', 'debug'],
+                        help='event log verbosity: quiet normal info debug (default: normal)')
+    parser.add_argument('-v', dest='verbose', action='count', default=0,
+                        help='increase log verbosity (-v info, -vv debug)')
+    parser.add_argument('-q', dest='quiet', action='count', default=0,
+                        help='decrease log verbosity (-q quiet)')
     parser.add_argument('--help-full',    action='store_true',
                         help='show full manual and exit')
     parser.add_argument('--help-example', action='store_true',
@@ -7510,6 +7651,13 @@ def main(stdscr, args):
     app.hosts_file = args.file[-1] if args.file else None
     app.kiosk_mode = bool(args.kiosk)
     app.startup_select = args.select_host or None
+
+    # Resolve log level: --log-level base, then +verbose/-quiet offset
+    _level_names = {'quiet': LEVEL_QUIET, 'normal': LEVEL_NORMAL,
+                    'info': LEVEL_INFO, 'debug': LEVEL_DEBUG}
+    base_level = _level_names.get(args.log_level, LEVEL_NORMAL)
+    app.loglevel = max(LEVEL_QUIET, min(LEVEL_DEBUG,
+                                        base_level + args.verbose - args.quiet))
 
     # Apply any display-mode flags supplied on the command line.
     # These run after _load_config() so they always take precedence over the
