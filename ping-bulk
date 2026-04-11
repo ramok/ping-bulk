@@ -2537,6 +2537,15 @@ class _HostsParser:
                         with_stack.pop()
                     else:
                         entries.append(('error', ':done without :with or :for'))
+                elif cmd_word == 'end':
+                    # :end is not valid syntax — emit a warning and treat as :done
+                    # so that the block is closed and subsequent hosts aren't lost.
+                    entries.append(('warn',
+                        f'use :done instead of :end to close a :with or :for block'))
+                    if with_stack:
+                        with_stack.pop()
+                    else:
+                        entries.append(('error', ':end without :with or :for'))
                 elif (cmd_word == 'remote-ping' and with_stack
                         and with_stack[-1][0] == 'remote-ping'):
                     # Nested :remote-ping inside :with remote-ping → chain jump hosts.
@@ -2557,6 +2566,11 @@ class _HostsParser:
                     entries.extend(self._parse_host(text, comment, w_args))
             else:
                 entries.extend(self._parse_host(text, comment, None))
+
+        if with_stack:
+            w_type, w_args = with_stack[-1]
+            entries.append(('error',
+                f':with {w_type} block not closed — missing :done at end of file'))
 
         return entries
 
