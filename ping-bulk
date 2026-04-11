@@ -1021,6 +1021,34 @@ def _expand_let_vars(line, variables, backrefs=None, full_str=None):
     return result
 
 
+def _evaluate_if_condition(condition_str):
+    """Evaluate an :if/:elif condition string.
+
+    Supported syntax (after variable expansion has already been applied
+    by the caller):
+
+        VALUE in val1,val2,...
+        VALUE not in val1,val2,...
+
+    *VALUE* is a single word (already expanded — no further substitution
+    here).  The comma-separated list must not contain spaces.
+
+    Returns ``True`` / ``False``.  Unrecognised syntax returns ``False``
+    and the caller is responsible for logging the error.
+    """
+    if not condition_str:
+        return False
+    m = re.match(r'^(\S+)\s+(not\s+in|in)\s+(\S+)$', condition_str.strip())
+    if not m:
+        return False
+    value, operator, csv_list = m.group(1), m.group(2), m.group(3)
+    tokens = csv_list.split(',')
+    if operator == 'in':
+        return value in tokens
+    else:  # "not in"
+        return value not in tokens
+
+
 def _config_path():
     """Return the XDG-compliant config file path for ping-bulk.
 
@@ -1915,26 +1943,28 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
             captures = dict(zip(var_names, captures))
         # Loop-local variable copy so :let inside the body doesn't bleed out
         local_vars = dict(variables)
+        if_stack = []  # per-iteration conditional nesting state
         for line in body_lines:
             # ── :let inside loop body ──────────────────────────────────────
             if line.startswith(':'):
                 _parts = line.split(None, 1)
                 if _parts[0][1:].lower() == 'let':
-                    let_rest = _parts[1] if len(_parts) > 1 else ''
-                    _lp = let_rest.split(None, 1)
-                    if _lp:
-                        let_name_tmpl = _lp[0]
-                        let_val_tmpl  = _lp[1] if len(_lp) > 1 else ''
-                        # Expand name template with current back-refs
-                        let_name_exp = _apply_backref(let_name_tmpl, captures, full_str)
-                        try:
-                            name_rows = _expand_host_with_captures(let_name_exp)
-                        except ValueError:
-                            name_rows = [(let_name_exp, [], let_name_exp)]
-                        for exp_name, name_caps in name_rows:
-                            exp_val = _apply_backref(let_val_tmpl, captures, full_str)
-                            local_vars[exp_name] = exp_val
-                    continue  # :let produces no host/cmd entries
+                    if not (if_stack and if_stack[-1]['skipping']):
+                        let_rest = _parts[1] if len(_parts) > 1 else ''
+                        _lp = let_rest.split(None, 1)
+                        if _lp:
+                            let_name_tmpl = _lp[0]
+                            let_val_tmpl  = _lp[1] if len(_lp) > 1 else ''
+                            # Expand name template with current back-refs
+                            let_name_exp = _apply_backref(let_name_tmpl, captures, full_str)
+                            try:
+                                name_rows = _expand_host_with_captures(let_name_exp)
+                            except ValueError:
+                                name_rows = [(let_name_exp, [], let_name_exp)]
+                            for exp_name, name_caps in name_rows:
+                                exp_val = _apply_backref(let_val_tmpl, captures, full_str)
+                                local_vars[exp_name] = exp_val
+                    continue  # :let always consumed here; no host/cmd entries
 
             # ── variable expansion ─────────────────────────────────────────
             # Save the pre-expansion line to check for variable back-refs; a line
@@ -1948,106 +1978,139 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
             # $name variable refs) or still has some after (numeric $N).
             _line_was_dynamic = _has_backref(original_line)
 
+            currently_skipping = bool(if_stack and if_stack[-1]['skipping'])
+
             if line.startswith('##'):
-                # Section header — apply back-references and emit every iteration.
-                n_hashes = len(line) - len(line.lstrip('#'))
-                rest = line[n_hashes:]
-                folded_default = rest.startswith('-')
-                if folded_default:
-                    rest = rest[1:]
-                title_tmpl = rest.strip()
-                title = _apply_backref(title_tmpl, captures, full_str)
-                entries.append(('section', title, n_hashes - 1, folded_default))
+                if not currently_skipping:
+                    # Section header — apply back-references and emit every iteration.
+                    n_hashes = len(line) - len(line.lstrip('#'))
+                    rest = line[n_hashes:]
+                    folded_default = rest.startswith('-')
+                    if folded_default:
+                        rest = rest[1:]
+                    title_tmpl = rest.strip()
+                    title = _apply_backref(title_tmpl, captures, full_str)
+                    entries.append(('section', title, n_hashes - 1, folded_default))
 
             elif line.startswith(':'):
                 parts = line.split(None, 1)
                 cmd_word = parts[0][1:].lower()
-                m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
-                if m_title:
-                    level = int(m_title.group(1)) if m_title.group(1) else 1
-                    folded_default = m_title.group(2) == '-'
-                    title_tmpl = parts[1].strip() if len(parts) > 1 else ''
-                    title = _apply_backref(title_tmpl, captures, full_str)
-                    entries.append(('section', title, level, folded_default))
-                elif cmd_word == 'ssh-begin':
-                    # Open local SSH block — captures args with back-reference expansion
-                    ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
-                    in_local_ssh_block = True
-                    local_ssh_args = _apply_backref(ssh_args_tmpl, captures, full_str)
-                    continue  # Don't emit a command entry for :ssh-begin
-                elif cmd_word == 'ssh-end':
-                    # Close local SSH block
-                    in_local_ssh_block = False
-                    local_ssh_args = None
-                    continue  # Don't emit a command entry for :ssh-end
-                elif cmd_word == 'ssh':
-                    # :ssh command inside :for loop
-                    # If we have an effective SSH context (local or outer), chain them
-                    effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
-                    inner_ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
-                    inner_ssh_args = _apply_backref(inner_ssh_args_tmpl, captures, full_str)
 
-                    if effective_ssh_args is not None:
-                        # Chain with -J: :ssh -J <outer> <inner>
-                        chained_cmd = f':ssh -J {effective_ssh_args} {inner_ssh_args}'
+                # ── :if/:elif/:else/:fi — always handled regardless of skip state ──
+                if cmd_word == 'if':
+                    condition_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                    condition = _apply_backref(condition_tmpl, captures, full_str)
+                    if currently_skipping:
+                        if_stack.append({'skipping': True, 'matched': True, 'seen_else': False})
                     else:
-                        # No outer SSH context, emit as-is
-                        chained_cmd = f':ssh {inner_ssh_args}'
+                        result = _evaluate_if_condition(condition)
+                        if_stack.append({'skipping': not result, 'matched': result, 'seen_else': False})
 
-                    # Deduplicate: use command as key
-                    key = ('ssh', chained_cmd)
-                    if key in seen_hosts:
-                        entries.append(('warn', f'duplicate SSH command ignored: {chained_cmd}'))
+                elif cmd_word == 'elif':
+                    if not if_stack:
+                        entries.append(('error', ':elif without :if'))
                     else:
-                        seen_hosts.add(key)
-                        entries.append(('cmd', chained_cmd))
-                else:
-                    # Generic command — apply back-references and emit every iteration.
-                    expanded_cmd = _apply_backref(line, captures, full_str)
-                    entries.append(('cmd', expanded_cmd))
+                        frame = if_stack[-1]
+                        parent_skipping = len(if_stack) > 1 and if_stack[-2]['skipping']
+                        if parent_skipping:
+                            pass
+                        elif frame['seen_else']:
+                            entries.append(('error', ':elif after :else'))
+                        elif frame['matched']:
+                            frame['skipping'] = True
+                        else:
+                            condition_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                            condition = _apply_backref(condition_tmpl, captures, full_str)
+                            result = _evaluate_if_condition(condition)
+                            frame['skipping'] = not result
+                            frame['matched'] = result
 
-            else:
-                # Host line.  A leading '?' marks it as optional: silently skip if the
-                # expanded name has no :resolv mapping at Application init time.
-                optional = line.startswith('?')
-                host_line = line[1:] if optional else line
-                # Split inline ## label (e.g. '10.0.$sh.{1,2} ## host$sh-cam$1')
-                _m_label = re.search(r' #{2,} ', host_line)
-                label_tmpl = host_line[_m_label.end():] if _m_label else None
-                if _m_label:
-                    host_line = host_line[:_m_label.start()].rstrip()
-                if _has_backref(host_line) or _line_was_dynamic:
-                    # Substitute for-loop back-references then expand remaining brace groups.
-                    expanded_tmpl = _apply_backref(host_line, captures, full_str)
-                    expanded_label = _apply_backref(label_tmpl, captures, full_str) if label_tmpl else None
-                    try:
-                        expanded_pairs = _expand_host_with_captures(expanded_tmpl)
-                    except ValueError as e:
-                        entries.append(('error', str(e)))
-                        continue
-                    effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
-                    for host, host_captures in expanded_pairs:
-                        key = (effective_ssh_args, host)
+                elif cmd_word == 'else':
+                    if not if_stack:
+                        entries.append(('error', ':else without :if'))
+                    else:
+                        frame = if_stack[-1]
+                        parent_skipping = len(if_stack) > 1 and if_stack[-2]['skipping']
+                        if parent_skipping:
+                            pass
+                        elif frame['seen_else']:
+                            entries.append(('error', ':else after :else'))
+                        elif frame['matched']:
+                            frame['skipping'] = True
+                            frame['seen_else'] = True
+                        else:
+                            frame['skipping'] = False
+                            frame['matched'] = True
+                            frame['seen_else'] = True
+
+                elif cmd_word == 'fi':
+                    if not if_stack:
+                        entries.append(('error', ':fi without :if'))
+                    else:
+                        if_stack.pop()
+
+                elif not currently_skipping:
+                    m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
+                    if m_title:
+                        level = int(m_title.group(1)) if m_title.group(1) else 1
+                        folded_default = m_title.group(2) == '-'
+                        title_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                        title = _apply_backref(title_tmpl, captures, full_str)
+                        entries.append(('section', title, level, folded_default))
+                    elif cmd_word == 'ssh-begin':
+                        # Open local SSH block — captures args with back-reference expansion
+                        ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                        in_local_ssh_block = True
+                        local_ssh_args = _apply_backref(ssh_args_tmpl, captures, full_str)
+                        continue  # Don't emit a command entry for :ssh-begin
+                    elif cmd_word == 'ssh-end':
+                        # Close local SSH block
+                        in_local_ssh_block = False
+                        local_ssh_args = None
+                        continue  # Don't emit a command entry for :ssh-end
+                    elif cmd_word == 'ssh':
+                        # :ssh command inside :for loop
+                        # If we have an effective SSH context (local or outer), chain them
+                        effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
+                        inner_ssh_args_tmpl = parts[1].strip() if len(parts) > 1 else ''
+                        inner_ssh_args = _apply_backref(inner_ssh_args_tmpl, captures, full_str)
+
+                        if effective_ssh_args is not None:
+                            # Chain with -J: :ssh -J <outer> <inner>
+                            chained_cmd = f':ssh -J {effective_ssh_args} {inner_ssh_args}'
+                        else:
+                            # No outer SSH context, emit as-is
+                            chained_cmd = f':ssh {inner_ssh_args}'
+
+                        # Deduplicate: use command as key
+                        key = ('ssh', chained_cmd)
                         if key in seen_hosts:
-                            entries.append(('warn', f"duplicate host ignored: {host}"))
+                            entries.append(('warn', f'duplicate SSH command ignored: {chained_cmd}'))
                         else:
                             seen_hosts.add(key)
-                            if expanded_label and _is_ip(host):
-                                label = _apply_backref(expanded_label, host_captures, host)
-                                entries.append(('cmd', f':resolv {host} {label}'))
-                            if effective_ssh_args is not None:
-                                # '?' not supported for SSH hosts inside :for — add normally.
-                                entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
-                            else:
-                                entries.append(('optional_host' if optional else 'host', host))
-                else:
-                    # No back-reference — include only on first encounter, then warn.
-                    if host_line not in no_backref_emitted:
-                        no_backref_emitted.add(host_line)
-                        entries.append(('warn',
-                            f"host {host_line!r} inside :for loop has no back-reference; added once"))
+                            entries.append(('cmd', chained_cmd))
+                    else:
+                        # Generic command — apply back-references and emit every iteration.
+                        expanded_cmd = _apply_backref(line, captures, full_str)
+                        entries.append(('cmd', expanded_cmd))
+
+            else:
+                if not currently_skipping:
+                    # Host line.  A leading '?' marks it as optional: silently skip if the
+                    # expanded name has no :resolv mapping at Application init time.
+                    optional = line.startswith('?')
+                    host_line = line[1:] if optional else line
+                    # Split inline ## label (e.g. '10.0.$sh.{1,2} ## host$sh-cam$1')
+                    _m_label = re.search(r' #{2,} ', host_line)
+                    label_tmpl = host_line[_m_label.end():] if _m_label else None
+                    if _m_label:
+                        host_line = host_line[:_m_label.start()].rstrip()
+                    if _has_backref(host_line) or _line_was_dynamic:
+                        # Substitute for-loop back-references then expand remaining brace groups.
+                        expanded_tmpl = _apply_backref(host_line, captures, full_str)
+                        expanded_label = _apply_backref(label_tmpl, captures, full_str) if label_tmpl else None
                         try:
-                            expanded_pairs = _expand_host_with_captures(host_line)
+                            expanded_pairs = _expand_host_with_captures(expanded_tmpl)
                         except ValueError as e:
                             entries.append(('error', str(e)))
                             continue
@@ -2058,13 +2121,39 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                                 entries.append(('warn', f"duplicate host ignored: {host}"))
                             else:
                                 seen_hosts.add(key)
-                                if label_tmpl and _is_ip(host):
-                                    label = _apply_backref(label_tmpl, host_captures, host)
+                                if expanded_label and _is_ip(host):
+                                    label = _apply_backref(expanded_label, host_captures, host)
                                     entries.append(('cmd', f':resolv {host} {label}'))
                                 if effective_ssh_args is not None:
+                                    # '?' not supported for SSH hosts inside :for — add normally.
                                     entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
                                 else:
                                     entries.append(('optional_host' if optional else 'host', host))
+                    else:
+                        # No back-reference — include only on first encounter, then warn.
+                        if host_line not in no_backref_emitted:
+                            no_backref_emitted.add(host_line)
+                            entries.append(('warn',
+                                f"host {host_line!r} inside :for loop has no back-reference; added once"))
+                            try:
+                                expanded_pairs = _expand_host_with_captures(host_line)
+                            except ValueError as e:
+                                entries.append(('error', str(e)))
+                                continue
+                            effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
+                            for host, host_captures in expanded_pairs:
+                                key = (effective_ssh_args, host)
+                                if key in seen_hosts:
+                                    entries.append(('warn', f"duplicate host ignored: {host}"))
+                                else:
+                                    seen_hosts.add(key)
+                                    if label_tmpl and _is_ip(host):
+                                        label = _apply_backref(label_tmpl, host_captures, host)
+                                        entries.append(('cmd', f':resolv {host} {label}'))
+                                    if effective_ssh_args is not None:
+                                        entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
+                                    else:
+                                        entries.append(('optional_host' if optional else 'host', host))
 
     return entries
 
@@ -2180,6 +2269,7 @@ class _HostsParser:
         """Process a list of ``(text, comment)`` pairs into entry tuples."""
         entries = []
         ssh_args = None  # :ssh-begin context; None = not in a block
+        if_stack = []   # stack of {'skipping': bool, 'matched': bool, 'seen_else': bool}
 
         i = 0
         while i < len(lines):
@@ -2188,6 +2278,47 @@ class _HostsParser:
 
             # Plain comment line (but not ## section header)
             if text.startswith('#') and not text.startswith('##'):
+                continue
+
+            # When inside a skipped :if block, skip everything; still track
+            # :if/:fi nesting so we pop the right frame, and consume :for
+            # bodies so _collect_for_body finds their :done correctly.
+            # :elif/:else are handled here too so they can transition the
+            # frame from "skipping" to "not skipping" (mirrors _process_for_loop).
+            if if_stack and if_stack[-1]['skipping']:
+                if text.startswith(':'):
+                    cmd_word_raw = text.split(None, 1)[0][1:].lower()
+                    if cmd_word_raw == 'if':
+                        if_stack.append({'skipping': True, 'matched': True, 'seen_else': False})
+                    elif cmd_word_raw == 'fi':
+                        if_stack.pop()
+                    elif cmd_word_raw == 'for':
+                        _, _, i = self._collect_for_body(lines, i)
+                    elif cmd_word_raw in ('elif', 'else'):
+                        frame = if_stack[-1]
+                        parent_skipping = len(if_stack) > 1 and if_stack[-2]['skipping']
+                        if not parent_skipping:
+                            if cmd_word_raw == 'elif':
+                                if frame['seen_else']:
+                                    entries.append(('error', ':elif after :else'))
+                                elif not frame['matched']:
+                                    expanded = _expand_let_vars(text, self.variables)
+                                    eparts = expanded.split(None, 1)
+                                    cond_args = eparts[1].strip() if len(eparts) > 1 else ''
+                                    matched = _evaluate_if_condition(cond_args)
+                                    frame['skipping'] = not matched
+                                    frame['matched'] = matched
+                                # else: already matched a prior branch — stay skipping
+                            else:  # :else
+                                if frame['seen_else']:
+                                    entries.append(('error', ':else after :else'))
+                                elif not frame['matched']:
+                                    frame['seen_else'] = True
+                                    frame['skipping'] = False
+                                    frame['matched'] = True
+                                else:
+                                    frame['seen_else'] = True
+                                    # already matched — stay skipping
                 continue
 
             # ── Section header ##[#…] ─────────────────────────────────────
@@ -2232,6 +2363,39 @@ class _HostsParser:
                     level = int(m_title.group(1)) if m_title.group(1) else 1
                     folded = m_title.group(2) == '-'
                     entries.append(('section', args, level, folded))
+                elif cmd_word == 'if':
+                    matched = _evaluate_if_condition(args)
+                    if_stack.append({'skipping': not matched, 'matched': matched, 'seen_else': False})
+                elif cmd_word == 'elif':
+                    if not if_stack:
+                        entries.append(('error', ':elif without :if'))
+                    else:
+                        frame = if_stack[-1]
+                        if frame['seen_else']:
+                            entries.append(('error', ':elif after :else'))
+                        elif frame['matched']:
+                            frame['skipping'] = True
+                        else:
+                            matched = _evaluate_if_condition(args)
+                            frame['skipping'] = not matched
+                            frame['matched'] = matched
+                elif cmd_word == 'else':
+                    if not if_stack:
+                        entries.append(('error', ':else without :if'))
+                    else:
+                        frame = if_stack[-1]
+                        if frame['seen_else']:
+                            entries.append(('error', ':else after :else'))
+                        else:
+                            frame['seen_else'] = True
+                            frame['skipping'] = frame['matched']
+                            if not frame['matched']:
+                                frame['matched'] = True
+                elif cmd_word == 'fi':
+                    if not if_stack:
+                        entries.append(('error', ':fi without :if'))
+                    else:
+                        if_stack.pop()
                 elif cmd_word == 'ssh-begin':
                     ssh_args = args
                 elif cmd_word == 'ssh-end':
@@ -2269,6 +2433,9 @@ class _HostsParser:
         Plain ``#`` comment lines are discarded.
         If the file ends without a matching ``:done`` an implicit ``:done`` is
         applied at EOF (useful for ``:source``'d files).
+
+        ``:if``, ``:elif``, ``:else``, and ``:fi`` are intentionally passed
+        through as raw body lines; ``_process_for_loop`` handles them.
         """
         body = []
         errors = []
