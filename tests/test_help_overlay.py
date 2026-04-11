@@ -52,7 +52,7 @@ def _indicator(total, height, scroll):
     return f'{first}-{last}/{total}'
 
 # Substring always present in the first help line, visible at scroll=0.
-OVERLAY_MARKER = '[q / Esc] close'
+OVERLAY_MARKER = '[?/q/Esc] close'
 
 # Prefix of the scroll indicator embedded in the top border.
 SCROLL_PREFIX = '↑↓'

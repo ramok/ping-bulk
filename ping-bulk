@@ -491,7 +491,7 @@ def _format_context(context):
 
 
 _FULL_HELP = [
-    "  ping-bulk — keyboard reference                      [q / Esc] close",
+    "  ping-bulk — keyboard reference          [?/q/Esc] close  [/] search  [n/N] next/prev",
     "-DIVIDER-",
     "  Hotkeys",
     "  [q] / [Q]                     (:quit)  quit",
@@ -3448,6 +3448,10 @@ class Application:
         self.help_open = False    # True while the help overlay is visible
         self.help_scroll = 0      # first visible line index in the help overlay
         self.help_show_all = False # True = show auto-generated full binding list
+        self.help_search = ''            # current search query within help overlay
+        self.help_search_active = False  # True while user is typing the search
+        self.help_search_matches = []    # line indices in rendered lines that match
+        self.help_search_match_idx = 0   # current highlighted match index
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
         self.details_scroll = 0   # Scroll offset for the host details overlay
@@ -7345,6 +7349,7 @@ class Application:
         self.help_open = True
         self.help_scroll = 0
         self.help_show_all = False
+        self.help_search_active = False
         self._current_mode = 'help'
 
     def _cmd_help_toggle_all(self, args=''):
@@ -7409,6 +7414,7 @@ class Application:
         """Close the currently open overlay (help or details)."""
         if self.help_open:
             self.help_open = False
+            self.help_search_active = False
             self._current_mode = 'normal'
         elif self.details_open:
             self.details_open = False
@@ -7425,7 +7431,7 @@ class Application:
             self.details_scroll = max(0, self.details_scroll + delta)
 
     def _draw_overlay_box(self, stdscr, height, width, lines, scroll_offset, inner_w, *,
-                          handle_dividers=False):
+                          handle_dividers=False, search_bar=None, current_match=None):
         """Draw a centered bordered overlay popup; return the clamped scroll offset.
 
         Draws a ┌─┐ / │ │ / └─┘ box centered on the terminal.  Content lines
@@ -7480,6 +7486,7 @@ class Application:
             r = row0 + 1 + i
             if r >= height:
                 break
+            abs_line_idx = scroll_offset + i
             if handle_dividers and line == "-DIVIDER-":
                 try:
                     stdscr.addstr(r, col0,
@@ -7491,65 +7498,134 @@ class Application:
                 try:
                     stdscr.addstr(r, col0, '│', border_attr)
                     text = line.ljust(inner_w)[:inner_w]
-                    self._draw_hint_text(stdscr, r, col0 + 1, text,
-                                         col0 + 1 + inner_w)
+                    if current_match is not None and abs_line_idx == current_match:
+                        # Highlight the current search match with reverse video
+                        stdscr.addstr(r, col0 + 1, text, curses.A_REVERSE)
+                    else:
+                        self._draw_hint_text(stdscr, r, col0 + 1, text,
+                                             col0 + 1 + inner_w)
                     if col0 + 1 + inner_w < width:
                         stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
                 except curses.error:
                     pass
 
-        # Bottom border
+        # Bottom border — replaced by search bar when active
         r = row0 + 1 + visible_count
         if r < height:
             try:
-                stdscr.addstr(r, col0,
-                              ('└' + '─' * inner_w + '┘')[:width - col0],
-                              border_attr)
+                if search_bar is not None:
+                    bar = ('/' + search_bar).ljust(inner_w)[:inner_w]
+                    stdscr.addstr(r, col0, '└', border_attr)
+                    stdscr.addstr(r, col0 + 1, bar, curses.A_REVERSE | curses.A_BOLD)
+                    if col0 + 1 + inner_w < width:
+                        stdscr.addstr(r, col0 + 1 + inner_w, '┘', border_attr)
+                else:
+                    stdscr.addstr(r, col0,
+                                  ('└' + '─' * inner_w + '┘')[:width - col0],
+                                  border_attr)
             except curses.error:
                 pass
 
         return scroll_offset
+
+    def _build_help_lines(self):
+        """Return the content lines list for the help overlay.
+
+        Factors out the line-building logic used by both _draw_help_overlay
+        and the incremental search helpers.
+        """
+        if self.help_show_all:
+            return self._build_all_bindings_lines()
+
+        lines = list(_FULL_HELP)
+
+        # Collect user bindings with --desc, grouped by mode
+        by_mode = {}
+        for _keys, b in self._key_trie:
+            if b.origin == 'user' and b.desc:
+                by_mode.setdefault(b.mode or 'normal', []).append(
+                    (b.key_notation, b.desc))
+        for mode, mode_dict in self._mode_bindings.items():
+            seen = set()
+            for b in mode_dict.values():
+                if b.origin == 'user' and b.desc and id(b) not in seen:
+                    seen.add(id(b))
+                    by_mode.setdefault(mode, []).append((b.key_notation, b.desc))
+
+        if by_mode:
+            lines.append('-DIVIDER-')
+            lines.append('─ Custom bindings ─')
+            for mode in sorted(by_mode):
+                entries = by_mode[mode]
+                if entries:
+                    lines.append(f'  {mode} mode')
+                    for notation, desc in entries:
+                        lines.append(f'    {notation:<10} {desc}')
+
+        return lines
+
+    def _update_help_search(self):
+        """Recompute help_search_matches from help_search and scroll to first match."""
+        q = self.help_search.lower()
+        if not q:
+            self.help_search_matches = []
+            self.help_search_match_idx = 0
+            return
+        lines = self._build_help_lines()
+        self.help_search_matches = [
+            i for i, line in enumerate(lines)
+            if line != '-DIVIDER-' and q in line.lower()
+        ]
+        self.help_search_match_idx = 0
+        if self.help_search_matches:
+            self._help_search_scroll_to_current()
+
+    def _help_search_jump(self, direction):
+        """Move to next (+1) or previous (-1) help search match."""
+        if not self.help_search_matches:
+            return
+        n = len(self.help_search_matches)
+        self.help_search_match_idx = (self.help_search_match_idx + direction) % n
+        self._help_search_scroll_to_current()
+
+    def _help_search_scroll_to_current(self):
+        """Scroll the help overlay so the current match is near the top."""
+        if not self.help_search_matches:
+            return
+        target = self.help_search_matches[self.help_search_match_idx]
+        self.help_scroll = max(0, target - 3)
 
     def _draw_help_overlay(self, stdscr, height, width):
         """Draw the help overlay as a centered bordered popup with scroll support.
 
         Normal view: curated _FULL_HELP + user-annotated custom bindings.
         All-bindings view (help_show_all=True): auto-generated from full key trie.
-        Press [A] inside the overlay to toggle.
+        Press [A] inside the overlay to toggle.  Press [/] to search.
         """
-        if self.help_show_all:
-            lines = self._build_all_bindings_lines()
-        else:
-            lines = list(_FULL_HELP)
+        lines = self._build_help_lines()
 
-            # Collect user bindings with --desc, grouped by mode
-            by_mode = {}  # mode -> [(key_notation, desc)]
-            for _keys, b in self._key_trie:
-                if b.origin == 'user' and b.desc:
-                    by_mode.setdefault(b.mode or 'normal', []).append(
-                        (b.key_notation, b.desc))
-            for mode, mode_dict in self._mode_bindings.items():
-                seen = set()
-                for b in mode_dict.values():
-                    if b.origin == 'user' and b.desc and id(b) not in seen:
-                        seen.add(id(b))
-                        by_mode.setdefault(mode, []).append((b.key_notation, b.desc))
+        # Search state for display
+        current_match = None
+        if self.help_search_matches:
+            current_match = self.help_search_matches[self.help_search_match_idx]
 
-            if by_mode:
-                lines.append('-DIVIDER-')
-                lines.append('─ Custom bindings ─')
-                for mode in sorted(by_mode):
-                    entries = by_mode[mode]
-                    if entries:
-                        lines.append(f'  {mode} mode')
-                        for notation, desc in entries:
-                            lines.append(f'    {notation:<10} {desc}')
+        search_bar = None
+        if self.help_search or self.help_search_active:
+            n = len(self.help_search_matches)
+            if self.help_search:
+                count_str = f' {self.help_search_match_idx + 1}/{n}' if n else ' (no match)'
+            else:
+                count_str = ''
+            cursor_ch = '█' if self.help_search_active else ''
+            search_bar = f'{self.help_search}{cursor_ch}{count_str}'
 
         ideal_w = max(len(line) for line in lines if line != "-DIVIDER-")
         inner_w = min(ideal_w, max(20, width - 4))
         self.help_scroll = self._draw_overlay_box(
             stdscr, height, width, lines, self.help_scroll, inner_w,
             handle_dividers=True,
+            search_bar=search_bar,
+            current_match=current_match,
         )
 
     def _build_all_bindings_lines(self):
@@ -7961,9 +8037,31 @@ class Application:
                 if self.help_open:
                     if key == 3:  # Ctrl+C always closes overlays
                         self.help_open = False
+                        self.help_search_active = False
                         self._current_mode = 'normal'
+                    elif self.help_search_active:
+                        if key in (curses.KEY_BACKSPACE, 127, 8):
+                            self.help_search = self.help_search[:-1]
+                            self._update_help_search()
+                        elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, ord('/')):
+                            self.help_search_active = False  # confirm, keep highlights
+                        elif key == 27:  # Esc — cancel search
+                            self.help_search = ''
+                            self.help_search_active = False
+                            self.help_search_matches = []
+                            self.help_search_match_idx = 0
+                        elif 32 <= key <= 126:  # printable
+                            self.help_search += chr(key)
+                            self._update_help_search()
                     else:
-                        self._dispatch_mode_key('help', key)
+                        if key == ord('/'):
+                            self.help_search_active = True
+                        elif self.help_search and key == ord('n'):
+                            self._help_search_jump(+1)
+                        elif self.help_search and key == ord('N'):
+                            self._help_search_jump(-1)
+                        else:
+                            self._dispatch_mode_key('help', key)
                     continue
                 if self.details_open:
                     if key == 3:  # Ctrl+C always closes overlays
