@@ -72,7 +72,7 @@ KEYBOARD REFERENCE
 ==================
 
 All keys below are default bindings and can be remapped with
-``:bindkey`` (see **Key bindings** under **COMMANDS**).
+:`:bind-key`` (see **Key bindings** under **COMMANDS**).
 
 Navigation
 ----------
@@ -226,27 +226,56 @@ Configuration
 Key bindings
 ------------
 
-``:bindkey <key> <command>``
+``:bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] <key> <command>``
     Bind *key* to *command*.  The key is specified in vim-like notation
     (see **KEY NOTATION** below).  The command is any ``:``-prefixed
     command (e.g. ``:quit``, ``:set dns hostname``).
 
     Multiple commands can be chained with ``\;``::
 
-        :bindkey x :set stats down \; :set dns hostname
+        :bind-key x :set stats down \; :set dns hostname
 
     Append ``...`` (three dots) to the command to enter *edit mode*:
     the command line is pre-filled but not executed, letting the user
     review and modify it before pressing Enter::
 
-        :bindkey t :mux mtr %i...
+        :bind-key t :mux mtr %i...
 
-``:bindkey <key>``
+    Optional flags:
+
+    ``--mode MODE``
+        Bind the key in a specific UI layer.  Valid modes:
+
+        ``normal``   Main host list (default).
+        ``help``     Help overlay (``?``).
+        ``details``  Host details overlay (``Enter``).
+        ``command``  ``:`` command line.
+
+        Example — close the help overlay with ``h``::
+
+            :bind-key --mode help h :close
+
+    ``--desc TEXT``
+        Short description shown in the ``?`` help overlay under
+        *Custom bindings*::
+
+            :bind-key --desc "Open MTR trace" t :mux mtr %i
+
+    ``--hint TEXT``
+        Short label rendered in the bottom menu bar.  Use ``[x]``
+        notation to mark the hotkey character::
+
+            :bind-key --hint "[t]race" t :mux mtr %i
+
+``:bind-key <key>``
     Unbind *key*.  If the key had a default binding, the default is
     removed and the unbind is tracked by ``:saveconfig``.
 
-``:bindkey``
+``:bind-key``
     List all user-defined key bindings in the event log.
+
+``:bindkey``
+    Alias for ``:bind-key`` (kept for backward compatibility).
 
 ``:set multikey-timeout <ms>``
     Set the multi-key timeout in milliseconds (0–2000).
@@ -318,10 +347,10 @@ the keypress is ignored and a warning is shown in the event log.
 
 Examples::
 
-    :bindkey t :mux mtr %i
-    :bindkey x :set stats down \; :set dns hostname
-    :bindkey gt :select first
-    :bindkey <C-p> :pause
+    :bind-key t :mux mtr %i
+    :bind-key x :set stats down \; :set dns hostname
+    :bind-key gt :select first
+    :bind-key <C-p> :pause
 
 Hosts and DNS
 -------------
@@ -604,7 +633,7 @@ Format
 
 ``:cmd [args]``
     Any command listed under **COMMANDS** above; applied immediately
-    when the file is loaded.  This includes ``:bindkey``, so
+    when the file is loaded.  This includes ``:bind-key``, so
     administrators can pre-configure key bindings in a hosts file.
 
 ``:prog-options <prog> <glob> <opts>``
@@ -663,12 +692,12 @@ The default ``c`` binding behaves as follows:
 
 Users can override the ``c`` binding in their config or hosts file::
 
-    :bindkey c :mux ssh -l admin %r
+    :bind-key c :mux ssh -l admin %r
 
 Any ``:prog-options ssh`` rules that match the host are automatically
 injected by ``:mux``, so `:prog-options` is the recommended way to
 supply per-host SSH flags rather than duplicating them in every
-``:bindkey`` definition.
+``:bind-key`` definition.
 
 If ping-bulk is **not** running inside a terminal multiplexer (tmux or
 screen), ``c`` offers to relaunch it inside tmux.
@@ -678,7 +707,7 @@ a host is highlighted and connect is not disabled.  The host details
 overlay (``Enter``) also shows the effective connect command and allows
 pressing ``c`` directly.
 
-``:mux [-v|-h|-w] [command…]``
+``:mux [--split-v|--split-h|--split-window] [command…]``
     Run *command* in a new tmux or screen pane/window.  Also available
     as ``:tmux`` and ``:screen``; the command name serves as a preference
     hint for which backend to use.
@@ -694,11 +723,11 @@ pressing ``c`` directly.
 
     Split options override the ``:set mux-split`` default for that call:
 
-    ``-v``
+    ``--split-v`` (or ``-v``)
         New pane below (vertical split).  This is the default.
-    ``-h``
+    ``--split-h`` (or ``-h``)
         New pane to the right (horizontal split).
-    ``-w``
+    ``--split-window`` (or ``-w``)
         New window.
 
     In **kiosk mode** only ``ssh`` and ``login`` are permitted as the
@@ -1040,10 +1069,10 @@ Recognised settings
 ``:set multikey-timeout <ms>``
     Multi-key sequence timeout in milliseconds (0–2000).  Default: ``0``.
 
-``:bindkey <key> <command>``
+``:bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] <key> <command>``
     User key bindings.  Only bindings that differ from the defaults
     are saved.  Unbinds of default keys are stored as bare
-    ``:bindkey <key>`` lines.
+    ``:bind-key <key>`` lines.  ``:bindkey`` is accepted as an alias.
 
 Example::
 
@@ -1053,8 +1082,8 @@ Example::
     :set sort status
     :set ping-view scaled
     :log /var/log/ping-bulk.log
-    :bindkey t :mux mtr %i
-    :bindkey x :set stats down \; :set dns hostname
+    :bind-key --desc "MTR trace" --hint "[t]race" t :mux mtr %i
+    :bind-key x :set stats down \; :set dns hostname
 
 
 EVENT LOG

@@ -965,3 +965,232 @@ class TestDefaultCBinding:
         assert binding is not None
         # The resolved binding must be the unconditional fallback (no 'd' guard)
         assert binding.context is None or 'd' not in binding.context
+
+
+# ===========================================================================
+# TestScrollDirectionArgs — trailing-dash direction convention (8a)
+# ===========================================================================
+
+class TestScrollDirectionArgs:
+    """scroll-history and scroll-log accept trailing-dash reverse direction."""
+
+    def test_scroll_history_half_forward(self, app):
+        app.scroll_history = lambda d: setattr(app, '_last_delta', d)
+        app._visible_ping_length = 100
+        app._cmd_scroll_history('half')
+        assert app._last_delta == 50
+
+    def test_scroll_history_half_dash_reverse(self, app):
+        app.scroll_history = lambda d: setattr(app, '_last_delta', d)
+        app._visible_ping_length = 100
+        app._cmd_scroll_history('half-')
+        assert app._last_delta == -50
+
+    def test_scroll_history_legacy_minus_half(self, app):
+        """Old -half form still works."""
+        app.scroll_history = lambda d: setattr(app, '_last_delta', d)
+        app._visible_ping_length = 100
+        app._cmd_scroll_history('-half')
+        assert app._last_delta == -50
+
+    def test_scroll_history_full_dash(self, app):
+        app.scroll_history = lambda d: setattr(app, '_last_delta', d)
+        app._visible_ping_length = 40
+        app._cmd_scroll_history('full-')
+        assert app._last_delta == -40
+
+    def test_scroll_log_page_dash(self, app):
+        app.scroll_log = lambda d: setattr(app, '_last_log_delta', d)
+        app._log_page_size = 20
+        app._cmd_scroll_log('page-')
+        assert app._last_log_delta == -20
+
+    def test_scroll_log_legacy_minus_page(self, app):
+        """Old -page form still works."""
+        app.scroll_log = lambda d: setattr(app, '_last_log_delta', d)
+        app._log_page_size = 20
+        app._cmd_scroll_log('-page')
+        assert app._last_log_delta == -20
+
+
+# ===========================================================================
+# TestModeFlag — --mode on :bind-key (8e)
+# ===========================================================================
+
+class TestModeFlag:
+    """--mode stores bindings in _mode_bindings for non-normal modes."""
+
+    def test_default_help_mode_bindings_exist(self, app, pb):
+        """Default help-mode bindings for q, Esc, Up, Down are registered."""
+        import curses
+        help_bindings = app._mode_bindings.get('help', {})
+        assert ord('q') in help_bindings
+        assert 27 in help_bindings           # Esc
+        assert curses.KEY_UP in help_bindings
+        assert curses.KEY_DOWN in help_bindings
+
+    def test_default_details_mode_bindings_exist(self, app, pb):
+        """Default details-mode bindings for q, Esc, Up, Down are registered."""
+        import curses
+        details = app._mode_bindings.get('details', {})
+        assert ord('q') in details
+        assert 27 in details
+        assert curses.KEY_UP in details
+
+    def test_user_help_mode_binding(self, app, pb):
+        """--mode help stores binding in _mode_bindings['help']."""
+        app._cmd_bindkey('--mode help h :help')
+        help_bindings = app._mode_bindings.get('help', {})
+        assert ord('h') in help_bindings
+        b = help_bindings[ord('h')]
+        assert b.commands == [':help']
+        assert b.mode == 'help'
+
+    def test_user_details_mode_binding(self, app, pb):
+        """--mode details stores binding in _mode_bindings['details']."""
+        app._cmd_bindkey('--mode details i :ping-view')
+        details = app._mode_bindings.get('details', {})
+        assert ord('i') in details
+
+    def test_mode_binding_not_in_main_trie(self, app, pb):
+        """A --mode help binding does NOT appear in the main key trie."""
+        app._cmd_bindkey('--mode help x :help')
+        keys = pb._parse_key_notation('x')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is None or all(':help' not in c for c in binding.commands)
+
+    def test_dispatch_mode_key_executes_command(self, app, pb):
+        """_dispatch_mode_key finds and runs help-mode binding."""
+        executed = []
+        original = app._dispatch_cmd
+        app._dispatch_cmd = lambda cmd: executed.append(cmd)
+        app._cmd_bindkey('--mode help h :help')
+        result = app._dispatch_mode_key('help', ord('h'))
+        assert result is True
+        assert any("help" in cmd for cmd in executed)
+        app._dispatch_cmd = original
+
+    def test_dispatch_mode_key_returns_false_for_unbound(self, app, pb):
+        """_dispatch_mode_key returns False when no binding exists for the key."""
+        result = app._dispatch_mode_key('help', ord('Z'))
+        assert result is False
+
+    def test_cmd_close_closes_help(self, app, pb):
+        """:close sets help_open=False and _current_mode='normal'."""
+        app.help_open = True
+        app._current_mode = 'help'
+        app._cmd_close()
+        assert app.help_open is False
+        assert app._current_mode == 'normal'
+
+    def test_cmd_close_closes_details(self, app, pb):
+        """:close sets details_open=False and clears details_monitor."""
+        import unittest.mock as mock
+        app.details_open = True
+        app.details_monitor = mock.MagicMock()
+        app._current_mode = 'details'
+        app._cmd_close()
+        assert app.details_open is False
+        assert app.details_monitor is None
+        assert app._current_mode == 'normal'
+
+    def test_scroll_overlay_help(self, app, pb):
+        """:scroll-overlay up/down adjusts help_scroll."""
+        app.help_open = True
+        app.help_scroll = 5
+        app._cmd_scroll_overlay('up')
+        assert app.help_scroll == 4
+        app._cmd_scroll_overlay('down')
+        assert app.help_scroll == 5
+        app._cmd_scroll_overlay('page')
+        assert app.help_scroll == 15
+        app._cmd_scroll_overlay('page-')
+        assert app.help_scroll == 5
+
+    def test_scroll_overlay_clamped_at_zero(self, app, pb):
+        """:scroll-overlay page- from scroll=3 clamps at 0."""
+        app.help_open = True
+        app.help_scroll = 3
+        app._cmd_scroll_overlay('page-')
+        assert app.help_scroll == 0
+
+
+# ===========================================================================
+# TestDescFlag — --desc on :bind-key (8h)
+# ===========================================================================
+
+class TestDescFlag:
+    """--desc stores description text on _Binding."""
+
+    def test_desc_stored_on_binding(self, app, pb):
+        """--desc text is stored as binding.desc."""
+        app._cmd_bindkey('--desc "Connect via MTR" t :mux mtr %i')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+        assert binding.desc == 'Connect via MTR'
+
+    def test_desc_empty_by_default(self, app, pb):
+        """Bindings without --desc have empty desc."""
+        app._cmd_bindkey('t :mux mtr')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding.desc == ''
+
+    def test_desc_shown_in_listing(self, app, pb):
+        """bind-key listing shows desc text alongside binding."""
+        app._cmd_bindkey('--desc "MTR trace" t :mux mtr')
+        app._cmd_bindkey()
+        events = [e for e in app.events if 'MTR trace' in e]
+        assert events, "desc text not shown in listing"
+
+    def test_desc_with_mode(self, app, pb):
+        """--mode and --desc can be combined."""
+        app._cmd_bindkey('--mode help --desc "Show help" h :help')
+        help_bindings = app._mode_bindings.get('help', {})
+        assert ord('h') in help_bindings
+        assert help_bindings[ord('h')].desc == 'Show help'
+
+
+# ===========================================================================
+# TestHintFlag — --hint on :bind-key (8h2)
+# ===========================================================================
+
+class TestHintFlag:
+    """--hint stores hint text on _Binding and appears in menu bar collection."""
+
+    def test_hint_stored_on_binding(self, app, pb):
+        """--hint text is stored as binding.hint."""
+        app._cmd_bindkey('--hint "[t]ool" t :mux mtr')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+        assert binding.hint == '[t]ool'
+
+    def test_hint_empty_by_default(self, app, pb):
+        """Bindings without --hint have empty hint."""
+        app._cmd_bindkey('t :mux mtr')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding.hint == ''
+
+    def test_default_action_hints_present(self, app, pb):
+        """Default bindings for q, C, ? carry hint text."""
+        hints = [b.hint for _, b in app._key_trie if b.hint]
+        assert any('[q]uit' in h for h in hints), "q binding missing [q]uit hint"
+        assert any('[C]lear' in h for h in hints), "C binding missing hint"
+        assert any('[?]' in h for h in hints), "? binding missing hint"
+
+    def test_user_hint_collected_for_menu(self, app, pb):
+        """User-defined --hint binding shows up when iterating trie for menu."""
+        app._cmd_bindkey('--hint "[m]tr" m :mux mtr')
+        all_hints = [b.hint for _, b in app._key_trie if b.hint]
+        assert '[m]tr' in all_hints
+
+    def test_desc_and_hint_combined(self, app, pb):
+        """--desc and --hint can both be set on one binding."""
+        app._cmd_bindkey('--desc "Run MTR" --hint "[m]tr" m :mux mtr')
+        keys = pb._parse_key_notation('m')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding.desc == 'Run MTR'
+        assert binding.hint == '[m]tr'

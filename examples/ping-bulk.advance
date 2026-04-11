@@ -212,7 +212,8 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :prog-options ssh restricted.example.com --disable
 
 # ── Key bindings ──────────────────────────────────────────────────────────
-# :bindkey assigns a command (or chain of commands) to a key sequence.
+# :bind-key assigns a command (or chain of commands) to a key sequence.
+# (:bindkey is accepted as a backward-compatible alias.)
 # Vim-like notation: <C-x> = Ctrl+x, <CR> = Enter, <Space>, <Up>, etc.
 # Multi-key sequences work naturally: za, gg, gt, etc.
 #
@@ -234,17 +235,24 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 #     %{j?-J %{j: -J }}  →  "-J host1 -J host2" when jump hosts exist, "" otherwise
 #
 # Append '...' to pre-fill the command line without executing (edit mode):
-#   :bindkey t :mux mtr %i...     — lets user review before Enter
+#   :bind-key t :mux mtr %i...     — lets user review before Enter
+#
+# --desc TEXT    description shown in the ? help overlay "Custom bindings" section
+# --hint TEXT    short label shown in the bottom bar (use [x] notation for hotkey)
+# --mode MODE    bind key in a specific UI layer: normal (default), help, details
 #
 # Default 'c' binding (built-in, shown here for reference / override):
 #   SSH-proxied hosts (have %d):  :mux ssh%{j? -J %{j: -J }} %d
 #   Plain hosts:                  :mux ssh %r
 # Override example:
-#   :bindkey c :mux ssh -l admin %r
+#   :bind-key c :mux ssh -l admin %r
 
-:bindkey t :mux mtr %i
-:bindkey x :set stats down \; :set dns hostname
-:bindkey <C-p> :pause
+:bind-key --desc "MTR trace" --hint "[t]race" t :mux mtr %i
+:bind-key x :set stats down \; :set dns hostname
+:bind-key <C-p> :pause
+
+# Overlay-mode bindings — bind h to show help even while in the help overlay:
+# :bind-key --mode help h :close
 
 # ── Dynamic Additions ──────────────────────────────────────────────────────
 # You can also dynamically source other config files or add specific hosts
