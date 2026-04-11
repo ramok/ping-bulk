@@ -2703,10 +2703,7 @@ class _HostsParser:
             else:
                 entries.extend(self._parse_host(text, comment, None))
 
-        if with_stack:
-            w_type, w_args = with_stack[-1]
-            entries.append(('warn',
-                f':with {w_type}: implicit :end at EOF'))
+
 
         return entries
 

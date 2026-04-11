@@ -422,11 +422,11 @@ class TestProgOptionsBlock:
         hosts = [e[1] for e in entries if e[0] == 'host']
         assert any('10.0.0.1' in h for h in hosts), "host after error should still be parsed"
 
-    def test_unclosed_with_at_eof_is_warn(self, pb, tmp_path):
-        """:with block not closed at EOF emits a warning (not an error)."""
+    def test_unclosed_with_at_eof_is_silent(self, pb, tmp_path):
+        """:with block not closed at EOF is silently accepted (EOF = implicit :end)."""
         content = ":with prog-options ssh\n  *-router -l admin\n"
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         errors = [e for e in entries if e[0] == 'error']
         warns  = [e for e in entries if e[0] == 'warn']
         assert not errors, "unclosed :with at EOF should NOT emit an error"
-        assert warns, "expected a warning for unclosed :with block at EOF"
+        assert not warns,  "unclosed :with at EOF should NOT emit a warning"
