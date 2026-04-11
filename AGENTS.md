@@ -188,3 +188,46 @@ Users write `:bind-key` directives:
 ### Status bar indicators
 - Left-side indicators (DNS / stats / order / history / sync / pause) are **internal-only** hardcoded in `draw_menu_bar`.
 - There is no user-facing `--status` flag; do not add one.
+
+## 12. Log Level System
+
+### Constants (module-level)
+```python
+LEVEL_QUIET  = 0   # host status changes only
+LEVEL_NORMAL = 1   # + warnings/errors  (default)
+LEVEL_INFO   = 2   # + cmd output, config, resolv
+LEVEL_DEBUG  = 3   # + bind-key dispatch, all internal
+```
+
+### EventEntry class
+`self.events` is a `deque[EventEntry]` where each `EventEntry(level, category, text)` stores:
+- `level` — one of the `LEVEL_*` constants
+- `category` — string tag (host name, `'cmd'`, `'bind-key'`, `'resolv'`, …)
+- `text` — the full formatted line (timestamp + message)
+
+The class delegates `__str__`, `__contains__`, `lower()`, `startswith()`, `__eq__` to `.text` for backward compatibility.
+
+### Level inference
+`add_event(category, message, level=None)` infers level from `_CATEGORY_LEVELS` dict when no explicit level is given.  Unknown categories (host names) default to `LEVEL_QUIET`.
+
+### Display-time filtering
+`draw_events` filters `self.events` at display time: `[e for e in self.events if e.level <= self.loglevel]`.  Changing `loglevel` instantly reveals/hides buffered history without re-ingesting.
+
+### Coloring (`_event_color_attr`)
+| Condition | Curses attribute |
+|-----------|-----------------|
+| level == DEBUG or category == 'bind-key' | `A_DIM` |
+| message starts with `warning:` or category in `('warn','hosts')` | yellow (pair 3) |
+| message starts with `error:` or category == `'save'` | red (pair 2) |
+| everything else | 0 (default) |
+
+### CLI flags
+- `--log-level quiet|normal|info|debug` — explicit startup level
+- `-v` / `-vv` / `-vvv` — increase from default (argparse `action='count'`)
+- `-q` / `-qq` / `-qqq` — decrease from default
+
+### Persistence
+`_save_config` writes `:set log-level <label>`.  `_cmd_loglevel` is a `:set` handler registered via `SetParam('log-level', ...)`.
+
+### File output
+`save_to_file` always writes **all** levels regardless of `self.loglevel`.  Users grep the file for filtering.
