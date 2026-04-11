@@ -4338,6 +4338,7 @@ class Application:
         # help mode bindings
         _mb('help', 'q',      ':close')
         _mb('help', 'Q',      ':close')
+        _mb('help', '?',      ':close')
         _mb('help', '<Esc>',  ':close')
         _mb('help', '<CR>',   ':close')
         _mb('help', 'A',      ':help-toggle-all')
