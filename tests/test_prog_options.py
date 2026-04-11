@@ -393,3 +393,41 @@ class TestProgOptionsBlock:
         app._cmd_with('prog-options ssh')
         events = [e for e in app.events if 'with' in e.text]
         assert events
+
+    def test_end_inside_with_is_error(self, pb, tmp_path):
+        """:end inside :with block emits an error (not just a warning) and hosts after it appear."""
+        content = (
+            ":with prog-options ssh\n"
+            "  *-router -l admin\n"
+            ":end\n"
+            "1.1.1.1\n"
+        )
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [e for e in entries if e[0] == 'error']
+        assert errors, "expected an error for :end inside :with block"
+        assert 'end' in errors[0][1]
+        # hosts after the block must appear (block was closed on error)
+        hosts = [e[1] for e in entries if e[0] == 'host']
+        assert any('1.1.1.1' in h for h in hosts), "host after :end should still be parsed"
+
+    def test_unknown_cmd_inside_with_is_error(self, pb, tmp_path):
+        """Any unrecognised command inside :with prog-options block is an error; hosts after still appear."""
+        content = (
+            ":with prog-options ssh\n"
+            "  *-cam --disable\n"
+            ":foobar\n"
+            "10.0.0.1\n"
+        )
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [e for e in entries if e[0] == 'error']
+        assert any('foobar' in e[1] for e in errors), "expected error mentioning the bad command"
+        hosts = [e[1] for e in entries if e[0] == 'host']
+        assert any('10.0.0.1' in h for h in hosts), "host after error should still be parsed"
+
+    def test_unclosed_with_at_eof_is_error(self, pb, tmp_path):
+        """:with block not closed at EOF emits an error."""
+        content = ":with prog-options ssh\n  *-router -l admin\n"
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [e for e in entries if e[0] == 'error']
+        assert errors, "expected an error for unclosed :with block at EOF"
+        assert 'missing :done' in errors[0][1]
