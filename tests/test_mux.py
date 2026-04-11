@@ -496,3 +496,53 @@ class TestNoFocusRelaunch:
         cmd = app.prompt['pending_cmd']
         assert '--split-h' in cmd, f"--split-h missing: {cmd!r}"
         assert '--no-focus' in cmd, f"--no-focus missing: {cmd!r}"
+
+
+# ===========================================================================
+# :mux --only
+# ===========================================================================
+
+class TestMuxOnly:
+    """--only kills all other panes (tmux) or warns (screen/xterm)."""
+
+    def _inside_backend(self):
+        m = MagicMock()
+        m.is_inside.return_value = True
+        m.available.return_value = True
+        return m
+
+    def _outside_backend(self):
+        m = MagicMock()
+        m.is_inside.return_value = False
+        m.available.return_value = True
+        return m
+
+    def test_only_calls_kill_others_on_tmux(self, pb, tmp_path):
+        """--only calls kill_others() on the active tmux backend."""
+        app = _make_app(pb, tmp_path)
+        backend = self._inside_backend()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': backend, 'screen': backend,
+                                            'terminal': MagicMock()}):
+            app._cmd_mux('--only')
+        backend.kill_others.assert_called_once()
+
+    def test_only_not_in_mux_warns(self, pb, tmp_path):
+        """--only outside a multiplexer session emits a warning event."""
+        app = _make_app(pb, tmp_path)
+        backend = self._outside_backend()
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': backend, 'screen': backend,
+                                            'terminal': MagicMock()}):
+            app._cmd_mux('--only')
+        backend.kill_others.assert_not_called()
+        assert any('--only' in e.text for e in app.events)
+
+    def test_only_screen_emits_warning(self, pb, tmp_path):
+        """kill_others() on ScreenBackend raises RuntimeError → shown as event."""
+        app = _make_app(pb, tmp_path)
+        backend = self._inside_backend()
+        backend.kill_others.side_effect = RuntimeError(
+            "screen: --only is not supported")
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': backend, 'screen': backend,
+                                            'terminal': MagicMock()}):
+            app._cmd_mux('--only')
+        assert any('--only is not supported' in e.text for e in app.events)

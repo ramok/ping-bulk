@@ -3019,10 +3019,10 @@ CMD_REGISTRY = [
     CmdDef(['let'],              '_cmd_let',        None,
            '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
     CmdDef(['mux', 'tmux', 'screen'], '_cmd_mux', None,
-           '[--split-v|--split-h|--split-window] [--no-focus] [command...]',
+           '[--split-v|--split-h|--split-window] [--no-focus] [--only] [command...]',
            'run command in tmux/screen pane; no command = relaunch self '
            '(--split-v below, --split-h right, --split-window new, '
-           '--no-focus keeps ping-bulk active)'),
+           '--no-focus keeps ping-bulk active, --only kills all other panes)'),
     CmdDef(['term', 'terminal', 'xterm'], '_cmd_mux', None,
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
     CmdDef(['prog-options'],         '_cmd_prog_options', None,
@@ -3104,6 +3104,13 @@ class TerminalBackend(ABC):
         """
 
     @abstractmethod
+    def kill_others(self) -> None:
+        """Kill all panes/regions except the current one.
+
+        Raises RuntimeError if the operation is not supported.
+        """
+
+    @abstractmethod
     def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
         """Return argv to relaunch inside this backend.
 
@@ -3148,6 +3155,12 @@ class TmuxBackend(TerminalBackend):
         if not focus:
             cmd.append('-d')
         r = subprocess.run(cmd + ['--'] + command,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
+
+    def kill_others(self) -> None:
+        r = subprocess.run(['tmux', 'kill-pane', '-a'],
                            capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
@@ -3213,6 +3226,11 @@ class ScreenBackend(TerminalBackend):
             # Switch to the newly created window (last window in the list).
             subprocess.run(base + ['-X', 'other'],
                            capture_output=True, text=True)
+
+    def kill_others(self) -> None:
+        raise RuntimeError(
+            "screen: --only is not supported "
+            "(C-a Q collapses regions but cannot kill their programs)")
 
     def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
         cmd = ['screen']
@@ -3286,6 +3304,9 @@ class XTermBackend(TerminalBackend):
                 raise RuntimeError(stderr or f"terminal exited {proc.returncode}")
         except subprocess.TimeoutExpired:
             pass  # still running — opened successfully
+
+    def kill_others(self) -> None:
+        raise RuntimeError("xterm: no pane management — --only is not applicable")
 
     def relaunch_cmd(self, argv: list, hosts_file: str = None, kiosk_conf: str = None) -> list:
         return argv  # not applicable for terminal emulators
@@ -6514,6 +6535,24 @@ class Application:
         if tokens and tokens[0] == '--no-focus':
             no_focus = True
             tokens.pop(0)
+
+        # Parse --only: kill all panes/regions except the current one.
+        if tokens and tokens[0] == '--only':
+            tokens.pop(0)
+            backend = _resolve_mux_backend(preference)
+            if backend is None or isinstance(backend, XTermBackend):
+                self.add_event("cmd",
+                    "mux: --only requires an active multiplexer (tmux or screen)")
+                return
+            if not backend.is_inside():
+                self.add_event("cmd",
+                    "mux: --only requires an active multiplexer session")
+                return
+            try:
+                backend.kill_others()
+            except RuntimeError as e:
+                self.add_event("cmd", f"mux: {e}")
+            return
 
         if not tokens:
             # No command given: relaunch self.
