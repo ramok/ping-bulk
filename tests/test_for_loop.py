@@ -798,3 +798,135 @@ class TestForLoopMixed:
             f"Plain host and SSH host should not cross-dedup; got warn {warn_entries!r}"
         )
 
+
+
+# ===========================================================================
+# TestForResolv - :resolv inside :for body
+# ===========================================================================
+
+class TestForResolv:
+    """Tests for :resolv directives inside :for bodies.
+
+    Key known limitation: inside a :for loop $1 is consumed as the loop
+    variable. A :resolv line with a second brace group (e.g. {41,42}) produces
+    $2 back-references in the hostname template that refer to the *second*
+    capture inside _cmd_resolv — but after the loop substitutes $1, only one
+    brace group remains, so $2 is out of range and is left as the literal
+    string '$2' instead of the expected value.
+    """
+
+    def test_resolv_single_brace_inside_for_works(self, pb, tmp_path):
+        """:resolv with a single brace group inside :for emits correct cmd entries."""
+        content = """\
+            :for hub-{1-2}
+                :resolv 10.0.$1.1  $1-gw
+                $1-gw
+            :done
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [v for k, v in entries if k in ('error', 'warn')]
+        assert not errors, f"Unexpected errors: {errors}"
+
+        resolv_cmds = [v for k, v in entries if k == 'cmd' and 'resolv' in v]
+        assert ':resolv 10.0.1.1  1-gw' in resolv_cmds
+        assert ':resolv 10.0.2.1  2-gw' in resolv_cmds
+
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == ['1-gw', '2-gw']
+
+    def test_resolv_double_brace_inside_for_bug(self, pb, tmp_path):
+        """:resolv with two brace groups inside :for hits the $2-lost bug.
+
+        When :resolv 10.0.$1.{41,42} sh$1-cam$2 is in a :for body,
+        the loop substitutes $1 (hub number) but $2 (camera suffix from
+        {41,42}) is out of range at :resolv dispatch time and left as the
+        literal string '$2'.  This test documents the bug so any fix is noticed.
+
+        The recommended workaround is inline ## label with :for named var:
+            :for sh in hub-{1-4}
+                10.0.$sh.{41,42} ## sh$sh-cam$1
+        """
+        content = """\
+            :for hub-{1-1}
+                :resolv 10.0.$1.{41,42}  sh$1-cam$2
+                sh$1-cam41
+                sh$1-cam42
+            :done
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+
+        # There is ONE resolv cmd entry with brace expansion not yet applied
+        resolv_cmds = [v for k, v in entries if k == 'cmd' and 'resolv' in v
+                       and 'cam' in v]
+        assert len(resolv_cmds) == 1, f"Expected 1 cam resolv cmd: {resolv_cmds}"
+
+        # The hostname template still contains literal '$2' — the bug
+        assert '$2' in resolv_cmds[0], (
+            "Bug: $2 should remain unresolved when only one capture is "
+            f"available inside :for; got: {resolv_cmds}"
+        )
+
+    def test_resolv_double_brace_workaround_explicit_lines(self, pb, tmp_path):
+        """Workaround: explicit :resolv lines with literal suffixes avoid the $2 bug."""
+        content = """\
+            :for hub-{1-2}
+                :resolv 10.0.$1.41  sh$1-cam41
+                :resolv 10.0.$1.42  sh$1-cam42
+                sh$1-cam41
+                sh$1-cam42
+            :done
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [v for k, v in entries if k in ('error', 'warn')]
+        assert not errors, f"Unexpected errors: {errors}"
+
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == ['sh1-cam41', 'sh1-cam42', 'sh2-cam41', 'sh2-cam42']
+
+    def test_inline_label_in_for_body(self, pb, tmp_path):
+        """Inline ## label in :for body emits :resolv cmd + host entry per IP."""
+        content = """\
+            :for hub-{1-2}
+                10.0.$1.41 ## sh$1-cam41
+                10.0.$1.42 ## sh$1-cam42
+            :done
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [v for k, v in entries if k in ('error', 'warn')]
+        assert not errors, f"Unexpected errors: {errors}"
+
+        resolv_cmds = [v for k, v in entries if k == 'cmd' and 'resolv' in v]
+        assert ':resolv 10.0.1.41 sh1-cam41' in resolv_cmds
+        assert ':resolv 10.0.2.42 sh2-cam42' in resolv_cmds
+
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == ['10.0.1.41', '10.0.1.42', '10.0.2.41', '10.0.2.42']
+
+    def test_inline_label_named_var_brace_capture(self, pb, tmp_path):
+        """':for sh in' named var + inline ## uses $1 for brace capture in label.
+
+        With :for sh in hub-{1-2}, $sh = hub number and $1 is free to refer
+        to the back-reference from a brace group in the host IP pattern.
+        This is the preferred idiom for multi-suffix entries like cameras.
+        """
+        content = """\
+            :for sh in hub-{1-2}
+                10.0.$sh.{41,42} ## sh$sh-cam$1
+                10.0.$sh.{31,32} ## sh$sh-ps$1
+            :done
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        errors = [v for k, v in entries if k in ('error', 'warn')]
+        assert not errors, f"Unexpected errors: {errors}"
+
+        resolv_cmds = [v for k, v in entries if k == 'cmd' and 'resolv' in v]
+        assert ':resolv 10.0.1.41 sh1-cam41' in resolv_cmds
+        assert ':resolv 10.0.1.42 sh1-cam42' in resolv_cmds
+        assert ':resolv 10.0.2.31 sh2-ps31' in resolv_cmds
+        assert ':resolv 10.0.2.32 sh2-ps32' in resolv_cmds
+
+        hosts = [v for k, v in entries if k == 'host']
+        assert hosts == [
+            '10.0.1.41', '10.0.1.42', '10.0.1.31', '10.0.1.32',
+            '10.0.2.41', '10.0.2.42', '10.0.2.31', '10.0.2.32',
+        ]

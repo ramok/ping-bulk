@@ -2011,21 +2011,30 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                 # expanded name has no :resolv mapping at Application init time.
                 optional = line.startswith('?')
                 host_line = line[1:] if optional else line
+                # Split inline ## label (e.g. '10.0.$sh.{1,2} ## host$sh-cam$1')
+                _m_label = re.search(r' #{2,} ', host_line)
+                label_tmpl = host_line[_m_label.end():] if _m_label else None
+                if _m_label:
+                    host_line = host_line[:_m_label.start()].rstrip()
                 if _has_backref(host_line) or _line_was_dynamic:
-                    # Substitute back-references then expand remaining brace groups.
+                    # Substitute for-loop back-references then expand remaining brace groups.
                     expanded_tmpl = _apply_backref(host_line, captures, full_str)
+                    expanded_label = _apply_backref(label_tmpl, captures, full_str) if label_tmpl else None
                     try:
-                        expanded_hosts = _expand_host(expanded_tmpl)
+                        expanded_pairs = _expand_host_with_captures(expanded_tmpl)
                     except ValueError as e:
                         entries.append(('error', str(e)))
                         continue
                     effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
-                    for host in expanded_hosts:
+                    for host, host_captures in expanded_pairs:
                         key = (effective_ssh_args, host)
                         if key in seen_hosts:
                             entries.append(('warn', f"duplicate host ignored: {host}"))
                         else:
                             seen_hosts.add(key)
+                            if expanded_label and _is_ip(host):
+                                label = _apply_backref(expanded_label, host_captures, host)
+                                entries.append(('cmd', f':resolv {host} {label}'))
                             if effective_ssh_args is not None:
                                 # '?' not supported for SSH hosts inside :for — add normally.
                                 entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
@@ -2038,17 +2047,20 @@ def _process_for_loop(pattern, body_lines, seen_hosts, ssh_block_args=None,
                         entries.append(('warn',
                             f"host {host_line!r} inside :for loop has no back-reference; added once"))
                         try:
-                            expanded_hosts = _expand_host(host_line)
+                            expanded_pairs = _expand_host_with_captures(host_line)
                         except ValueError as e:
                             entries.append(('error', str(e)))
                             continue
                         effective_ssh_args = local_ssh_args if in_local_ssh_block else ssh_block_args
-                        for host in expanded_hosts:
+                        for host, host_captures in expanded_pairs:
                             key = (effective_ssh_args, host)
                             if key in seen_hosts:
                                 entries.append(('warn', f"duplicate host ignored: {host}"))
                             else:
                                 seen_hosts.add(key)
+                                if label_tmpl and _is_ip(host):
+                                    label = _apply_backref(label_tmpl, host_captures, host)
+                                    entries.append(('cmd', f':resolv {host} {label}'))
                                 if effective_ssh_args is not None:
                                     entries.append(('cmd', f':ssh {effective_ssh_args} {host}'))
                                 else:
@@ -2262,7 +2274,7 @@ class _HostsParser:
         errors = []
         i = start
         while i < len(lines):
-            text, _ = lines[i]
+            text, ic = lines[i]
             i += 1
             if text.startswith('#') and not text.startswith('##'):
                 continue
@@ -2280,7 +2292,8 @@ class _HostsParser:
                 if cmd == 'ssh-end':
                     errors.append(('error', ":ssh-end inside :for is not supported"))
                     continue
-            body.append(text)
+            # Preserve inline ## label so _process_for_loop can emit :resolv
+            body.append(text + (' ## ' + ic if ic else ''))
         return body, errors, i  # implicit :done at EOF
 
     # ── :for execution ────────────────────────────────────────────────────
