@@ -114,12 +114,12 @@ class TestApplyNamedBackref:
 
 
     def test_mixed_with_literal_dollar(self, pb, tmp_path):
-        """Test that numbered backrefs take precedence over literal dollar signs.
+        """In named :for loops, $N is positional (= Nth named var value).
 
-        The pattern {1..2} creates one capture group, so:
-        - $1 refers to the first group (numbered backref)
-        - $x refers to the named variable 'x'
-        - $100 gets parsed as $1 followed by literal "00"
+        With :for x in {1..2}: captures = {'x': '1'} then {'x': '2'}.
+        $1 = positional first = $x's value.
+        $100 is parsed as $1 followed by literal "00", so:
+          $100 → <$x value> + "00"  (e.g. "100", "200")
         """
         content = """\
             :for x in {1..2}
@@ -128,11 +128,8 @@ class TestApplyNamedBackref:
         """
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [val for kind, val in entries if kind == 'host']
-        # $1 captures the brace expansion value {1..2}
-        # So $100 becomes: <value-of-$1> + "00"
-        # And $x becomes: <value-of-x>
-        # Result: "price$100-host1" and "price$100-host2"
-        assert hosts == ['price$100-host1', 'price$100-host2']
+        # $1 (positional) == $x, so $100 → x_value + "00"
+        assert hosts == ['price100-host1', 'price200-host2']
 
 
     def test_alphanum_names(self, pb, tmp_path):
@@ -172,6 +169,27 @@ class TestApplyNamedBackref:
         hosts = [val for kind, val in entries if kind == 'host']
         # Numbered backrefs: $1 = first group, $2 = second group
         assert hosts == ['server-1-3', 'server-1-4', 'server-2-3', 'server-2-4']
+
+    def test_numbered_alias_in_named_loop(self, pb, tmp_path):
+        """$1 works as positional alias for the first named var in a :for loop.
+
+        Regression test: :for i in sensor-hub-{1-4} with :remote-ping sh$1-host
+        used to silently produce 4 identical commands (because $1 was unresolved
+        with dict captures), emitting 3 spurious 'duplicate' warnings.
+        """
+        content = """\
+            :for i in sensor-hub-{1..3}
+            :remote-ping sh$1-ps31 10.87.0.$1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [v for k, v in entries if k == 'warn']
+        cmds  = [v for k, v in entries if k == 'cmd']
+        assert not any('duplicate' in w for w in warns), f"Unexpected duplicate warn: {warns}"
+        assert ':remote-ping sh1-ps31 10.87.0.1' in cmds
+        assert ':remote-ping sh2-ps31 10.87.0.2' in cmds
+        assert ':remote-ping sh3-ps31 10.87.0.3' in cmds
+
 
 if __name__ == '__main__':
     import pytest

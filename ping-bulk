@@ -967,7 +967,7 @@ def _expand_host_with_captures(pattern):
     return results
 
 
-def _apply_backref(template, captures, full_str=None):
+def _apply_backref(template, captures, full_str=None, named_only=False):
     r"""Substitute back-reference placeholders in *template* with captured values.
 
     Recognised forms:
@@ -1003,6 +1003,11 @@ def _apply_backref(template, captures, full_str=None):
     full_str : str or None
         The fully-expanded host string for this iteration; used for ``$0`` /
         ``${0}``.  Pass ``None`` when no full-string context is available.
+    named_only : bool
+        When ``True`` and *captures* is a dict, skip numeric ``$N`` substitution
+        entirely (leave placeholders for a later pass with list captures from an
+        inner host-pattern brace expansion).  Has no effect when *captures* is a
+        list.  Default: ``False``.
 
     Returns
     -------
@@ -1031,10 +1036,15 @@ def _apply_backref(template, captures, full_str=None):
         idx = int(num_braced if num_braced is not None else num_bare)
         if idx == 0:
             return full_str if full_str is not None else m.group(0)
-        # Numbered backrefs work with both list and dict captures
         if isinstance(captures, dict):
-            # For dict captures, treat numbers as string keys for potential future use
-            return captures.get(str(idx), m.group(0))
+            if named_only:
+                # Skip numeric: leave for a later pass with list captures
+                # (e.g. from inner host-pattern brace expansion).
+                return m.group(0)
+            # Positional: $1 = first named var value, $2 = second, etc.
+            # Allows $1 as shorthand in named :for loops (:for i in → $1 == $i).
+            vals = list(captures.values())
+            return vals[idx - 1] if 1 <= idx <= len(vals) else m.group(0)
         else:
             return captures[idx - 1] if 1 <= idx <= len(captures) else m.group(0)
 
@@ -2267,7 +2277,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                     if _has_backref(host_line) or _line_was_dynamic:
                         # Substitute for-loop back-references then expand remaining brace groups.
                         expanded_tmpl = _apply_backref(host_line, captures, full_str)
-                        expanded_label = _apply_backref(label_tmpl, captures, full_str) if label_tmpl else None
+                        expanded_label = _apply_backref(label_tmpl, captures, full_str, named_only=True) if label_tmpl else None
                         try:
                             expanded_pairs = _expand_host_with_captures(expanded_tmpl)
                         except ValueError as e:

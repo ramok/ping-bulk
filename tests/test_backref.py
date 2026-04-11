@@ -140,10 +140,16 @@ class TestApplyBackref:
         assert result == '$name.lan'
 
     def test_mixed_named_and_numbered(self, pb):
-        """Mixed $name and $N in one template with dict captures."""
-        captures = {'rack': 'r1', '1': 'node5'}
-        result = pb._apply_backref('$rack-$1.lan', captures, full_str='r1-node5')
-        assert result == 'r1-node5.lan'
+        """Dict captures: $N uses positional access (1-indexed by insertion order).
+
+        In a named :for loop, $1 = first named var's value, $2 = second, etc.
+        This lets users write $1 as a shorthand for the first capture in
+        named-var loops (mirrors the behaviour of numeric :for loops).
+        """
+        captures = {'x': 'alpha', 'y': 'beta'}
+        # $1 = positional first = 'alpha', $2 = positional second = 'beta'
+        result = pb._apply_backref('$x-$1-$y-$2', captures, full_str='alpha-beta')
+        assert result == 'alpha-alpha-beta-beta'
 
     def test_named_backref_adjacent_chars(self, pb):
         """${name}9 allows named backref adjacent to other characters."""
