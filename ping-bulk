@@ -3131,14 +3131,19 @@ class TerminalBackend(ABC):
         """
 
 
-def _session_name_from_hosts_file(hosts_file: str) -> str:
-    """Derive a mux session name from the hosts file path.
+def _session_name_from_hosts_file(hosts_file: str, argv0: str = None) -> str:
+    """Derive a mux session name.
 
-    Uses the basename (without extension) of the hosts file, replacing '-' and '.' with '_'.
-    Falls back to 'ping_bulk' when not set.
+    Preference order:
+      1. hosts_file basename (when -f was given)
+      2. argv0 basename (the script name, e.g. 'ping-bulk.evo-lan')
+      3. 'ping_bulk' hard fallback
+
+    Both '-' and '.' are replaced with '_' for multiplexer compatibility.
     """
-    if hosts_file:
-        name = os.path.basename(hosts_file).replace('-', '_').replace('.', '_')
+    source = hosts_file or argv0
+    if source:
+        name = os.path.basename(source).replace('-', '_').replace('.', '_')
         return name or 'ping_bulk'
     return 'ping_bulk'
 
@@ -3182,7 +3187,7 @@ class TmuxBackend(TerminalBackend):
         cmd = ['tmux']
         if kiosk_conf and os.path.exists(kiosk_conf):
             cmd += ['-f', kiosk_conf]
-        cmd += ['new', '-As', _session_name_from_hosts_file(hosts_file), '--']
+        cmd += ['new', '-As', _session_name_from_hosts_file(hosts_file, argv[0] if argv else None), '--']
         cmd += argv
         return cmd
 
@@ -3249,7 +3254,7 @@ class ScreenBackend(TerminalBackend):
         cmd = ['screen']
         if kiosk_conf and os.path.exists(kiosk_conf):
             cmd += ['-c', kiosk_conf]
-        cmd += ['-d', '-RR', '-S', _session_name_from_hosts_file(hosts_file)] + argv
+        cmd += ['-d', '-RR', '-S', _session_name_from_hosts_file(hosts_file, argv[0] if argv else None)] + argv
         return cmd
 
 
