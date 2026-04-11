@@ -2894,18 +2894,25 @@ class CmdDef:
                     used by _get_completions to offer Tab-completion on the second token
     arg_completer — None, or a callable ``(prefix: str) -> list[str]`` for dynamic completion
                     (e.g. filesystem paths); takes priority over arg_choices when set
+    flags         — None, a static list[str], or a zero-argument callable returning list[str];
+                    flags (starting with -) that are valid for this command; used by
+                    _get_completions when the current token starts with '-'
     usage         — short argument synopsis shown in help (e.g. '[off|hostname|ip]')
     help          — one-line description shown in the help overlay
     cli_flags     — tuple of CLI flags (e.g. ('-f', '--file')), if this command can be passed via CLI
     cli_kwargs    — dict of kwargs to pass to argparse.add_argument() for the cli_flags
     """
-    __slots__ = ('names', 'action', 'arg_choices', 'arg_completer', 'usage', 'help', 'completable', 'cli_flags', 'cli_kwargs')
+    __slots__ = ('names', 'action', 'arg_choices', 'arg_completer', 'flags',
+                 'usage', 'help', 'completable', 'cli_flags', 'cli_kwargs')
 
-    def __init__(self, names, action, arg_choices=None, usage='', help='', arg_completer=None, completable=True, cli_flags=None, cli_kwargs=None):
+    def __init__(self, names, action, arg_choices=None, usage='', help='',
+                 arg_completer=None, flags=None, completable=True,
+                 cli_flags=None, cli_kwargs=None):
         self.names         = names
         self.action        = action
         self.arg_choices   = arg_choices
         self.arg_completer = arg_completer
+        self.flags         = flags
         self.usage         = usage
         self.help          = help
         self.completable   = completable
@@ -2952,7 +2959,8 @@ def _complete_path_arg(prefix):
 # Master command registry — single source of truth for names, handlers, and completions.
 CMD_REGISTRY = [
     CmdDef(['q', 'quit'],        '_cmd_quit',      None,
-           '[--confirm]',         'quit; --confirm uses re-press Ctrl-C pattern'),
+           '[--confirm]',         'quit; --confirm uses re-press Ctrl-C pattern',
+           flags=['--confirm']),
     CmdDef(['dns'],              '_cmd_dns',        lambda: [m.lower() for m in DNS_MODES],
            '[off|hostname|ip]',   'cycle or set DNS display mode',
            cli_flags=('--dns',),
@@ -3022,7 +3030,9 @@ CMD_REGISTRY = [
            '[--split-v|--split-h|--split-window] [--no-focus] [--only] [command...]',
            'run command in tmux/screen pane; no command = relaunch self '
            '(--split-v below, --split-h right, --split-window new, '
-           '--no-focus keeps ping-bulk active, --only kills all other panes)'),
+           '--no-focus keeps ping-bulk active, --only kills all other panes)',
+           flags=['-v', '-h', '-w', '--split-v', '--split-h', '--split-window',
+                  '--no-focus', '--only']),
     CmdDef(['term', 'terminal', 'xterm'], '_cmd_mux', None,
            '[-w] <command...>', 'run command in a new X/Wayland terminal window'),
     CmdDef(['prog-options'],         '_cmd_prog_options', None,
@@ -3041,9 +3051,12 @@ CMD_REGISTRY = [
            '[prev]',              'jump to next (or prev) search match',
            completable=False),
     CmdDef(['bind-key'],             '_cmd_bindkey',    None,
-           '[key] [command]',    'bind/query/list key bindings'),
+           '[--show|--show-all] [key] [command]', 'bind/query/list key bindings',
+           flags=['--show', '--show-all', '--mode', '--desc', '--hint',
+                  '--%h', '--%s', '--%p', '--%r', '--%d', '--%j']),
     CmdDef(['unbind-key'],           '_cmd_bindkey',    None,
-           '<key>',              'unbind a key binding'),
+           '<key>',              'unbind a key binding',
+           flags=['--mode', '--%h', '--%s', '--%p', '--%r', '--%d', '--%j']),
     CmdDef(['select'],           '_cmd_select',     ['up', 'down', 'first', 'last', 'none'],
            '[up|down|first|last|none]', 'navigate or clear host selection'),
     CmdDef(['details'],          '_cmd_details',    None,
@@ -3697,8 +3710,10 @@ class Application:
         Context-sensitive:
           empty / first token (no trailing space)
                           — command names matching the typed prefix
+          current token starts with '-'
+                          — flag names from cmd_def.flags (any position)
           two tokens / first token + trailing space
-                          — argument values for the recognised command
+                          — positional argument values for the recognised command
           three or more tokens
                           — no completions (return [])
         """
@@ -3710,22 +3725,30 @@ class Application:
                           if name.startswith(prefix) and _CMD_MAP[name].completable)
 
         cmd = parts[0].lstrip(':').lower()
+        cmd_def = _CMD_MAP.get(cmd)
+
+        # Flag completion: if the current token starts with '-', complete from cmd_def.flags
+        current_token = parts[-1] if parts and not text.endswith(' ') else ''
+        if current_token.startswith('-') and cmd_def and cmd_def.flags:
+            flags = cmd_def.flags() if callable(cmd_def.flags) else cmd_def.flags
+            return sorted(f for f in flags if f.startswith(current_token))
+
         # Offer argument completions for the second token only.
         # Condition: we have at most 2 tokens and we are NOT positioned after a
         # completed second token followed by a space (which would be the 3rd).
         if len(parts) <= 2 and not (len(parts) == 2 and text.endswith(' ')):
             arg_prefix = parts[1] if len(parts) == 2 else ''
-            cmd_def = _CMD_MAP.get(cmd)
-            if cmd_def and cmd_def.arg_completer is not None:
-                if isinstance(cmd_def.arg_completer, str):
-                    return getattr(self, cmd_def.arg_completer)(arg_prefix)
-                return cmd_def.arg_completer(arg_prefix)
-            if cmd_def and cmd_def.arg_choices is not None:
-                arg_prefix_lower = arg_prefix.lower()
-                choices = (cmd_def.arg_choices()
-                           if callable(cmd_def.arg_choices)
-                           else cmd_def.arg_choices)
-                return [c for c in choices if c.startswith(arg_prefix_lower)]
+            if not arg_prefix.startswith('-'):
+                if cmd_def and cmd_def.arg_completer is not None:
+                    if isinstance(cmd_def.arg_completer, str):
+                        return getattr(self, cmd_def.arg_completer)(arg_prefix)
+                    return cmd_def.arg_completer(arg_prefix)
+                if cmd_def and cmd_def.arg_choices is not None:
+                    arg_prefix_lower = arg_prefix.lower()
+                    choices = (cmd_def.arg_choices()
+                               if callable(cmd_def.arg_choices)
+                               else cmd_def.arg_choices)
+                    return [c for c in choices if c.startswith(arg_prefix_lower)]
 
         # Special case: ':set <param> [value]' — complete the value for the given parameter.
         # This is a 3-token completion that the generic 2-token block above cannot handle.
@@ -4539,10 +4562,63 @@ class Application:
             return s.join(value)
         return value
 
+    def _cmd_bindkey_show_user(self):
+        """Emit all user-defined key bindings to the event log."""
+        user_bindings = [(keys, b) for keys, b in self._key_trie
+                         if b.origin == 'user']
+        mode_user = []
+        for mode, mode_dict in self._mode_bindings.items():
+            seen = set()
+            for b in mode_dict.values():
+                if b.origin == 'user' and id(b) not in seen:
+                    seen.add(id(b))
+                    mode_user.append((mode, b))
+        if not user_bindings and not mode_user:
+            self.add_event("bind-key", "no user key bindings")
+            return
+        for _keys, b in user_bindings:
+            cmds = ' \\; '.join(b.commands)
+            suffix = '...' if b.edit_mode else ''
+            ctx_str = _format_context(b.context)
+            desc_str = f'  [{b.desc}]' if b.desc else ''
+            self.add_event("bind-key",
+                           f"{ctx_str}{b.key_notation}  →  {cmds}{suffix}{desc_str}")
+        for mode, b in mode_user:
+            cmds = ' \\; '.join(b.commands)
+            desc_str = f'  [{b.desc}]' if b.desc else ''
+            self.add_event("bind-key",
+                           f"--mode {mode} {b.key_notation}  →  {cmds}{desc_str}")
+
+    def _cmd_bindkey_show_all(self):
+        """Emit all key bindings (user + default) to the event log."""
+        seen = set()
+        for keys, b in self._key_trie:
+            dedup = (b.key_notation, tuple(b.commands), _format_context(b.context))
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+            cmds = ' \\; '.join(b.commands)
+            ctx_str = _format_context(b.context)
+            origin = '  [user]' if b.origin == 'user' else ''
+            self.add_event("bind-key",
+                           f"{ctx_str}{b.key_notation}  →  {cmds}{origin}")
+        for mode, mode_dict in self._mode_bindings.items():
+            seen_m = set()
+            for b in mode_dict.values():
+                dedup = (b.key_notation, tuple(b.commands))
+                if dedup in seen_m:
+                    continue
+                seen_m.add(dedup)
+                cmds = ' \\; '.join(b.commands)
+                origin = '  [user]' if b.origin == 'user' else ''
+                self.add_event("bind-key",
+                               f"--mode {mode} {b.key_notation}  →  {cmds}{origin}")
+
     def _cmd_bindkey(self, args=''):
         """Bind, unbind, or list key bindings.  Also dispatched by :unbind-key.
 
-        :bind-key                               — list all user bindings
+        :bind-key [--show]                      — list all user bindings
+        :bind-key --show-all                    — list all bindings (user + default)
         :bind-key [--mode MODE] [--%x] <key>    — query: show what is bound
         :bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] [--%x] <key> <cmd>
                                                 — bind key to command(s)
@@ -4558,32 +4634,15 @@ class Application:
             return
 
         args = args.strip()
-        if not args:
-            # List all user bindings (trie + mode bindings)
-            user_bindings = [(keys, b) for keys, b in self._key_trie
-                             if b.origin == 'user']
-            mode_user = []
-            for mode, mode_dict in self._mode_bindings.items():
-                seen = set()
-                for b in mode_dict.values():
-                    if b.origin == 'user' and id(b) not in seen:
-                        seen.add(id(b))
-                        mode_user.append((mode, b))
-            if not user_bindings and not mode_user:
-                self.add_event("bind-key", "no user key bindings")
-            else:
-                for _keys, b in user_bindings:
-                    cmds = ' \\; '.join(b.commands)
-                    suffix = '...' if b.edit_mode else ''
-                    ctx_str = _format_context(b.context)
-                    desc_str = f'  [{b.desc}]' if b.desc else ''
-                    self.add_event("bind-key",
-                                   f"{ctx_str}{b.key_notation}  →  {cmds}{suffix}{desc_str}")
-                for mode, b in mode_user:
-                    cmds = ' \\; '.join(b.commands)
-                    desc_str = f'  [{b.desc}]' if b.desc else ''
-                    self.add_event("bind-key",
-                                   f"--mode {mode} {b.key_notation}  →  {cmds}{desc_str}")
+
+        # --show-all: print every binding (user + default)
+        if args == '--show-all':
+            self._cmd_bindkey_show_all()
+            return
+
+        # no args or --show: list user bindings only
+        if not args or args == '--show':
+            self._cmd_bindkey_show_user()
             return
 
         # Parse --mode, --desc, --hint flags before context flags
