@@ -4185,6 +4185,8 @@ class Application:
             return
         if action == 'none':
             self.highlighted_index = None
+            self._search_query = ''
+            self._search_results = []
         elif action == 'first':
             self.highlighted_index = visible[0]
         elif action == 'last':
