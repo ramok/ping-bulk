@@ -241,8 +241,11 @@ class TestHierarchicalFolding:
         assert len(visible) == len(app.entries)
         for m in app.monitors: m.stop()
 
-    def test_fold_level1_hides_subsection_and_hosts(self, pb):
-        """Folding Top A hides Sub A1, 10.0.0.1, and 10.0.0.2."""
+    def test_fold_level1_hides_direct_hosts_not_subsections(self, pb):
+        """Folding Top A hides its direct host 10.0.0.1, but Sub A1 and its
+        hosts remain navigable because only the immediate parent fold state
+        matters — consistent with how draw_hosts renders section headers.
+        """
         app = self._make_app(pb)
         labels = self._labels(app, pb)
         top_a = labels[0]  # 'Top A', level 1
@@ -252,12 +255,12 @@ class TestHierarchicalFolding:
         visible_entries = [app.entries[i] for i in visible_idx]
 
         assert top_a in visible_entries  # parent section itself stays visible
-        assert not any(                   # no hosts from Top A's subtree
-            getattr(e, 'host', None) in ('10.0.0.1', '10.0.0.2')
-            for e in visible_entries
-        )
+        # 10.0.0.1 is a direct child of folded top_a → hidden
+        assert not any(getattr(e, 'host', None) == '10.0.0.1' for e in visible_entries)
         sub_a1 = labels[1]
-        assert sub_a1 not in visible_entries  # sub-section hidden
+        assert sub_a1 in visible_entries  # sub-section always navigable
+        # 10.0.0.2 is under unfolded sub_a1 → visible (immediate parent not folded)
+        assert any(getattr(e, 'host', None) == '10.0.0.2' for e in visible_entries)
 
         # Top B and its host are unaffected
         assert any(getattr(e, 'host', None) == '10.0.0.3' for e in visible_entries)

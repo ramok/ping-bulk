@@ -4950,13 +4950,13 @@ class Application:
                     # of the new section and no longer in scope.
                     while section_stack and section_stack[-1].level >= entry.level:
                         section_stack.pop()
-                    # This section is visible only if no ancestor is folded
-                    if not any(s.folded for s in section_stack):
-                        visible.append(idx)
+                    # Section labels are always navigable (draw_hosts always renders them)
+                    # regardless of whether a parent section is folded.
+                    visible.append(idx)
                     section_stack.append(entry)
                 else:
-                    # Monitor: visible only if no section in the stack is folded
-                    if not any(s.folded for s in section_stack):
+                    # Monitor: visible only if its immediate parent section is not folded.
+                    if not (section_stack and section_stack[-1].folded):
                         visible.append(idx)
             return visible
         else:
@@ -5486,8 +5486,11 @@ class Application:
                 entry_index += 1
                 continue
 
-            # Skip this monitor if any section in the stack is folded
-            if any(s.folded for s in section_stack):
+            # Skip this monitor if its immediate parent section is folded.
+            # Only the direct parent's fold state matters — if a sub-section is
+            # explicitly unfolded, its monitors are visible even when a grandparent
+            # section is folded.
+            if section_stack and section_stack[-1].folded:
                 entry_index += 1
                 continue
 
