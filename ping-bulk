@@ -4317,73 +4317,89 @@ class Application:
 
     def _register_default_bindings(self):
         """Populate the key trie with default (hardcoded) bindings."""
-        def _b(notation, *commands, context=None, hint=''):
+        def _b(notation, *commands, context=None, hint='', desc=''):
             keys = _parse_key_notation(notation)
             self._key_trie.insert(keys, _Binding(
                 list(commands), key_notation=notation, origin='default',
-                context=context, hint=hint))
+                context=context, hint=hint, desc=desc))
 
         # Quit
-        _b('q', ':quit', hint='[q]uit')
-        _b('Q', ':quit')
+        _b('q', ':quit', hint='[q]uit', desc='quit')
+        _b('Q', ':quit', desc='quit')
         # Display modes
-        _b('D', ':dns')
-        _b('s', ':stats')
-        _b('S', ':sync-history')
-        _b('o', ':sort')
-        _b('O', ':sort reverse')
-        _b('H', ':ping-view')
+        _b('D', ':dns', desc='cycle DNS display mode')
+        _b('s', ':stats', desc='cycle stats column')
+        _b('S', ':sync-history', desc='toggle synchronized history time axis')
+        _b('o', ':sort', desc='cycle sort order')
+        _b('O', ':sort reverse', desc='cycle sort order backward')
+        _b('H', ':ping-view', desc='cycle ping-history display mode')
         # Pause
-        _b('P', ':pause')
-        _b('p', ':pause-selected')
+        _b('P', ':pause', desc='pause/resume all monitoring')
+        _b('p', ':pause-selected', desc='pause/resume selected host')
         # Actions
-        _b('C', ':clear --confirm', hint='[C]lear log')
-        _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'))
-        _b('c', ':mux ssh %r')
-        _b('?', ':help', hint='help:[?]')
-        _b('<Esc>', ':select none')
+        _b('C', ':clear --confirm', hint='[C]lear log', desc='clear event log')
+        _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'),
+           desc='open SSH connection to selected host')
+        _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
+        _b('?', ':help', hint='help:[?]', desc='open keyboard reference')
+        _b('<Esc>', ':select none', desc='clear host selection')
         # Selection
-        _b('<Up>', ':select up')
-        _b('<Down>', ':select down')
-        _b('k', ':select up')
-        _b('j', ':select down')
-        _b('G', ':select last')
-        _b('gg', ':select first')
+        _b('<Up>', ':select up', desc='select previous host')
+        _b('<Down>', ':select down', desc='select next host')
+        _b('k', ':select up', desc='select previous host')
+        _b('j', ':select down', desc='select next host')
+        _b('G', ':select last', desc='select last host')
+        _b('gg', ':select first', desc='select first host')
         # Ctrl-F/B — vim-style page scroll for event log
-        _b('<C-f>', ':scroll-log page-')
-        _b('<C-b>', ':scroll-log page')
+        _b('<C-f>', ':scroll-log page-', desc='scroll event log down one page')
+        _b('<C-b>', ':scroll-log page',  desc='scroll event log up one page')
         # Details — register all Enter variants
-        _b('<CR>', ':details')
+        _b('<CR>', ':details', desc='open host details overlay')
         for code in (ord('\n'), ord('\r')):
             self._key_trie.insert([code], _Binding(
-                [':details'], key_notation='<CR>', origin='default'))
+                [':details'], key_notation='<CR>', origin='default',
+                desc='open host details overlay'))
         # Space — context-aware: fold when section selected, seen otherwise
-        _b('<Space>', ':fold toggle', context=frozenset('s'))
-        _b('<Space>', ':seen')
+        _b('<Space>', ':fold toggle', context=frozenset('s'),
+           desc='toggle fold of highlighted section')
+        _b('<Space>', ':seen', desc="insert 'seen' marker")
         # Fold
-        _b('[', ':fold-all')
-        _b(']', ':unfold-all')
-        _b('<C-Space>', ':fold toggle-recursive')
+        _b('[', ':fold-all',   desc='close (fold) ALL sections')
+        _b(']', ':unfold-all', desc='open (unfold) ALL sections')
+        _b('<C-Space>', ':fold toggle-recursive',
+           desc='toggle fold of section recursively')
+        _fold_descs = {
+            'a': 'toggle fold of highlighted section',
+            'A': 'toggle fold recursively',
+            'o': 'open (unfold) highlighted section',
+            'O': 'open section and all sub-sections',
+            'c': 'close (fold) highlighted section',
+            'C': 'close section and all sub-sections',
+            'R': 'open (unfold) ALL sections',
+            'M': 'close (fold) ALL sections',
+            'r': 'open one fold level (deepest closed)',
+            'm': 'close one fold level (shallowest open)',
+        }
         for ch in 'oOcCaArRmM':
-            _b(f'z{ch}', f':fold z{ch}')
+            _b(f'z{ch}', f':fold z{ch}', desc=_fold_descs[ch])
         # History scrolling
-        _b('<Left>', ':scroll-history half')
-        _b('<Right>', ':scroll-history half-')
-        _b('<C-Left>', ':scroll-history full')
-        _b('<C-Right>', ':scroll-history full-')
+        _b('<Left>',    ':scroll-history half',  desc='scroll history right')
+        _b('<Right>',   ':scroll-history half-', desc='scroll history left')
+        _b('<C-Left>',  ':scroll-history full',  desc='scroll history to oldest')
+        _b('<C-Right>', ':scroll-history full-', desc='scroll history to newest')
         # Log scrolling
-        _b('<PageUp>', ':scroll-log page')
-        _b('<PageDown>', ':scroll-log page-')
+        _b('<PageUp>',   ':scroll-log page',  desc='scroll event log up')
+        _b('<PageDown>', ':scroll-log page-', desc='scroll event log down')
         # Search
-        _b('/', ':search')
-        _b('n', ':search-next')
-        _b('N', ':search-next prev')
+        _b('/', ':search',      desc='search hosts')
+        _b('n', ':search-next', desc='next search match')
+        _b('N', ':search-next prev', desc='previous search match')
 
         self._register_mode_bindings()
 
     def _register_mode_bindings(self):
         """Register default key bindings for non-normal UI modes (help/details)."""
-        def _mb(mode, notation, *commands):
+        def _mb(mode, notation, *commands, desc=''):
             try:
                 keys = _parse_key_notation(notation)
             except ValueError:
@@ -4392,7 +4408,7 @@ class Application:
             if key_code is None:
                 return
             b = _Binding(list(commands), key_notation=notation,
-                         origin='default', mode=mode)
+                         origin='default', mode=mode, desc=desc)
             self._mode_bindings.setdefault(mode, {})[key_code] = b
             # Register Enter variants together
             if notation == '<CR>':
@@ -4400,27 +4416,27 @@ class Application:
                     self._mode_bindings[mode][extra] = b
 
         # help mode bindings
-        _mb('help', 'q',      ':close')
-        _mb('help', 'Q',      ':close')
-        _mb('help', '?',      ':close')
-        _mb('help', '<Esc>',  ':close')
-        _mb('help', '<CR>',   ':close')
-        _mb('help', 'A',      ':help-toggle-all')
-        _mb('help', '<Up>',   ':scroll-overlay up')
-        _mb('help', '<Down>', ':scroll-overlay down')
-        _mb('help', '<PgUp>', ':scroll-overlay page-')
-        _mb('help', '<PgDn>', ':scroll-overlay page')
+        _mb('help', 'q',      ':close',              desc='close help overlay')
+        _mb('help', 'Q',      ':close',              desc='close help overlay')
+        _mb('help', '?',      ':close',              desc='close help overlay')
+        _mb('help', '<Esc>',  ':close',              desc='close help overlay')
+        _mb('help', '<CR>',   ':close',              desc='close help overlay')
+        _mb('help', 'A',      ':help-toggle-all',    desc='toggle all-bindings view')
+        _mb('help', '<Up>',   ':scroll-overlay up',  desc='scroll up')
+        _mb('help', '<Down>', ':scroll-overlay down', desc='scroll down')
+        _mb('help', '<PgUp>', ':scroll-overlay page-', desc='scroll up one page')
+        _mb('help', '<PgDn>', ':scroll-overlay page',  desc='scroll down one page')
 
         # details mode bindings
-        _mb('details', 'q',      ':close')
-        _mb('details', 'Q',      ':close')
-        _mb('details', '<Esc>',  ':close')
-        _mb('details', '<CR>',   ':close')
-        _mb('details', 'c',      ':close')
-        _mb('details', '<Up>',   ':scroll-overlay up')
-        _mb('details', '<Down>', ':scroll-overlay down')
-        _mb('details', '<PgUp>', ':scroll-overlay page-')
-        _mb('details', '<PgDn>', ':scroll-overlay page')
+        _mb('details', 'q',      ':close',               desc='close details overlay')
+        _mb('details', 'Q',      ':close',               desc='close details overlay')
+        _mb('details', '<Esc>',  ':close',               desc='close details overlay')
+        _mb('details', '<CR>',   ':close',               desc='close details overlay')
+        _mb('details', 'c',      ':close',               desc='close details overlay')
+        _mb('details', '<Up>',   ':scroll-overlay up',   desc='scroll up')
+        _mb('details', '<Down>', ':scroll-overlay down',  desc='scroll down')
+        _mb('details', '<PgUp>', ':scroll-overlay page-', desc='scroll up one page')
+        _mb('details', '<PgDn>', ':scroll-overlay page',  desc='scroll down one page')
 
     def _execute_binding(self, binding):
         """Execute a _Binding (one or more commands, or fill command line).
@@ -7722,10 +7738,14 @@ class Application:
             key_label = _format_key_notation([key_code])
             binding = _resolve_binding(child.bindings, ctx_keys)
             if binding:
-                desc = binding.desc or binding.hint or ' '.join(binding.commands)
+                cmd_str = '(' + ' \\; '.join(binding.commands) + ')'
+                desc = binding.desc or binding.hint or ''
+                line = f"  [{key_label}]  {cmd_str}"
+                if desc:
+                    line += f"  {desc}"
             else:
-                desc = '…'   # prefix-only node, more keys required
-            lines.append(f"  [{key_label}]  {desc}")
+                line = f"  [{key_label}]  …"   # prefix-only node
+            lines.append(line)
 
         inner_w = max(len(l) for l in lines)
         inner_w = max(inner_w, 20)
