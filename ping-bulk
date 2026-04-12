@@ -5116,10 +5116,25 @@ class Application:
                     key_part, desc_part = content, ''
                 else:
                     key_part, desc_part = content[:space_pos], content[space_pos:]
-                for tc in key_part:
-                    if col < width - 1:
-                        stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
-                        col += 1
+                # Support "key1/key2" notation: split on '/' so each sub-key is
+                # bold but the separator is normal.  Guard: if splitting yields any
+                # empty part (e.g. key_part IS '/'), treat the whole thing as one key.
+                sub_keys = key_part.split('/')
+                if len(sub_keys) > 1 and all(sub_keys):
+                    for ki, sk in enumerate(sub_keys):
+                        if ki > 0:
+                            if col < width - 1:
+                                stdscr.addstr(row, col, '/')
+                                col += 1
+                        for tc in sk:
+                            if col < width - 1:
+                                stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                                col += 1
+                else:
+                    for tc in key_part:
+                        if col < width - 1:
+                            stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                            col += 1
                 for tc in desc_part:
                     if col < width - 1:
                         stdscr.addstr(row, col, tc)
@@ -5271,7 +5286,7 @@ class Application:
                 else:
                     entry = self.entries[self.highlighted_index] if 0 <= self.highlighted_index < len(self.entries) else None
                     if isinstance(entry, SectionLabel):
-                        hist_suffix += " [↑↓/jk navigate] [SPACE hide/show] [p pause section] [ESC clear]"
+                        hist_suffix += " [↑↓/jk navigate] [(C-)SPACE hide/show] [p pause] [ESC clear]"
                     else:
                         hist_suffix += " [↑↓/jk navigate] [ENTER details] [p pause host] [ESC clear]"
                         # Show connect hint if connect is not disabled for this host
@@ -5282,8 +5297,8 @@ class Application:
                             if not disabled:
                                 hist_suffix += " [c connect]"
                 if any(isinstance(e, SectionLabel) for e in self.entries):
-                    # \[ and \] inside [..] are escaped bracket literals used as hotkey chars
-                    hist_suffix += r"  [\[ fold-all]  [\] unfold-all]"
+                    # \[ and \] are escaped bracket literals; / splits into two bold keys
+                    hist_suffix += r"  [\[/\] (un)fold-all]"
 
             if self.history_offset > 0:
                 hist_suffix += f" [←{self.history_offset}  →live]"
