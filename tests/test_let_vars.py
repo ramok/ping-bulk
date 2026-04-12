@@ -43,7 +43,7 @@ def cmds(entries):
 
 
 def sections(entries):
-    return [(v, lv, fd) for k, v, lv, fd in entries if k == 'section']
+    return [(v, lv, fd) for k, v, lv, fd, *_ in entries if k == 'section']
 
 
 def errors(entries):

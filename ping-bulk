@@ -208,6 +208,11 @@ SET_PARAMS = [
         SetParam('log-level', '_cmd_loglevel',
              ['quiet', 'normal', 'info', 'debug', 'trace'],
              'event log verbosity (quiet=host status only, normal=+errors/warnings, info=+cmd/config, debug=all, trace=+exec)'),
+    SetParam('autofold', '_cmd_autofold', ['on', 'off'],
+             'auto fold sections when all hosts are up, unfold when any go down (default off)'),
+    SetParam('autofold-delay', '_cmd_autofold_delay',
+             ['5', '15', '30', '60', '120'],
+             'seconds to wait before auto-folding a recovered section (default 30)'),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -556,6 +561,8 @@ _FULL_HELP = [
     "  [zM] / [\\[]     (:fold close-all)     close (fold) ALL sections",
     "  [zr]             (:fold open-level)    open one fold level (deepest closed)",
     "  [zm]             (:fold close-level)   close one fold level (shallowest open)",
+    "  [z\\[]           (:fold close-healthy)   fold sections where all hosts are up",
+    "  [z\\]]           (:fold close-unhealthy) fold sections where any host is down",
     "  (type '[z]' → [z] appears bottom-right → press second key)",
     "-DIVIDER-",
     "  Commands",
@@ -581,6 +588,8 @@ _FULL_HELP = [
 
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
+    "  :fold close-healthy       fold sections where all hosts are currently up    (z[)",
+    "  :fold close-unhealthy     fold sections where any host is currently down    (z])",
     "  :saveconfig               save current settings to config file",
     "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
     "                            ip-pat may use brace expansion; \\N in host = brace group N",
@@ -598,6 +607,8 @@ _FULL_HELP = [
     "  ### Title       level-2 header  (also :title2 Title) — indented 2 spaces",
     "  #### Title      level-3 header  (also :title3 Title) — indented 4 spaces",
     "  ##- Title       starts folded (also :title- / :title2- / :title3-)",
+    "  ##! Title       exempt from autofold (also :title! / :title2! / :title3!)",
+    "  ##-! Title      starts folded + exempt from autofold (modifiers combine)",
     "  host ## label   inline label after hostname (## / ### / #### …)",
     "  ?host           optional host — added only when a :resolv mapping exists",
     "                  (useful in :for loops when some iterations lack a device)",
@@ -2037,10 +2048,11 @@ class SshPingMonitor(Monitor):
 
 class SectionLabel:
     """A non-pingable display row for section headers (## / :title)."""
-    def __init__(self, title, level=1, folded_default=False):
+    def __init__(self, title, level=1, folded_default=False, no_autofold=False):
         self.title = title
         self.level = max(1, int(level))  # 1 = top-level, 2 = sub-section, …
         self.folded = bool(folded_default)  # True = starts collapsed
+        self.no_autofold = bool(no_autofold)  # True = exempt from auto fold/unfold
 
 
 def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
@@ -2149,12 +2161,13 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                     # Section header — apply back-references and emit every iteration.
                     n_hashes = len(line) - len(line.lstrip('#'))
                     rest = line[n_hashes:]
-                    folded_default = rest.startswith('-')
-                    if folded_default:
+                    mods = set()
+                    while rest and rest[0] in '-!':
+                        mods.add(rest[0])
                         rest = rest[1:]
                     title_tmpl = rest.strip()
                     title = _apply_backref(title_tmpl, captures, full_str)
-                    entries.append(('section', title, n_hashes - 1, folded_default))
+                    entries.append(('section', title, n_hashes - 1, '-' in mods, '!' in mods))
 
             elif line.startswith(':'):
                 parts = line.split(None, 1)
@@ -2262,13 +2275,13 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                             local_with_args = w_args
 
                 elif not currently_skipping:
-                    m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
+                    m_title = re.match(r'^title(\d*)([-!]*)$', cmd_word)
                     if m_title:
                         level = int(m_title.group(1)) if m_title.group(1) else 1
-                        folded_default = m_title.group(2) == '-'
+                        mods = set(m_title.group(2))
                         title_tmpl = parts[1].strip() if len(parts) > 1 else ''
                         title = _apply_backref(title_tmpl, captures, full_str)
-                        entries.append(('section', title, level, folded_default))
+                        entries.append(('section', title, level, '-' in mods, '!' in mods))
                     elif cmd_word == 'remote-ping':
                         # :remote-ping inside :for — chain with outer context if remote-ping.
                         effective_ssh_args = (local_with_args
@@ -2591,11 +2604,11 @@ class _HostsParser:
                 cmd_word = parts[0][1:].lower()
                 args = parts[1].strip() if len(parts) > 1 else ''
 
-                m_title = re.match(r'^title(\d*)([-]?)$', cmd_word)
+                m_title = re.match(r'^title(\d*)([-!]*)$', cmd_word)
                 if m_title:
                     level = int(m_title.group(1)) if m_title.group(1) else 1
-                    folded = m_title.group(2) == '-'
-                    entries.append(('section', args, level, folded))
+                    mods = set(m_title.group(2))
+                    entries.append(('section', args, level, '-' in mods, '!' in mods))
                 elif cmd_word == 'if':
                     _m_inline = re.match(r'^(.+?) ->(.*)', args)
                     if _m_inline:
@@ -2839,10 +2852,11 @@ class _HostsParser:
         """Parse a ``##[#…]`` line into a ``('section', …)`` tuple."""
         n_hashes = len(line) - len(line.lstrip('#'))
         rest = line[n_hashes:]
-        folded = rest.startswith('-')
-        if folded:
+        mods = set()
+        while rest and rest[0] in '-!':
+            mods.add(rest[0])
             rest = rest[1:]
-        return ('section', rest.strip(), n_hashes - 1, folded)
+        return ('section', rest.strip(), n_hashes - 1, '-' in mods, '!' in mods)
 
     # ── Host-line parser ──────────────────────────────────────────────────
 
@@ -3520,6 +3534,10 @@ class Application:
         self._search_auto_unfolded = set()    # sections auto-unfolded by search
         # Help overlay search: save scroll position so ESC can restore it
         self._help_search_pre_scroll = 0
+        # Autofold: auto fold/unfold sections based on host liveness
+        self.autofold = False             # disabled by default
+        self.autofold_delay = 30.0        # seconds before re-folding a recovered section
+        self._autofold_ts: dict = {}      # id(SectionLabel) -> timestamp when all hosts went alive
         self.running = True
         self.threads = []
         self._start_time = None
@@ -3561,7 +3579,8 @@ class Application:
             elif kind == 'section':
                 level = rest[1] if len(rest) > 1 else 1
                 folded_default = rest[2] if len(rest) > 2 else False
-                self.entries.append(SectionLabel(value, level, folded_default))
+                no_autofold = rest[3] if len(rest) > 3 else False
+                self.entries.append(SectionLabel(value, level, folded_default, no_autofold))
             elif kind == 'cmd':
                 self._dispatch_cmd(value)
             elif kind == 'warn':
@@ -4098,6 +4117,40 @@ class Application:
             if isinstance(entry, SectionLabel):
                 entry.folded = state
 
+    def _fold_healthy(self):
+        """Fold every section whose direct-child active monitors are all alive.
+
+        Sections with no active (non-paused) monitors with known status are
+        skipped.  Sections that already folded are left as-is.
+        """
+        for idx, entry in enumerate(self.entries):
+            if not isinstance(entry, SectionLabel):
+                continue
+            monitors = self._get_direct_section_monitors(idx)
+            active = [m for m in monitors if not m.paused]
+            known = [m for m in active if m.alive is not None]
+            if not known:
+                continue
+            if all(m.alive is True for m in known):
+                entry.folded = True
+
+    def _fold_unhealthy(self):
+        """Fold every section that has at least one direct-child active monitor down.
+
+        Sections with no active (non-paused) monitors with known status are
+        skipped.  Sections that are already folded are left as-is.
+        """
+        for idx, entry in enumerate(self.entries):
+            if not isinstance(entry, SectionLabel):
+                continue
+            monitors = self._get_direct_section_monitors(idx)
+            active = [m for m in monitors if not m.paused]
+            known = [m for m in active if m.alive is not None]
+            if not known:
+                continue
+            if any(m.alive is False for m in known):
+                entry.folded = True
+
     def _fold_level_step(self, direction):
         """Open or close sections one level at a time (global, like zr/zm).
 
@@ -4164,6 +4217,10 @@ class Application:
             self._fold_level_step(-1)
         elif action == 'zm':
             self._fold_level_step(1)
+        elif action == 'z[':
+            self._fold_healthy()
+        elif action == 'z]':
+            self._fold_unhealthy()
 
     def _handle_z_sequence(self, key):
         """Dispatch a z* two-key fold sequence after 'z' was pressed.
@@ -4176,6 +4233,7 @@ class Application:
             ord('a'): 'za', ord('A'): 'zA',
             ord('R'): 'zR', ord('M'): 'zM',
             ord('r'): 'zr', ord('m'): 'zm',
+            ord('['): 'z[', ord(']'): 'z]',
         }
         action = action_map.get(key)
         if action:
@@ -4232,8 +4290,8 @@ class Application:
 
         Word aliases: open, close, open-recursive, close-recursive,
                       open-all, close-all, open-level, close-level,
-                      toggle, toggle-recursive.
-        Z-actions: za, zA, zo, zO, zc, zC, zR, zM, zr, zm.
+                      toggle, toggle-recursive, close-healthy, close-unhealthy.
+        Z-actions: za, zA, zo, zO, zc, zC, zR, zM, zr, zm, z[, z].
         """
         if not args:
             self.add_event("cmd", "fold: missing action argument")
@@ -4250,9 +4308,11 @@ class Application:
             'close-all':        'zM',
             'open-level':       'zr',
             'close-level':      'zm',
+            'close-healthy':    'z[',
+            'close-unhealthy':  'z]',
         }
         action = fold_map.get(action, action)
-        valid = {'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'}
+        valid = {'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'z[', 'z]'}
         if action in valid:
             self._do_fold_action(action)
         else:
@@ -4875,6 +4935,57 @@ class Application:
             else:
                 monitors.append(entry)
         return monitors
+
+    def _get_direct_section_monitors(self, section_idx):
+        """Return only the direct Monitor children of the section at *section_idx*.
+
+        Stops at the first SectionLabel (of any level), so sub-section hosts are
+        NOT included.  Used for per-section autofold liveness checks.
+        """
+        monitors = []
+        for entry in self.entries[section_idx + 1:]:
+            if isinstance(entry, SectionLabel):
+                break  # any sub-section boundary — stop
+            monitors.append(entry)
+        return monitors
+
+    def _autofold_tick(self):
+        """Check all sections for autofold/autounfold conditions."""
+        if not self.autofold:
+            return
+        now = time.time()
+        for idx, entry in enumerate(self.entries):
+            if not isinstance(entry, SectionLabel):
+                continue
+            if entry.no_autofold:
+                continue
+            monitors = self._get_direct_section_monitors(idx)
+            active = [m for m in monitors if not m.paused]
+            if not active:
+                continue
+            # Determine liveness: ignore monitors still initialising (alive=None)
+            known = [m for m in active if m.alive is not None]
+            if not known:
+                continue
+            any_down = any(m.alive is False for m in known)
+            all_alive = all(m.alive is True for m in known)
+            sid = id(entry)
+            if any_down:
+                # Unfold immediately
+                self._autofold_ts.pop(sid, None)
+                if entry.folded:
+                    entry.folded = False
+            elif all_alive:
+                if not entry.folded:
+                    # Start or maintain countdown
+                    if sid not in self._autofold_ts:
+                        self._autofold_ts[sid] = now
+                    elif now - self._autofold_ts[sid] >= self.autofold_delay:
+                        entry.folded = True
+                        self._autofold_ts.pop(sid, None)
+            else:
+                # Mixed alive/None — reset countdown
+                self._autofold_ts.pop(sid, None)
 
     @staticmethod
     def _worst_history_char(chars):
@@ -6543,7 +6654,8 @@ class Application:
                 elif kind == 'section':
                     level = rest[1] if len(rest) > 1 else 1
                     folded_default = rest[2] if len(rest) > 2 else False
-                    self.entries.append(SectionLabel(value, level, folded_default))
+                    no_autofold = rest[3] if len(rest) > 3 else False
+                    self.entries.append(SectionLabel(value, level, folded_default, no_autofold))
                 elif kind == 'cmd':
                     self._dispatch_cmd(value)
                 elif kind == 'warn':
@@ -7313,6 +7425,36 @@ class Application:
         self.log_offset = 0
         if self._monitoring_started:
             self.add_event("log-level", f"log level set to: {val}")
+
+    def _cmd_autofold(self, args=''):
+        """Enable or disable autofold."""
+        val = args.strip().lower()
+        if not val:
+            self.add_event("cmd", f"autofold: {'on' if self.autofold else 'off'}")
+            return
+        if val == 'on':
+            self.autofold = True
+        elif val == 'off':
+            self.autofold = False
+            self._autofold_ts.clear()
+        else:
+            self.add_event("cmd", f"autofold: unknown value '{val}'; choices: on off")
+
+    def _cmd_autofold_delay(self, args=''):
+        """Set the autofold recovery delay in seconds."""
+        val = args.strip()
+        if not val:
+            self.add_event("cmd", f"autofold-delay: {self.autofold_delay:.0f}")
+            return
+        try:
+            secs = float(val)
+            if secs < 0:
+                raise ValueError
+        except ValueError:
+            self.add_event("cmd", f"autofold-delay: invalid value '{val}'; "
+                           "expected non-negative number of seconds")
+            return
+        self.autofold_delay = secs
 
     def _cmd_saveconfig(self, args=''):
         """Save current settings to config file."""
@@ -8268,6 +8410,7 @@ class Application:
 
                 # Draw host list
                 self.clamp_host_scroll(visible_hosts)
+                self._autofold_tick()
                 self.draw_hosts(stdscr, hosts_start, visible_hosts, width, height,
                                 show_header=show_header)
                 if show_events:

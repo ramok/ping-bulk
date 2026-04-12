@@ -75,7 +75,7 @@ class TestBackslashContinuation:
         """A '## …\\' section header split across two lines must be joined correctly."""
         content = "## My \\\nSection\n"
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
-        assert entries == [('section', 'My Section', 1, False)], (
+        assert entries == [('section', 'My Section', 1, False, False)], (
             f"Expected [('section', 'My Section')], got {entries!r}"
         )
 
@@ -135,7 +135,7 @@ class TestBackslashContinuation:
         """)
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Section A', 1, False),
+            ('section', 'Section A', 1, False, False),
             ('host',    '192.168.1.1'),
             ('cmd',     ':resolv 10.0.0.1 router1'),
         ], f"Normal-line parsing changed unexpectedly; got {entries!r}"
@@ -205,7 +205,7 @@ class TestInlineComment:
         content = "## Routers\n10.0.0.1\n"
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Routers', 1, False),
+            ('section', 'Routers', 1, False, False),
             ('host',    '10.0.0.1'),
         ], f"Section header must not be treated as inline comment; got {entries!r}"
 
@@ -342,7 +342,7 @@ class TestSemicolonSeparator:
         content = ":title My Section; host1; host2\n"
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'My Section', 1, False),
+            ('section', 'My Section', 1, False, False),
             ('host', 'host1'),
             ('host', 'host2'),
         ], f"section + hosts on same line failed; got {entries!r}"

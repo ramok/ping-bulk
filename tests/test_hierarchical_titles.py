@@ -28,32 +28,32 @@ class TestHierarchicalTitleParser:
     def test_hash_level1(self, pb, tmp_path):
         """## Title → level 1."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, "## Top\n1.1.1.1\n"))
-        assert entries == [('section', 'Top', 1, False), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Top', 1, False, False), ('host', '1.1.1.1')]
 
     def test_hash_level2(self, pb, tmp_path):
         """### Title → level 2."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, "### Sub\n1.1.1.1\n"))
-        assert entries == [('section', 'Sub', 2, False), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Sub', 2, False, False), ('host', '1.1.1.1')]
 
     def test_hash_level3(self, pb, tmp_path):
         """#### Title → level 3."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, "#### Deep\n1.1.1.1\n"))
-        assert entries == [('section', 'Deep', 3, False), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Deep', 3, False, False), ('host', '1.1.1.1')]
 
     def test_title_directive_level1(self, pb, tmp_path):
         """:title → level 1."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, ":title Top\n1.1.1.1\n"))
-        assert entries == [('section', 'Top', 1, False), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Top', 1, False, False), ('host', '1.1.1.1')]
 
     def test_title_directive_level2(self, pb, tmp_path):
         """:title2 → level 2."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, ":title2 Sub\n1.1.1.1\n"))
-        assert entries == [('section', 'Sub', 2, False), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Sub', 2, False, False), ('host', '1.1.1.1')]
 
     def test_title_directive_level3(self, pb, tmp_path):
         """:title3 → level 3."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, ":title3 Deep\n1.1.1.1\n"))
-        assert entries == [('section', 'Deep', 3, False), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Deep', 3, False, False), ('host', '1.1.1.1')]
 
     def test_mixed_hash_and_title_levels(self, pb, tmp_path):
         """## and :title2 can be mixed; levels are independent."""
@@ -65,9 +65,9 @@ class TestHierarchicalTitleParser:
         """)
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Top', 1, False),
+            ('section', 'Top', 1, False, False),
             ('host', '1.1.1.1'),
-            ('section', 'Sub', 2, False),
+            ('section', 'Sub', 2, False, False),
             ('host', '1.1.1.2'),
         ]
 
@@ -83,11 +83,11 @@ class TestHierarchicalTitleParser:
         """)
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Region', 1, False),
+            ('section', 'Region', 1, False, False),
             ('host', 'region-gw'),
-            ('section', 'Datacenter', 2, False),
+            ('section', 'Datacenter', 2, False, False),
             ('host', 'dc-core'),
-            ('section', 'Pod', 3, False),
+            ('section', 'Pod', 3, False, False),
             ('host', 'pod-host'),
         ]
 
@@ -96,37 +96,37 @@ class TestFoldedDefaultParser:
     """##- / :title- syntax sets folded_default=True in the section tuple."""
 
     def test_hash_folded_default(self, pb, tmp_path):
-        """##- Title → ('section', 'Title', 1, True)."""
+        """##- Title → ('section', 'Title', 1, True, False)."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, "##- Collapsed\n1.1.1.1\n"))
-        assert entries == [('section', 'Collapsed', 1, True), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Collapsed', 1, True, False), ('host', '1.1.1.1')]
 
     def test_hash_level2_folded_default(self, pb, tmp_path):
-        """###- Title → ('section', 'Title', 2, True)."""
+        """###- Title → ('section', 'Title', 2, True, False)."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, "###- Sub\n1.1.1.1\n"))
-        assert entries == [('section', 'Sub', 2, True), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Sub', 2, True, False), ('host', '1.1.1.1')]
 
     def test_title_directive_folded_default(self, pb, tmp_path):
-        """:title- Title → ('section', 'Title', 1, True)."""
+        """:title- Title → ('section', 'Title', 1, True, False)."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, ":title- Collapsed\n1.1.1.1\n"))
-        assert entries == [('section', 'Collapsed', 1, True), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Collapsed', 1, True, False), ('host', '1.1.1.1')]
 
     def test_title2_directive_folded_default(self, pb, tmp_path):
-        """:title2- Title → ('section', 'Title', 2, True)."""
+        """:title2- Title → ('section', 'Title', 2, True, False)."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, ":title2- Sub\n1.1.1.1\n"))
-        assert entries == [('section', 'Sub', 2, True), ('host', '1.1.1.1')]
+        assert entries == [('section', 'Sub', 2, True, False), ('host', '1.1.1.1')]
 
     def test_normal_hash_not_folded(self, pb, tmp_path):
         """## Title without - → folded_default False."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, "## Open\n"))
-        assert entries == [('section', 'Open', 1, False)]
+        assert entries == [('section', 'Open', 1, False, False)]
 
     def test_mixed_folded_and_open(self, pb, tmp_path):
         """Mix of ## and ##- in same file."""
         content = "## Open\n1.1.1.1\n##- Closed\n2.2.2.2\n"
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         assert entries == [
-            ('section', 'Open',   1, False), ('host', '1.1.1.1'),
-            ('section', 'Closed', 1, True),  ('host', '2.2.2.2'),
+            ('section', 'Open',   1, False, False), ('host', '1.1.1.1'),
+            ('section', 'Closed', 1, True, False),  ('host', '2.2.2.2'),
         ]
 
     def test_section_label_folded_attribute(self, pb, tmp_path):
@@ -172,12 +172,12 @@ class TestInlineHashStripping:
     def test_section_header_not_stripped(self, pb, tmp_path):
         """## at line start is a section header, not an inline comment."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, "## Section\n"))
-        assert entries == [('section', 'Section', 1, False)]
+        assert entries == [('section', 'Section', 1, False, False)]
 
     def test_triple_hash_header_not_stripped(self, pb, tmp_path):
         """### at line start is a level-2 header, not an inline comment."""
         entries = pb.parse_hosts_file(write_hosts(tmp_path, "### Sub\n"))
-        assert entries == [('section', 'Sub', 2, False)]
+        assert entries == [('section', 'Sub', 2, False, False)]
 
 
 # ===========================================================================
@@ -200,9 +200,9 @@ class TestSectionLabelLevel:
     def test_level_from_application_init(self, pb):
         """Application.__init__ creates SectionLabel with the correct level."""
         entries = [
-            ('section', 'Top', 1, False),
+            ('section', 'Top', 1, False, False),
             ('host', '127.0.0.1'),
-            ('section', 'Sub', 2, False),
+            ('section', 'Sub', 2, False, False),
             ('host', '127.0.0.2'),
         ]
         app = pb.Application(entries)
@@ -223,11 +223,11 @@ class TestHierarchicalFolding:
     def _make_app(self, pb):
         """Return an Application with a 2-level hierarchy, all unfolded."""
         entries = [
-            ('section', 'Top A', 1, False),
+            ('section', 'Top A', 1, False, False),
             ('host', '10.0.0.1'),
-            ('section', 'Sub A1', 2, False),
+            ('section', 'Sub A1', 2, False, False),
             ('host', '10.0.0.2'),
-            ('section', 'Top B', 1, False),
+            ('section', 'Top B', 1, False, False),
             ('host', '10.0.0.3'),
         ]
         return pb.Application(entries)
@@ -331,11 +331,11 @@ class TestSectionSummaryHelpers:
 
     def _make_app(self, pb):
         entries = [
-            ('section', 'Top A', 1, False),
+            ('section', 'Top A', 1, False, False),
             ('host', '10.0.0.1'),
-            ('section', 'Sub A1', 2, False),
+            ('section', 'Sub A1', 2, False, False),
             ('host', '10.0.0.2'),
-            ('section', 'Top B', 1, False),
+            ('section', 'Top B', 1, False, False),
             ('host', '10.0.0.3'),
         ]
         return pb.Application(entries)

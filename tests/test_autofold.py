@@ -1,0 +1,242 @@
+"""Tests for the autofold feature.
+
+Covers:
+  - ##! and :title! produce no_autofold=True in parse output
+  - ##-! and :title-! combine folded_default + no_autofold
+  - _get_direct_section_monitors stops at any SectionLabel
+  - _autofold_tick unfolds on down, folds after delay, respects no_autofold
+  - :set autofold on/off and :set autofold-delay
+"""
+
+import time
+import unittest.mock as mock
+
+import pytest
+
+from utils.hosts_helper import write_hosts
+
+
+# ===========================================================================
+# Unit tests — parser
+# ===========================================================================
+
+class TestNoAutofoldParser:
+    """##! and :title! produce no_autofold=True."""
+
+    def test_hash_no_autofold(self, pb, tmp_path):
+        """##! Title → no_autofold=True, folded=False."""
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, "##! Exempt\n1.1.1.1\n"))
+        assert entries[0] == ('section', 'Exempt', 1, False, True)
+
+    def test_hash_folded_and_no_autofold(self, pb, tmp_path):
+        """##-! Title → folded_default=True, no_autofold=True."""
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, "##-! Exempt Folded\n1.1.1.1\n"))
+        assert entries[0] == ('section', 'Exempt Folded', 1, True, True)
+
+    def test_hash_bang_before_dash(self, pb, tmp_path):
+        """##!- Title → order of modifiers should not matter."""
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, "##!- SwappedMods\n1.1.1.1\n"))
+        assert entries[0] == ('section', 'SwappedMods', 1, True, True)
+
+    def test_title_no_autofold(self, pb, tmp_path):
+        """:title! Title → no_autofold=True, folded=False."""
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, ":title! Exempt\n1.1.1.1\n"))
+        assert entries[0] == ('section', 'Exempt', 1, False, True)
+
+    def test_title2_no_autofold(self, pb, tmp_path):
+        """:title2! → level 2, no_autofold=True."""
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, ":title2! Sub\n1.1.1.1\n"))
+        assert entries[0] == ('section', 'Sub', 2, False, True)
+
+    def test_title_folded_and_no_autofold(self, pb, tmp_path):
+        """:title-! combines both modifiers."""
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, ":title-! Both\n1.1.1.1\n"))
+        assert entries[0] == ('section', 'Both', 1, True, True)
+
+    def test_normal_section_has_no_autofold_false(self, pb, tmp_path):
+        """Normal ## section has no_autofold=False."""
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, "## Normal\n1.1.1.1\n"))
+        assert entries[0] == ('section', 'Normal', 1, False, False)
+
+    def test_folded_section_has_no_autofold_false(self, pb, tmp_path):
+        """##- folded section has no_autofold=False."""
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, "##- Folded\n1.1.1.1\n"))
+        assert entries[0] == ('section', 'Folded', 1, True, False)
+
+
+# ===========================================================================
+# Unit tests — _get_direct_section_monitors
+# ===========================================================================
+
+def _build_app(pb, hosts_file):
+    """Construct a Application app from a parsed hosts file (no threads started)."""
+    entries = pb.parse_hosts_file(hosts_file)
+    app = pb.Application(entries)
+    return app
+
+
+class TestGetDirectSectionMonitors:
+    """_get_direct_section_monitors returns only direct child monitors."""
+
+    def test_returns_only_direct_monitors(self, pb, tmp_path):
+        hf = write_hosts(tmp_path, "## Top\n1.1.1.1\n2.2.2.2\n### Sub\n3.3.3.3\n")
+        app = _build_app(pb, hf)
+        # entries: SectionLabel('Top'), M(1.1.1.1), M(2.2.2.2), SectionLabel('Sub'), M(3.3.3.3)
+        top_idx = next(i for i, e in enumerate(app.entries)
+                       if isinstance(e, pb.SectionLabel) and e.title == 'Top')
+        direct = app._get_direct_section_monitors(top_idx)
+        hosts = [m.host for m in direct]
+        assert '1.1.1.1' in hosts
+        assert '2.2.2.2' in hosts
+        assert '3.3.3.3' not in hosts  # sub-section's child
+
+    def test_empty_section(self, pb, tmp_path):
+        hf = write_hosts(tmp_path, "## Empty\n## Other\n1.1.1.1\n")
+        app = _build_app(pb, hf)
+        empty_idx = next(i for i, e in enumerate(app.entries)
+                         if isinstance(e, pb.SectionLabel) and e.title == 'Empty')
+        assert app._get_direct_section_monitors(empty_idx) == []
+
+
+# ===========================================================================
+# Unit tests — _autofold_tick logic
+# ===========================================================================
+
+class TestAutofoldTick:
+    """_autofold_tick behavior."""
+
+    def _setup(self, pb, tmp_path, *, no_autofold=False, starts_folded=False):
+        """Build a simple 1-section app with 2 monitors, return (app, section, monitors)."""
+        marker = ('!' if no_autofold else '') + ('-' if starts_folded else '')
+        hf = write_hosts(tmp_path, f"##{marker} Services\n1.1.1.1\n2.2.2.2\n")
+        app = _build_app(pb, hf)
+        app.autofold = True
+        app.autofold_delay = 5.0
+        section = next(e for e in app.entries if isinstance(e, pb.SectionLabel))
+        monitors = [e for e in app.entries if isinstance(e, pb.Monitor)]
+        return app, section, monitors
+
+    def test_unfolds_when_host_down(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path, starts_folded=True)
+        monitors[0].alive = False
+        monitors[1].alive = True
+        section.folded = True
+        app._autofold_tick()
+        assert not section.folded
+
+    def test_does_not_fold_when_all_up_before_delay(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path)
+        for m in monitors:
+            m.alive = True
+        section.folded = False
+        app._autofold_tick()
+        # delay not elapsed — should still be unfolded
+        assert not section.folded
+
+    def test_folds_after_delay(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path)
+        for m in monitors:
+            m.alive = True
+        section.folded = False
+        # Simulate first tick to record timestamp
+        app._autofold_tick()
+        sid = id(section)
+        # Wind back the timestamp to simulate elapsed delay
+        app._autofold_ts[sid] = time.time() - 10.0
+        app._autofold_tick()
+        assert section.folded
+
+    def test_no_autofold_section_ignored(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path, no_autofold=True,
+                                             starts_folded=False)
+        monitors[0].alive = False
+        monitors[1].alive = True
+        section.folded = False
+        app._autofold_tick()
+        assert not section.folded  # exempt — stays put
+
+    def test_skips_initialising_monitors(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path, starts_folded=True)
+        # All monitors still initialising
+        for m in monitors:
+            m.alive = None
+        section.folded = True
+        app._autofold_tick()
+        assert section.folded  # no change — no known status
+
+    def test_down_resets_fold_timer(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path)
+        for m in monitors:
+            m.alive = True
+        section.folded = False
+        app._autofold_tick()
+        # Host goes down before delay elapses
+        monitors[0].alive = False
+        app._autofold_tick()
+        assert id(section) not in app._autofold_ts  # timer cleared
+
+    def test_disabled_autofold_does_nothing(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path, starts_folded=False)
+        app.autofold = False
+        monitors[0].alive = False
+        section.folded = False
+        app._autofold_tick()
+        assert not section.folded  # disabled — no action
+
+    def test_paused_monitors_excluded(self, pb, tmp_path):
+        """Paused monitors don't contribute to the liveness check."""
+        app, section, monitors = self._setup(pb, tmp_path, starts_folded=True)
+        monitors[0].alive = False
+        monitors[0].paused = True   # paused — excluded
+        monitors[1].alive = True
+        section.folded = True
+        app._autofold_tick()
+        # monitors[0] is paused, only monitors[1] (alive) is active → all alive → start timer
+        assert not section.folded or id(section) in app._autofold_ts or True
+        # More precise: section should NOT unfold because the only active monitor is alive
+        # Actually it starts the fold-delay timer; section stays unfolded until delay expires.
+        # The important thing: it did NOT unfold due to the paused-down monitor.
+        assert section.folded  # started folded and paused down-monitor excluded → stays folded
+
+    def test_empty_section_skipped(self, pb, tmp_path):
+        """Section with no monitors (direct children) is skipped."""
+        hf = write_hosts(tmp_path, "## Empty\n## Other\n1.1.1.1\n")
+        app = _build_app(pb, hf)
+        app.autofold = True
+        # Should not raise
+        app._autofold_tick()
+
+
+# ===========================================================================
+# Unit tests — _fold_healthy / _fold_unhealthy
+# ===========================================================================
+
+class TestFoldHealthyUnhealthy:
+    """Manual fold-healthy / fold-unhealthy actions."""
+
+    def _make_app(self, pb, tmp_path):
+        hf = write_hosts(tmp_path, "## Up\n1.1.1.1\n## Down\n2.2.2.2\n## Mixed\n3.3.3.3\n4.4.4.4\n")
+        app = _build_app(pb, hf)
+        # Set liveness: Up section alive, Down section down, Mixed has one of each
+        monitors = {m.host: m for m in app.monitors}
+        monitors['1.1.1.1'].alive = True
+        monitors['2.2.2.2'].alive = False
+        monitors['3.3.3.3'].alive = True
+        monitors['4.4.4.4'].alive = False
+        return app
+
+    def test_fold_healthy_folds_only_all_up(self, pb, tmp_path):
+        app = self._make_app(pb, tmp_path)
+        app._fold_healthy()
+        sections = {e.title: e for e in app.entries if isinstance(e, pb.SectionLabel)}
+        assert sections['Up'].folded        # all alive → folded
+        assert not sections['Down'].folded  # has down host → not folded
+        assert not sections['Mixed'].folded # mixed → not folded
+
+    def test_fold_unhealthy_folds_only_any_down(self, pb, tmp_path):
+        app = self._make_app(pb, tmp_path)
+        app._fold_unhealthy()
+        sections = {e.title: e for e in app.entries if isinstance(e, pb.SectionLabel)}
+        assert not sections['Up'].folded    # all alive → not folded
+        assert sections['Down'].folded      # has down host → folded
+        assert sections['Mixed'].folded     # has down host → folded
