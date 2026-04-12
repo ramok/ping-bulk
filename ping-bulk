@@ -7585,7 +7585,7 @@ class Application:
                     stdscr.addstr(r, col0, '│', border_attr)
                     text = line.ljust(inner_w)[:inner_w]
                     self._draw_hint_text(stdscr, r, col0 + 1, text,
-                                         col0 + 1 + inner_w)
+                                         col0 + 1 + inner_w + 1)
                     if col0 + 1 + inner_w < width:
                         stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
                     # Highlight search match substring via chgat (overwrites attrs
