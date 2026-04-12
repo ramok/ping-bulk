@@ -371,6 +371,14 @@ class _KeyTrie:
                 prefix.pop()
         yield from _walk(self, [])
 
+    def node_at(self, keys):
+        """Return the trie node reached by *keys*, or None if the path doesn't exist."""
+        node = self
+        for key in keys:
+            if key not in node.children:
+                return None
+            node = node.children[key]
+        return node
 
 def _resolve_binding(bindings, ctx_keys):
     """Pick the best _Binding from *bindings* dict for *ctx_keys*.
@@ -7694,6 +7702,78 @@ class Application:
         target = self.help_search_matches[self.help_search_match_idx]
         self.help_scroll = max(0, target - 3)
 
+    def _draw_whichkey_overlay(self, stdscr, height, width):
+        """Draw a small which-key popup listing continuations for _key_seq.
+
+        Appears at the bottom-right of the screen (just above the menu bar).
+        Each child key of the current trie node is shown with its description.
+        """
+        node = self._key_trie.node_at(self._key_seq)
+        if not node or not node.children:
+            return
+
+        ctx_keys = set(self._binding_context().keys())
+        prefix_label = _format_key_notation(self._key_seq)
+
+        # Header line + one row per available next key
+        lines = [f"  [{prefix_label}] — choose next key"]
+        for key_code in sorted(node.children):
+            child = node.children[key_code]
+            key_label = _format_key_notation([key_code])
+            binding = _resolve_binding(child.bindings, ctx_keys)
+            if binding:
+                desc = binding.desc or binding.hint or ' '.join(binding.commands)
+            else:
+                desc = '…'   # prefix-only node, more keys required
+            lines.append(f"  [{key_label}]  {desc}")
+
+        inner_w = max(len(l) for l in lines)
+        inner_w = max(inner_w, 20)
+        inner_w = min(inner_w, width - 4)
+        box_w = inner_w + 2
+
+        # Limit height so the popup fits above the menu bar
+        max_lines = max(1, height - 2 - 2)  # leave top border + bottom border + menu
+        lines = lines[:max_lines]
+        box_h = len(lines) + 2
+
+        # Position: bottom-right, just above menu bar
+        row0 = max(0, height - 1 - box_h)
+        col0 = max(0, width - box_w - 1)
+
+        border_attr = curses.A_BOLD
+
+        # Top border
+        try:
+            stdscr.addstr(row0, col0,
+                          ('┌' + '─' * inner_w + '┐')[:width - col0], border_attr)
+        except curses.error:
+            pass
+
+        # Content rows
+        for i, line in enumerate(lines):
+            r = row0 + 1 + i
+            if r >= height - 1:
+                break
+            text = line.ljust(inner_w)[:inner_w]
+            try:
+                stdscr.addstr(r, col0, '│', border_attr)
+                self._draw_hint_text(stdscr, r, col0 + 1, text,
+                                     col0 + 1 + inner_w + 1)
+                if col0 + 1 + inner_w < width:
+                    stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
+            except curses.error:
+                pass
+
+        # Bottom border
+        r = row0 + 1 + len(lines)
+        if r < height - 1:
+            try:
+                stdscr.addstr(r, col0,
+                              ('└' + '─' * inner_w + '┘')[:width - col0], border_attr)
+            except curses.error:
+                pass
+
     def _draw_help_overlay(self, stdscr, height, width):
         """Draw the help overlay as a centered bordered popup with scroll support.
 
@@ -8114,14 +8194,19 @@ class Application:
                     self._draw_details_overlay(stdscr, height, width)
                     curses.curs_set(0)
 
-                # Pending-key indicator — drawn last so nothing overwrites it
+                # Pending-key indicator: show which-key popup when there are
+                # continuations, otherwise just a small corner indicator.
                 if self._key_seq:
-                    indicator = f"[{_format_key_notation(self._key_seq)}]"
-                    try:
-                        stdscr.addstr(height - 1, width - len(indicator) - 1,
-                                      indicator, curses.A_REVERSE)
-                    except curses.error:
-                        pass
+                    node = self._key_trie.node_at(self._key_seq)
+                    if node and node.children:
+                        self._draw_whichkey_overlay(stdscr, height, width)
+                    else:
+                        indicator = f"[{_format_key_notation(self._key_seq)}]"
+                        try:
+                            stdscr.addstr(height - 1, width - len(indicator) - 1,
+                                          indicator, curses.A_REVERSE)
+                        except curses.error:
+                            pass
 
                 try:
                     stdscr.refresh()
