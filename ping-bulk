@@ -1312,18 +1312,29 @@ class Monitor(ABC):
         self._proc = None          # active Popen handle for the persistent ping subprocess
         self.resolv_static = False # True when a :resolv static mapping overrides DNS
 
+    @property
+    def _dns_lookup_target(self) -> str:
+        """Hostname/IP to use as the forward-DNS target in resolve_dns().
+
+        Base implementation uses self.host.  Subclasses that ping a
+        different address than self.host (PortMonitor, SshPingMonitor)
+        override this to return self._ping_host instead.
+        """
+        return self.host
+
     def resolve_dns(self):
         """Resolve the host to both its IP address and its hostname."""
+        target = self._dns_lookup_target
         try:
-            ip = socket.gethostbyname(self.host)
+            ip = socket.gethostbyname(target)
             self.resolved_ip = ip
-        except Exception:
+        except (socket.gaierror, OSError):
             self.resolved_ip = None
 
-        lookup_addr = self.resolved_ip if self.resolved_ip else self.host
+        lookup_addr = self.resolved_ip if self.resolved_ip else target
         try:
             self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
-        except Exception:
+        except (socket.herror, socket.gaierror, OSError):
             self.resolved_hostname = None
 
     def _record_latency(self, v):
@@ -1448,7 +1459,7 @@ class Monitor(ABC):
         if self._proc is not None:
             try:
                 self._proc.terminate()
-            except Exception:
+            except ProcessLookupError:
                 pass
 
     def pause(self):
@@ -1458,7 +1469,7 @@ class Monitor(ABC):
         if self._proc is not None:
             try:
                 self._proc.terminate()
-            except Exception:
+            except ProcessLookupError:
                 pass
 
     def unpause(self):
@@ -1577,7 +1588,7 @@ class PingMonitor(Monitor):
             # Drain stderr to check for a fatal error message
             try:
                 stderr_text = self._proc.stderr.read()
-            except Exception:
+            except OSError:
                 stderr_text = ''
             self._proc.wait()
 
@@ -1642,19 +1653,9 @@ class PortMonitor(Monitor):
                 except OSError:
                     self.port_num = None
 
-    def resolve_dns(self):
-        """Resolve the host to both its IP address and its hostname."""
-        try:
-            ip = socket.gethostbyname(self._ping_host)
-            self.resolved_ip = ip
-        except Exception:
-            self.resolved_ip = None
-
-        lookup_addr = self.resolved_ip if self.resolved_ip else self._ping_host
-        try:
-            self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
-        except Exception:
-            self.resolved_hostname = None
+    @property
+    def _dns_lookup_target(self) -> str:
+        return self._ping_host
 
     def get_display_name(self, dns_mode="off"):
         """Return the display name for this host according to dns_mode."""
@@ -1846,24 +1847,10 @@ class SshPingMonitor(Monitor):
                 i += 1
         return jump_hosts
 
-    def resolve_dns(self):
-        """Resolve the *ping host* (not the SSH destination) to its IP and hostname.
-
-        Overrides PingMonitor.resolve_dns() to target self._ping_host instead
-        of self.host (the composite label), so dns_mode='ip' and 'hostname'
-        show the address of the host being pinged, not the SSH destination.
-        """
-        try:
-            ip = socket.gethostbyname(self._ping_host)
-            self.resolved_ip = ip
-        except Exception:
-            self.resolved_ip = None
-
-        lookup_addr = self.resolved_ip if self.resolved_ip else self._ping_host
-        try:
-            self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
-        except Exception:
-            self.resolved_hostname = None
+    @property
+    def _dns_lookup_target(self) -> str:
+        """Target self._ping_host so dns_mode='ip'/'hostname' show the pinged host."""
+        return self._ping_host
 
     def _reverse_lookup_alias(self, host_or_ip):
         """Look up the original alias for a resolved host/IP in hosts_map.
@@ -2072,7 +2059,7 @@ class SshPingMonitor(Monitor):
 
             try:
                 stderr_text = self._proc.stderr.read()
-            except Exception:
+            except OSError:
                 stderr_text = ""
             self._proc.wait()
 
@@ -3030,7 +3017,7 @@ def _complete_log_arg(prefix):
     pattern = prefix + '*'
     try:
         matches = _glob.glob(pattern)
-    except Exception:
+    except (OSError, ValueError):
         matches = []
     for m in sorted(matches):
         results.append(m + '/' if os.path.isdir(m) else m)
@@ -3043,7 +3030,7 @@ def _complete_path_arg(prefix):
     pattern = prefix + '*'
     try:
         matches = _glob.glob(pattern)
-    except Exception:
+    except (OSError, ValueError):
         matches = []
     for m in sorted(matches):
         results.append(m + '/' if os.path.isdir(m) else m)
@@ -8462,7 +8449,7 @@ class Application:
                     _nclib = ctypes.CDLL(_lib_name)
                     for _seq in _BTAB_SEQS:
                         _nclib.define_key(_seq, curses.KEY_BTAB)
-            except Exception:
+            except (AttributeError, OSError):
                 pass  # best-effort; Shift+Tab falls back to no-op on this terminal
 
     def _register_ctrl_arrow_seqs(self):
@@ -8497,7 +8484,7 @@ class Application:
                         _nclib.define_key(_seq, curses.KEY_SLEFT)
                     for _seq in _CTRL_RIGHT_SEQS:
                         _nclib.define_key(_seq, curses.KEY_SRIGHT)
-            except Exception:
+            except (AttributeError, OSError):
                 pass  # best-effort; Ctrl+Arrow falls back to no-op on this terminal
 
     def run(self, stdscr):
