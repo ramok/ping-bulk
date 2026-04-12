@@ -3466,13 +3466,52 @@ def _kiosk_ssh_flags() -> list:
     -F none              — ignore ~/.ssh/config
     -o IdentityFile=none — no default identity files from ~/.ssh/
     -o IdentitiesOnly=yes — only use explicitly listed identity files
+    -o ProxyCommand=none  — block ProxyCommand injection
+    -o LocalCommand=none  — block LocalCommand execution
 
     If the kiosk SSH identity key exists, it is appended as -i <path>.
     """
-    flags = ['-F', 'none', '-o', 'IdentityFile=none', '-o', 'IdentitiesOnly=yes']
+    flags = [
+        '-F', 'none',
+        '-o', 'IdentityFile=none',
+        '-o', 'IdentitiesOnly=yes',
+        '-o', 'ProxyCommand=none',
+        '-o', 'LocalCommand=none',
+        '-o', 'PermitLocalCommand=no',
+    ]
     if os.path.exists(_KIOSK_SSH_IDENTITY):
         flags += ['-i', _KIOSK_SSH_IDENTITY]
     return flags
+
+
+# Dangerous -o option names that could be used for code execution
+_KIOSK_SSH_BLOCKLIST = frozenset([
+    'proxycommand', 'localcommand', 'permitlocalcommand',
+    'proxyuseFdpass', 'controlmaster', 'remoteforward', 'localforward',
+    'dynamicforward',
+])
+
+
+def _kiosk_validate_ssh_args(ssh_args: list) -> str | None:
+    """Return an error message if *ssh_args* contain blocked options for kiosk mode.
+
+    Checks for -o <Key>=... options whose Key is in the blocklist.
+    Returns None if everything is acceptable.
+    """
+    i = 0
+    while i < len(ssh_args):
+        arg = ssh_args[i]
+        key = None
+        if arg.startswith('-o') and '=' in arg:
+            # Inline form: -oKey=value
+            key = arg[2:].split('=', 1)[0]
+        elif arg == '-o' and i + 1 < len(ssh_args):
+            # Spaced form: -o Key=value
+            key = ssh_args[i + 1].split('=', 1)[0]
+        if key and key.lower() in _KIOSK_SSH_BLOCKLIST:
+            return f"kiosk mode: SSH option '{key}' is not allowed"
+        i += 1
+    return None
 
 
 class Application:
@@ -7666,8 +7705,12 @@ class Application:
                     ssh_args = tokens[:-1]
                     ssh_dest = ssh_args[-1]
 
-                    # In kiosk mode, prepend isolation flags to block ~/.ssh/ access
+                    # In kiosk mode, validate and prepend isolation flags
                     if self.kiosk_mode:
+                        err = _kiosk_validate_ssh_args(ssh_args)
+                        if err:
+                            self.add_event("cmd", f"remote-ping: {err}")
+                            return
                         ssh_args = _kiosk_ssh_flags() + ssh_args
 
                     # Preserve original SSH args before applying :resolv mappings
