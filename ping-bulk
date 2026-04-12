@@ -3154,6 +3154,8 @@ CMD_REGISTRY = [
            '<n|page|page->',     'scroll event log (trailing - = back/older)'),
     CmdDef(['scroll-overlay'],   '_cmd_scroll_overlay', None,
            '<up|down|page|page->', 'scroll active overlay (help or details)'),
+    CmdDef(['scroll-overlay-h'], '_cmd_scroll_overlay_h', None,
+           '<left|right>',        'scroll active overlay horizontally'),
     CmdDef(['close'],            '_cmd_close',       None,
            '',                    'close the currently open overlay'),
     CmdDef(['pause-selected'],   '_cmd_pause_selected', None,
@@ -3597,7 +3599,9 @@ class Application:
         self.help_search_match_idx = 0   # current highlighted match index
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
-        self.details_scroll = 0   # Scroll offset for the host details overlay
+        self.details_scroll = 0   # vertical scroll offset for host details overlay
+        self.details_h_scroll = 0 # horizontal scroll offset for host details overlay
+        self.help_h_scroll = 0    # horizontal scroll offset for help overlay
         # Search state
         self._search_query = ''      # '' = no active search
         self._search_mode  = 'hosts' # 'hosts' | 'log'
@@ -4402,6 +4406,7 @@ class Application:
                 self.details_open = True
                 self.details_monitor = entry
                 self.details_scroll = 0
+                self.details_h_scroll = 0
                 self._current_mode = 'details'
 
     def _cmd_fold(self, args=''):
@@ -4603,27 +4608,39 @@ class Application:
                     self._mode_bindings[mode][extra] = b
 
         # help mode bindings
-        _mb('help', 'q',      ':close',              desc='close help overlay')
-        _mb('help', 'Q',      ':close',              desc='close help overlay')
-        _mb('help', '?',      ':close',              desc='close help overlay')
-        _mb('help', '<Esc>',  ':close',              desc='close help overlay')
-        _mb('help', '<CR>',   ':close',              desc='close help overlay')
-        _mb('help', 'A',      ':help-toggle-all',    desc='toggle all-bindings view')
-        _mb('help', '<Up>',   ':scroll-overlay up',  desc='scroll up')
-        _mb('help', '<Down>', ':scroll-overlay down', desc='scroll down')
-        _mb('help', '<PgUp>', ':scroll-overlay page-', desc='scroll up one page')
-        _mb('help', '<PgDn>', ':scroll-overlay page',  desc='scroll down one page')
+        _mb('help', 'q',       ':close',                   desc='close help overlay')
+        _mb('help', 'Q',       ':close',                   desc='close help overlay')
+        _mb('help', '?',       ':close',                   desc='close help overlay')
+        _mb('help', '<Esc>',   ':close',                   desc='close help overlay')
+        _mb('help', '<CR>',    ':close',                   desc='close help overlay')
+        _mb('help', 'A',       ':help-toggle-all',         desc='toggle all-bindings view')
+        _mb('help', '<Up>',    ':scroll-overlay up',       desc='scroll up')
+        _mb('help', '<Down>',  ':scroll-overlay down',     desc='scroll down')
+        _mb('help', '<PgUp>',  ':scroll-overlay page-',    desc='scroll up one page')
+        _mb('help', '<PgDn>',  ':scroll-overlay page',     desc='scroll down one page')
+        _mb('help', 'k',       ':scroll-overlay up',       desc='scroll up')
+        _mb('help', 'j',       ':scroll-overlay down',     desc='scroll down')
+        _mb('help', '<Left>',  ':scroll-overlay-h left',   desc='scroll left')
+        _mb('help', '<Right>', ':scroll-overlay-h right',  desc='scroll right')
+        _mb('help', 'h',       ':scroll-overlay-h left',   desc='scroll left')
+        _mb('help', 'l',       ':scroll-overlay-h right',  desc='scroll right')
 
         # details mode bindings
-        _mb('details', 'q',      ':close',               desc='close details overlay')
-        _mb('details', 'Q',      ':close',               desc='close details overlay')
-        _mb('details', '<Esc>',  ':close',               desc='close details overlay')
-        _mb('details', '<CR>',   ':close',               desc='close details overlay')
-        _mb('details', 'c',      ':close',               desc='close details overlay')
-        _mb('details', '<Up>',   ':scroll-overlay up',   desc='scroll up')
-        _mb('details', '<Down>', ':scroll-overlay down',  desc='scroll down')
-        _mb('details', '<PgUp>', ':scroll-overlay page-', desc='scroll up one page')
-        _mb('details', '<PgDn>', ':scroll-overlay page',  desc='scroll down one page')
+        _mb('details', 'q',       ':close',                   desc='close details overlay')
+        _mb('details', 'Q',       ':close',                   desc='close details overlay')
+        _mb('details', '<Esc>',   ':close',                   desc='close details overlay')
+        _mb('details', '<CR>',    ':close',                   desc='close details overlay')
+        _mb('details', 'c',       ':close',                   desc='close details overlay')
+        _mb('details', '<Up>',    ':scroll-overlay up',       desc='scroll up')
+        _mb('details', '<Down>',  ':scroll-overlay down',     desc='scroll down')
+        _mb('details', '<PgUp>',  ':scroll-overlay page-',    desc='scroll up one page')
+        _mb('details', '<PgDn>',  ':scroll-overlay page',     desc='scroll down one page')
+        _mb('details', 'k',       ':scroll-overlay up',       desc='scroll up')
+        _mb('details', 'j',       ':scroll-overlay down',     desc='scroll down')
+        _mb('details', '<Left>',  ':scroll-overlay-h left',   desc='scroll left')
+        _mb('details', '<Right>', ':scroll-overlay-h right',  desc='scroll right')
+        _mb('details', 'h',       ':scroll-overlay-h left',   desc='scroll left')
+        _mb('details', 'l',       ':scroll-overlay-h right',  desc='scroll right')
 
     def _execute_binding(self, binding):
         """Execute a _Binding (one or more commands, or fill command line).
@@ -7879,6 +7896,7 @@ class Application:
         """
         self.help_open = True
         self.help_scroll = 0
+        self.help_h_scroll = 0
         self.help_show_all = False
         self.help_search_active = False
         self._current_mode = 'help'
@@ -8007,10 +8025,20 @@ class Application:
         elif self.details_open:
             self.details_scroll = max(0, self.details_scroll + delta)
 
+    def _cmd_scroll_overlay_h(self, args=''):
+        """Scroll the active overlay horizontally: left (−4) or right (+4)."""
+        a = args.strip()
+        delta = {'left': -4, 'right': 4}.get(a, 0)
+        if self.help_open:
+            self.help_h_scroll = max(0, self.help_h_scroll + delta)
+        elif self.details_open:
+            self.details_h_scroll = max(0, self.details_h_scroll + delta)
+
     def _draw_overlay_box(self, stdscr, height, width, lines, scroll_offset, inner_w, *,
                           handle_dividers=False, search_bar=None,
-                          match_set=None, current_match=None, search_query=''):
-        """Draw a centered bordered overlay popup; return the clamped scroll offset.
+                          match_set=None, current_match=None, search_query='',
+                          h_scroll=0):
+        """Draw a centered bordered overlay popup; return (v_scroll, h_scroll).
 
         Draws a ┌─┐ / │ │ / └─┘ box centered on the terminal.  Content lines
         are rendered with :meth:`_draw_hint_text` so ``[key]`` tokens receive
@@ -8023,13 +8051,17 @@ class Application:
                         divider instead of a content row.
         scroll_offset   First visible line index.  Clamped to a valid range
                         before drawing; the clamped value is returned.
-        inner_w         Content column width (box is ``inner_w + 2`` chars wide).
+        inner_w         Visible content column width (box is ``inner_w + 2`` wide).
+                        When content is wider than ``inner_w``, horizontal
+                        scrolling via *h_scroll* reveals the hidden columns.
         handle_dividers When True, ``"-DIVIDER-"`` entries become ├─┤ rules.
+        h_scroll        Horizontal scroll offset (columns from the left of each
+                        line).  Clamped to [0, max_line_len - inner_w].
 
         Returns
         -------
-        int
-            The clamped scroll offset actually used.
+        tuple[int, int]
+            ``(clamped_v_scroll, clamped_h_scroll)`` actually used.
         """
         box_w = inner_w + 2
         box_h_available = min(len(lines) + 2, height)
@@ -8037,19 +8069,32 @@ class Application:
         max_scroll      = max(0, len(lines) - visible_count)
         scroll_offset   = max(0, min(scroll_offset, max_scroll))
 
+        # Compute maximum content width across all non-divider lines for h-scroll cap.
+        max_line_w = max(
+            (len(line) for line in lines if line != '-DIVIDER-'),
+            default=0,
+        )
+        max_h_scroll = max(0, max_line_w - inner_w)
+        h_scroll = max(0, min(h_scroll, max_h_scroll))
+
         col0 = max(0, (width  - box_w)          // 2)
         row0 = max(0, (height - box_h_available) // 2)
 
         border_attr = curses.A_BOLD
 
-        # Top border — embed a scroll indicator when content doesn't fully fit.
+        # Top border — embed scroll indicators when content doesn't fully fit.
         if row0 < height:
+            parts = []
             if max_scroll > 0:
                 line_first = scroll_offset + 1
                 line_last  = scroll_offset + visible_count
-                indicator  = f' ↑↓ {line_first}-{line_last}/{len(lines)} '
-                left_w  = (inner_w - len(indicator)) // 2
-                right_w = inner_w - left_w - len(indicator)
+                parts.append(f'↑↓ {line_first}-{line_last}/{len(lines)}')
+            if max_h_scroll > 0:
+                parts.append(f'←→ {h_scroll + 1}-{h_scroll + inner_w}/{max_line_w}')
+            if parts:
+                indicator = ' ' + '  '.join(parts) + ' '
+                left_w  = max(0, (inner_w - len(indicator)) // 2)
+                right_w = max(0, inner_w - left_w - len(indicator))
                 top_border = '┌' + '─' * left_w + indicator + '─' * right_w + '┐'
             else:
                 top_border = '┌' + '─' * inner_w + '┐'
@@ -8075,7 +8120,9 @@ class Application:
             else:
                 try:
                     stdscr.addstr(r, col0, '│', border_attr)
-                    text = line.ljust(inner_w)[:inner_w]
+                    # Apply horizontal scroll: slice the line before display.
+                    sliced = line[h_scroll:h_scroll + inner_w]
+                    text = sliced.ljust(inner_w)[:inner_w]
                     self._draw_hint_text(stdscr, r, col0 + 1, text,
                                          col0 + 1 + inner_w + 1)
                     if col0 + 1 + inner_w < width:
@@ -8088,15 +8135,18 @@ class Application:
                         plain = line.replace('\\[', '[').replace('\\]', ']')
                         pos = plain.lower().find(search_query.lower())
                         if pos >= 0:
-                            hl_col = col0 + 1 + pos
-                            hl_len = min(len(search_query), inner_w - pos)
-                            hl_attr = (curses.A_REVERSE | curses.A_BOLD
-                                       if abs_line_idx == current_match
-                                       else curses.A_REVERSE)
-                            try:
-                                stdscr.chgat(r, hl_col, hl_len, hl_attr)
-                            except curses.error:
-                                pass
+                            # Adjust position for horizontal scroll offset
+                            vis_pos = pos - h_scroll
+                            if 0 <= vis_pos < inner_w:
+                                hl_col = col0 + 1 + vis_pos
+                                hl_len = min(len(search_query), inner_w - vis_pos)
+                                hl_attr = (curses.A_REVERSE | curses.A_BOLD
+                                           if abs_line_idx == current_match
+                                           else curses.A_REVERSE)
+                                try:
+                                    stdscr.chgat(r, hl_col, hl_len, hl_attr)
+                                except curses.error:
+                                    pass
                 except curses.error:
                     pass
 
@@ -8117,7 +8167,7 @@ class Application:
             except curses.error:
                 pass
 
-        return scroll_offset
+        return scroll_offset, h_scroll
 
     def _build_help_lines(self):
         """Return the content lines list for the help overlay.
@@ -8288,13 +8338,14 @@ class Application:
 
         ideal_w = max(len(line) for line in lines if line != "-DIVIDER-")
         inner_w = min(ideal_w, max(20, width - 4))
-        self.help_scroll = self._draw_overlay_box(
+        self.help_scroll, self.help_h_scroll = self._draw_overlay_box(
             stdscr, height, width, lines, self.help_scroll, inner_w,
             handle_dividers=True,
             search_bar=search_bar,
             match_set=set(self.help_search_matches) if self.help_search_matches else None,
             current_match=current_match,
             search_query=self.help_search,
+            h_scroll=self.help_h_scroll,
         )
 
     def _build_all_bindings_lines(self):
@@ -8507,10 +8558,11 @@ class Application:
 
         if not conn_disabled:
             lines.append("  [c] SSH connect")
-        lines.append("  [Enter/q/Esc] Close  [↑/↓/PgUp/PgDn] Scroll")
+        lines.append("  [Enter/q/Esc] Close  [↑/↓/PgUp/PgDn] Scroll  [←/→/h/l] H-Scroll")
 
-        self.details_scroll = self._draw_overlay_box(
+        self.details_scroll, self.details_h_scroll = self._draw_overlay_box(
             stdscr, height, width, lines, self.details_scroll, inner_w,
+            h_scroll=self.details_h_scroll,
         )
 
     def _register_shift_tab_seqs(self):
