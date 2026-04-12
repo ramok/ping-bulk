@@ -2853,10 +2853,10 @@ class _HostsParser:
                 continue
             self.seen_hosts.add(key)
             if ssh_args is not None:
+                entries.append(('cmd', f':remote-ping {ssh_args} {host}'))
                 if inline_comment and _is_ip(host):
                     resolved = _apply_backref(inline_comment, captures, host)
                     entries.append(('cmd', f':resolv {host} {resolved}'))
-                entries.append(('cmd', f':remote-ping {ssh_args} {host}'))
             else:
                 if inline_comment and _is_ip(host):
                     resolved = _apply_backref(inline_comment, captures, host)
