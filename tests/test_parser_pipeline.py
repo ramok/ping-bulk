@@ -162,8 +162,7 @@ class TestLetVariables:
         assert 'b.host' in hosts(result)
 
     def test_let_in_section_title(self, pb):
-        # ## lines do NOT expand variables; use :title directive instead
-        result = parse(pb, ':let env prod\n:title $env servers\n')
+        result = parse(pb, ':let env prod\n## $env servers\n')
         s = sections(result)
         assert s[0][0] == 'prod servers'
 

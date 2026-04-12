@@ -2597,7 +2597,7 @@ class _HostsParser:
 
             # ── Section header ##[#…] ─────────────────────────────────────
             if text.startswith('##'):
-                entries.append(self._parse_section(text))
+                entries.append(self._parse_section(_expand_let_vars(text, self.variables)))
                 continue
 
             # ── Directive :… ──────────────────────────────────────────────
@@ -2936,8 +2936,8 @@ def parse_hosts_file(filename, variables=None):
       ('error',   'message')         — non-fatal parse/expansion error
 
     File format rules:
-      ## Title        — section header (legacy); 'Title' is everything after '## '
-      :title Title    — section header (preferred); 'Title' is everything after ':title '
+      ## Title        — section header; 'Title' is everything after '## '
+      :title Title    — section header (alternative); 'Title' is everything after ':title '
       :let name val   — define a variable; ``$name`` is substituted in subsequent lines.
                         The name may contain brace expansion (e.g. ``name{1..4}``);
                         ``$N`` in the value is eagerly expanded per brace index.
