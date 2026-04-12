@@ -6663,6 +6663,10 @@ class Application:
 
         filename = args.strip()
 
+        if self.kiosk_mode and not getattr(self, '_loading_file', False):
+            if not self._kiosk_allow_path(filename, 'source'):
+                return
+
         if not os.path.exists(filename):
             self.add_event("cmd", f"source: file '{filename}' not found")
             return
@@ -7149,6 +7153,47 @@ class Application:
 
         self.add_event("cmd", f"edit: reloaded {hosts_file}")
 
+    def _kiosk_allow_path(self, path: str, context: str = '') -> bool:
+        """Check whether *path* is allowed for file operations in kiosk mode.
+
+        Returns True when the canonical (realpath) form of *path* falls under
+        an allowed prefix.  Allowed prefixes are:
+
+          /tmp/                         — world-writable scratch space
+          ~/.local/state/ping-bulk/     — conventional state directory
+          /etc/ping-bulk/               — admin-controlled config directory
+          directory of self.hosts_file  — same place the hosts file lives
+                                          (so operators can keep extra sources
+                                          alongside the main file)
+
+        If *path* does not exist yet, the directory part is checked instead.
+        When the check fails, an event is logged (using *context* as the
+        category prefix) and False is returned.
+        """
+        allowed_prefixes = [
+            '/tmp/',
+            os.path.expanduser('~/.local/state/ping-bulk/'),
+            '/etc/ping-bulk/',
+        ]
+        if self.hosts_file:
+            hosts_dir = os.path.dirname(os.path.realpath(self.hosts_file))
+            allowed_prefixes.append(hosts_dir + '/')
+
+        check = os.path.realpath(path)
+        # If the path doesn't exist yet, check its parent directory.
+        if not os.path.exists(check):
+            check = os.path.realpath(os.path.dirname(path)) + '/'
+
+        for prefix in allowed_prefixes:
+            real_prefix = os.path.realpath(prefix.rstrip('/')) + '/'
+            if check == real_prefix or check.startswith(real_prefix):
+                return True
+
+        tag = f"{context}: " if context else ""
+        self.add_event("cmd",
+            f"{tag}kiosk mode: path not in allowed directories — {path}")
+        return False
+
     def _resolve_editor(self) -> list:
         """Return [editor_binary] or [editor_binary, flags] to open a file.
 
@@ -7377,6 +7422,8 @@ class Application:
                         self.add_event("log", "logging is already off")
                 self.log_file = None
             else:
+                if self.kiosk_mode and not self._kiosk_allow_path(args, 'log'):
+                    return
                 old = self.log_file
                 self.log_file = args
                 if self._monitoring_started and old != args:
