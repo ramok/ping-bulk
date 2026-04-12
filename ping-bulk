@@ -6666,6 +6666,15 @@ class Application:
             self.add_event("resolv",
                 f"no monitor matched '{ip}' / '{hostname}' — mapping stored for future use")
 
+    def _open_cmd_line(self):
+        """Open the ':' command line, clearing any pending key sequence."""
+        self._key_seq = []
+        self.cmd = {
+            'chars': [], 'cursor': 0,
+            'hist_idx': -1, 'saved_line': '',
+            'completions': [], 'comp_idx': -1, 'comp_prefix': '',
+        }
+
     def _dispatch_cmd(self, text):
         """Dispatch a command string entered via the ':' command line.
 
@@ -8718,7 +8727,12 @@ class Application:
                             self.help_search += chr(key)
                             self._update_help_search()
                     else:
-                        if key == ord('/'):
+                        if key == ord(':'):
+                            self.help_open = False
+                            self.help_search_active = False
+                            self._current_mode = 'normal'
+                            self._open_cmd_line()
+                        elif key == ord('/'):
                             self.help_search_active = True
                             self._help_search_pre_scroll = self.help_scroll
                         elif self.help_search and key == ord('n'):
@@ -8733,6 +8747,12 @@ class Application:
                         self.details_open = False
                         self.details_monitor = None
                         self._current_mode = 'normal'
+                        continue
+                    if key == ord(':'):
+                        self.details_open = False
+                        self.details_monitor = None
+                        self._current_mode = 'normal'
+                        self._open_cmd_line()
                         continue
                     was_open = self.details_open
                     self._dispatch_mode_key('details', key)
@@ -8756,12 +8776,7 @@ class Application:
                     continue
                 # Infrastructure keys that always bypass the trie
                 if key == ord(':'):
-                    self._key_seq = []
-                    self.cmd = {
-                        'chars': [], 'cursor': 0,
-                        'hist_idx': -1, 'saved_line': '',
-                        'completions': [], 'comp_idx': -1, 'comp_prefix': '',
-                    }
+                    self._open_cmd_line()
                     continue
                 if key == 3:  # Ctrl+C — quit confirmation (re-press pattern)
                     self._key_seq = []
