@@ -164,7 +164,8 @@ class TestSnapshotRestore:
         src = self._make_monitor(pb, '10.0.0.1')
         src.history.extend([10.0, 20.0])
         src.history_times.extend([1000.0, 2000.0])
-        src.latencies = [10.0, 20.0]
+        src._record_latency(10.0)
+        src._record_latency(20.0)
         src.rx_count = 2
         snap = pb.Application.__dict__['_snapshot_monitor'](None, src)
 
@@ -173,7 +174,8 @@ class TestSnapshotRestore:
 
         assert list(dst.history) == [10.0, 20.0]
         assert dst.rx_count == 2
-        assert dst.latencies == [10.0, 20.0]
+        assert dst._lat_count == 2
+        assert abs(dst._lat_mean - 15.0) < 1e-9
 
     def test_restore_preserves_alive_state(self, pb):
         src = self._make_monitor(pb)

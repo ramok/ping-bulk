@@ -43,8 +43,17 @@ def make_app(pb, cfg_path, entries=None):
 
 
 def make_monitor(pb, host='127.0.0.1', **attrs):
-    """Return a PingMonitor with the given attributes set directly."""
+    """Return a PingMonitor with the given attributes set directly.
+
+    The special keyword ``latencies`` accepts a list of latency values; each
+    is fed through ``_record_latency`` so the Welford accumulators are set
+    correctly instead of being ignored.
+    """
     m = pb.PingMonitor(host)
+    latencies = attrs.pop('latencies', None)
+    if latencies:
+        for v in latencies:
+            m._record_latency(v)
     for k, v in attrs.items():
         setattr(m, k, v)
     return m

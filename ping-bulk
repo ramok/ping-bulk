@@ -1288,7 +1288,13 @@ class Monitor(ABC):
         self.latency = None
         self.history = deque(maxlen=100)
         self.history_times = deque(maxlen=100)  # parallel wall-clock timestamps
-        self.latencies = []    # all recorded latency values (successful pings)
+        # Latency statistics — stored as Welford online accumulators instead of a list,
+        # so memory stays O(1) regardless of how long the monitor has been running.
+        self._lat_count = 0           # number of successful latency samples
+        self._lat_mean  = 0.0         # running mean (Welford)
+        self._lat_m2    = 0.0         # running sum of squared deviations (Welford)
+        self._lat_min   = float('inf')
+        self._lat_max   = 0.0
         self.rx_count = 0      # total successful pings (RX)
         self.xx_count = 0      # total failed pings (XX)
         self.last_state = None
@@ -1319,6 +1325,43 @@ class Monitor(ABC):
             self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
         except Exception:
             self.resolved_hostname = None
+
+    def _record_latency(self, v):
+        """Update Welford online stats with a new latency sample *v* (ms).
+
+        Must be called under self.lock.
+        """
+        self._lat_count += 1
+        delta = v - self._lat_mean
+        self._lat_mean += delta / self._lat_count
+        delta2 = v - self._lat_mean
+        self._lat_m2 += delta * delta2
+        if v < self._lat_min:
+            self._lat_min = v
+        if v > self._lat_max:
+            self._lat_max = v
+
+    @property
+    def lat_avg(self):
+        """Running mean latency in ms, or None if no samples yet."""
+        return self._lat_mean if self._lat_count else None
+
+    @property
+    def lat_min(self):
+        """Minimum latency seen in ms, or None if no samples yet."""
+        return self._lat_min if self._lat_count else None
+
+    @property
+    def lat_max(self):
+        """Maximum latency seen in ms, or None if no samples yet."""
+        return self._lat_max if self._lat_count else None
+
+    @property
+    def lat_stdev(self):
+        """Population standard deviation of latency in ms, or None if < 2 samples."""
+        if self._lat_count < 2:
+            return None
+        return math.sqrt(self._lat_m2 / self._lat_count)
 
     def get_display_name(self, dns_mode="off"):
         """Return the display name for this host according to dns_mode."""
@@ -1511,7 +1554,7 @@ class PingMonitor(Monitor):
                         self.history.append(latency)
                         self.history_times.append(ping_ts)
                         self.rx_count += 1
-                        self.latencies.append(latency)
+                        self._record_latency(latency)
                     self.ping_count += 1
                     got_output = True
                     backoff = 1  # reset on any successful output
@@ -1678,7 +1721,7 @@ class PortMonitor(Monitor):
                     self.history.append(latency_ms)
                     self.history_times.append(wall_time)
                     self.rx_count += 1
-                    self.latencies.append(latency_ms)
+                    self._record_latency(latency_ms)
             else:
                 with self.lock:
                     self.alive = False
@@ -2009,7 +2052,7 @@ class SshPingMonitor(Monitor):
                         self.history.append(latency)
                         self.history_times.append(ping_ts)
                         self.rx_count += 1
-                        self.latencies.append(latency)
+                        self._record_latency(latency)
                     self.ping_count += 1
                     got_output = True
                     backoff = 1
@@ -3478,6 +3521,7 @@ class Application:
         self.stats_custom = None  # list[str] of canonical stat names when in custom mode, else None
         self._custom_col_hwm: dict = {}   # cname -> high-water-mark width (expands fast, shrinks slow)
         self._custom_col_hwm_ts: dict = {}  # cname -> time.monotonic() of last expansion
+        self._event_cat_width = 0  # cached max host display name length for event log alignment
         self.sort_by = 'none'  # none, name, status, latency
         self.history_mode = 0  # index into HISTORY_MODES
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
@@ -3602,7 +3646,14 @@ class Application:
         if level is None:
             level = _CATEGORY_LEVELS.get(category, LEVEL_QUIET)
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-        max_host_len = max((len(m.get_display_name(dns_mode='off')) for m in self.monitors), default=len(category))
+        # Use cached column width; expand if a new host name is wider.
+        cat_len = len(category)
+        if self.monitors:
+            for m in self.monitors:
+                n = len(m.get_display_name(dns_mode='off'))
+                if n > self._event_cat_width:
+                    self._event_cat_width = n
+        max_host_len = max(self._event_cat_width, cat_len)
         line = f"{timestamp}   {category:<{max_host_len}} {message}"
         entry = EventEntry(level=level, category=category, text=line)
         self.events.append(entry)
@@ -5082,7 +5133,8 @@ class Application:
             # Sorting active: only monitors are shown, no section labels
             # Return indices of all monitors in self.entries, in sorted display order
             sorted_monitors = self.get_sorted_monitors()
-            return [self.entries.index(m) for m in sorted_monitors if m in self.entries]
+            entry_idx = {id(e): i for i, e in enumerate(self.entries)}
+            return [entry_idx[id(m)] for m in sorted_monitors if id(m) in entry_idx]
 
     def get_sorted_monitors(self):
         """Get display entries sorted by current sort option.
@@ -5099,6 +5151,19 @@ class Application:
                 m.latency if m.latency is not None else float('inf'), m.host
             ))
         return self.entries  # 'none': preserve original order with section labels
+
+    @staticmethod
+    def _safe_addstr(stdscr, row, col, text, attr=0):
+        """Write *text* at (row, col) ignoring curses.error (e.g. bottom-right corner)."""
+        try:
+            stdscr.addstr(row, col, text, attr)
+        except curses.error:
+            pass
+
+    @staticmethod
+    def _truncate_pad(text, width):
+        """Return *text* left-padded or truncated to exactly *width* characters."""
+        return text.ljust(width)[:width]
 
     def draw_menu_bar(self, stdscr, height, width):
         """Draw the bottom menu bar with highlighted hotkeys.
@@ -5284,14 +5349,14 @@ class Application:
 
         cell_width = len(str(max_rtt_ms)) + 1  (digits field + 1 trailing space)
         Minimum is 3 (2-digit field covers values up to 99 ms + 1 space).
-        Uses monitor.latencies (never-capped) for a stable maximum.
+        Uses monitor.lat_max (never-capped) for a stable maximum.
         """
-        max_rtt = 0
+        max_rtt = 0.0
         for monitor in self.monitors:
             with monitor.lock:
-                for val in monitor.latencies:
-                    if val > max_rtt:
-                        max_rtt = val
+                v = monitor._lat_max
+            if v > max_rtt:
+                max_rtt = v
         return max(3, len(str(int(max_rtt))) + 1)
 
     def draw_hosts(self, stdscr, start_row, max_rows, width, height, show_header=True):
@@ -5445,6 +5510,8 @@ class Application:
         data_start = start_row + (1 if show_header else 0)
         row = data_start
         sorted_monitors = self.get_sorted_monitors()
+        # O(n) reverse-lookup: id(entry) → index in self.entries; avoids O(n²) .index() calls
+        _entry_idx_map = {id(e): i for i, e in enumerate(self.entries)}
 
         # Cap usable column to width-1: curses raises an error when writing to
         # the very last cell (height-1, width-1) because the cursor would advance
@@ -5519,10 +5586,7 @@ class Application:
                 if self.sort_by == 'none':
                     actual_entry_index = entry_index
                 else:
-                    try:
-                        actual_entry_index = self.entries.index(item)
-                    except ValueError:
-                        actual_entry_index = -1
+                    actual_entry_index = _entry_idx_map.get(id(item), -1)
                 entry_index += 1
                 skipped += 1
                 continue
@@ -5534,10 +5598,7 @@ class Application:
                 actual_entry_index = entry_index
             else:
                 # Sorted: find the item's position in original self.entries
-                try:
-                    actual_entry_index = self.entries.index(item)
-                except ValueError:
-                    actual_entry_index = -1  # not found (shouldn't happen)
+                actual_entry_index = _entry_idx_map.get(id(item), -1)
 
             # Check if this entry is highlighted or a search match
             is_highlighted = (self.highlighted_index is not None and
@@ -5798,7 +5859,12 @@ class Application:
         if monitor.error is not None:
             return "    ??"
         with monitor.lock:
-            lats = list(monitor.latencies)
+            lat_count = monitor._lat_count
+            lat_avg   = monitor._lat_mean if lat_count else None
+            lat_min   = monitor._lat_min  if lat_count else None
+            lat_max   = monitor._lat_max  if lat_count else None
+            lat_stdev = (math.sqrt(monitor._lat_m2 / lat_count)
+                         if lat_count >= 2 else None)
             rx = monitor.rx_count
             xx = monitor.xx_count
             tx = monitor.ping_count
@@ -5812,23 +5878,13 @@ class Application:
                 return "     -"
             return f"{xx / total * 100:5.1f}%"
         elif mode == 'Avg':
-            if not lats:
-                return "     -"
-            return f"{sum(lats) / len(lats):6.1f}"
+            return f"{lat_avg:6.1f}" if lat_avg is not None else "     -"
         elif mode == 'Min':
-            if not lats:
-                return "     -"
-            return f"{min(lats):6.1f}"
+            return f"{lat_min:6.1f}" if lat_min is not None else "     -"
         elif mode == 'Max':
-            if not lats:
-                return "     -"
-            return f"{max(lats):6.1f}"
+            return f"{lat_max:6.1f}" if lat_max is not None else "     -"
         elif mode == 'StDev':
-            if len(lats) < 2:
-                return "     -"
-            avg = sum(lats) / len(lats)
-            stdev = math.sqrt(sum((x - avg) ** 2 for x in lats) / len(lats))
-            return f"{stdev:6.1f}"
+            return f"{lat_stdev:6.1f}" if lat_stdev is not None else "     -"
         elif mode == 'RX':
             return f"{rx:6d}"
         elif mode == 'TX':
@@ -5886,37 +5942,23 @@ class Application:
             sep = "  "
             return sep.join([placeholder] * 8)
         with monitor.lock:
-            lats = list(monitor.latencies)
+            lat_count = monitor._lat_count
+            lat_avg   = monitor._lat_mean if lat_count else None
+            lat_min   = monitor._lat_min  if lat_count else None
+            lat_max   = monitor._lat_max  if lat_count else None
+            lat_stdev = (math.sqrt(monitor._lat_m2 / lat_count)
+                         if lat_count >= 2 else None)
             rx = monitor.rx_count
             xx = monitor.xx_count
             tx = monitor.ping_count
 
-        # Avg
-        if lats:
-            avg_s = f"{sum(lats) / len(lats):6.1f}"
-        else:
-            avg_s = "     -"
+        avg_s   = f"{lat_avg:6.1f}"   if lat_avg   is not None else "     -"
+        min_s   = f"{lat_min:6.1f}"   if lat_min   is not None else "     -"
+        max_s   = f"{lat_max:6.1f}"   if lat_max   is not None else "     -"
+        stdev_s = f"{lat_stdev:6.1f}" if lat_stdev is not None else "     -"
 
-        # Min
-        min_s = f"{min(lats):6.1f}" if lats else "     -"
-
-        # Max
-        max_s = f"{max(lats):6.1f}" if lats else "     -"
-
-        # Loss%
         total = rx + xx
-        if total == 0:
-            loss_s = "    - "
-        else:
-            loss_s = f"{xx / total * 100:5.1f}%"
-
-        # StDev
-        if len(lats) >= 2:
-            avg = sum(lats) / len(lats)
-            stdev = math.sqrt(sum((x - avg) ** 2 for x in lats) / len(lats))
-            stdev_s = f"{stdev:6.1f}"
-        else:
-            stdev_s = "     -"
+        loss_s = f"{xx / total * 100:5.1f}%" if total else "    - "
 
         return (f"{avg_s}  {min_s}  {max_s}  {loss_s}  "
                 f"{stdev_s}  {rx:6d}  {tx:6d}  {xx:6d}")
@@ -7038,15 +7080,19 @@ class Application:
         """Return a dict of per-monitor stats for history preservation across reload."""
         with m.lock:
             return {
-                'history':      list(m.history),
+                'history':       list(m.history),
                 'history_times': list(m.history_times),
-                'latencies':    m.latencies[:],
-                'rx_count':     m.rx_count,
-                'xx_count':     m.xx_count,
-                'ping_count':   m.ping_count,
-                'alive':        m.alive,
-                'down_since':   m.down_since,
-                'up_since':     m.up_since,
+                'lat_count':     m._lat_count,
+                'lat_mean':      m._lat_mean,
+                'lat_m2':        m._lat_m2,
+                'lat_min':       m._lat_min,
+                'lat_max':       m._lat_max,
+                'rx_count':      m.rx_count,
+                'xx_count':      m.xx_count,
+                'ping_count':    m.ping_count,
+                'alive':         m.alive,
+                'down_since':    m.down_since,
+                'up_since':      m.up_since,
             }
 
     def _restore_monitor(self, m, snap):
@@ -7054,7 +7100,11 @@ class Application:
         with m.lock:
             m.history.extend(snap['history'])
             m.history_times.extend(snap['history_times'])
-            m.latencies[:] = snap['latencies']
+            m._lat_count  = snap['lat_count']
+            m._lat_mean   = snap['lat_mean']
+            m._lat_m2     = snap['lat_m2']
+            m._lat_min    = snap['lat_min']
+            m._lat_max    = snap['lat_max']
             m.rx_count    = snap['rx_count']
             m.xx_count    = snap['xx_count']
             m.ping_count  = snap['ping_count']
@@ -8112,16 +8162,18 @@ class Application:
 
         # Collect stats once at the start to ensure consistency
         with monitor.lock:
-            lats = list(monitor.latencies)
+            lat_count = monitor._lat_count
+            lat_avg   = monitor._lat_mean if lat_count else None
+            lat_min   = monitor._lat_min  if lat_count else None
+            lat_max   = monitor._lat_max  if lat_count else None
+            lat_stdev = (math.sqrt(monitor._lat_m2 / lat_count)
+                         if lat_count >= 2 else None)
             rx = monitor.rx_count
             xx = monitor.xx_count
             tx = monitor.ping_count
             last = monitor.latency
             alive = monitor.alive
             error = monitor.error
-
-        import shlex
-        import textwrap
 
         dns_mode = DNS_MODES[self.dns_mode]
         display_name = monitor.get_display_name(dns_mode)
@@ -8225,17 +8277,12 @@ class Application:
 
         # Latency statistics
         lines.append("  Latency Statistics:")
-        if lats:
-            lines.append(f"    Min:     {min(lats):.2f} ms")
-            lines.append(f"    Max:     {max(lats):.2f} ms")
-            avg = sum(lats) / len(lats)
-            lines.append(f"    Average: {avg:.2f} ms")
-
-            if len(lats) >= 2:
-                stdev = math.sqrt(sum((x - avg) ** 2 for x in lats) / len(lats))
-                lines.append(f"    StdDev:  {stdev:.2f} ms")
-            else:
-                lines.append(f"    StdDev:  -")
+        if lat_count:
+            lines.append(f"    Min:     {lat_min:.2f} ms")
+            lines.append(f"    Max:     {lat_max:.2f} ms")
+            lines.append(f"    Average: {lat_avg:.2f} ms")
+            lines.append(f"    StdDev:  {lat_stdev:.2f} ms" if lat_stdev is not None
+                         else f"    StdDev:  -")
         else:
             lines.append(f"    Min:     -")
             lines.append(f"    Max:     -")
