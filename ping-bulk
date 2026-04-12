@@ -3514,6 +3514,12 @@ class Application:
         self._search_mode  = 'hosts' # 'hosts' | 'log'
         self._search_results = []    # entry indices (hosts) or event_list indices (log)
         self._search_idx = 0         # current position in _search_results
+        # Saved state for ESC restoration during active search prompt
+        self._search_pre_highlighted = None   # highlighted_index before search opened
+        self._search_pre_fold = {}            # {SectionLabel: folded} snapshot
+        self._search_auto_unfolded = set()    # sections auto-unfolded by search
+        # Help overlay search: save scroll position so ESC can restore it
+        self._help_search_pre_scroll = 0
         self.running = True
         self.threads = []
         self._start_time = None
@@ -6003,7 +6009,13 @@ class Application:
                 self.prompt = None
 
         elif p['type'] == 'search':
-            if key == 27:  # Esc — cancel search
+            if key == 27:  # Esc — cancel: restore highlighted_index and fold state
+                # Re-fold any sections that were auto-unfolded during this search
+                for section in self._search_auto_unfolded:
+                    section.folded = self._search_pre_fold.get(section, section.folded)
+                self._search_auto_unfolded.clear()
+                # Restore position
+                self.highlighted_index = self._search_pre_highlighted
                 self._search_query = ''
                 self._search_results = []
                 self._search_idx = 0
@@ -6017,6 +6029,16 @@ class Application:
                     self._apply_search_result(0)
                 elif self._search_query:
                     self.add_event("cmd", f"search: no matches for '{self._search_query}'")
+                # Re-fold auto-unfolded sections except those containing the match
+                if self._search_mode == 'hosts' and self._search_auto_unfolded:
+                    confirmed_sections = set(
+                        self._get_ancestor_sections(self.highlighted_index)
+                    ) if self.highlighted_index is not None else set()
+                    for section in self._search_auto_unfolded:
+                        if (self._search_pre_fold.get(section, False)
+                                and section not in confirmed_sections):
+                            section.folded = True
+                    self._search_auto_unfolded.clear()
                 self.prompt = None
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 if p['chars']:
@@ -6024,11 +6046,13 @@ class Application:
                 self._search_query = ''.join(p['chars'])
                 self._search_mode  = p['mode']
                 self._update_search_results()
+                self._search_live_update()
             elif 32 <= key < 127:
                 p['chars'].append(chr(key))
                 self._search_query = ''.join(p['chars'])
                 self._search_mode  = p['mode']
                 self._update_search_results()
+                self._search_live_update()
 
     def save_to_file(self, filename, append=False, write_separator=True):
         """Write the current event log to a file.
@@ -7526,7 +7550,53 @@ class Application:
     def _cmd_search_open(self, args=''):
         """Open the / search prompt.  Mode: hosts if a host is selected, log otherwise."""
         mode = 'hosts' if self.highlighted_index is not None else 'log'
+        # Save state so ESC can restore it
+        self._search_pre_highlighted = self.highlighted_index
+        self._search_pre_fold = {s: s.folded
+                                 for s in self.entries if isinstance(s, SectionLabel)}
+        self._search_auto_unfolded = set()
         self.prompt = {'type': 'search', 'mode': mode, 'chars': list(self._search_query)}
+
+    def _get_ancestor_sections(self, entry_idx):
+        """Return the list of SectionLabel objects that are ancestors of entry_idx."""
+        stack = []
+        for i, entry in enumerate(self.entries):
+            if i >= entry_idx:
+                break
+            if isinstance(entry, SectionLabel):
+                while stack and stack[-1].level >= entry.level:
+                    stack.pop()
+                stack.append(entry)
+        return list(stack)
+
+    def _search_live_update(self):
+        """Called on every keystroke during host search: live-jump and auto-unfold.
+
+        Re-folds any previously auto-unfolded sections first (so stale unfolds
+        from a prior query are cleaned up), then unfolds sections that contain
+        the current matches, then jumps highlighted_index to the first match.
+        """
+        if self._search_mode != 'hosts':
+            return
+        # Re-fold sections that were auto-unfolded by a previous query
+        for section in self._search_auto_unfolded:
+            if self._search_pre_fold.get(section, False):
+                section.folded = True
+        self._search_auto_unfolded.clear()
+
+        if not self._search_results:
+            self.highlighted_index = self._search_pre_highlighted
+            return
+
+        # Auto-unfold every section that contains a match
+        for idx in self._search_results:
+            for section in self._get_ancestor_sections(idx):
+                if section.folded:
+                    section.folded = False
+                    self._search_auto_unfolded.add(section)
+
+        # Live-jump to the first match
+        self._apply_search_result(0)
 
     def _cmd_search_next(self, args=''):
         """Jump to next (or prev) search match.  :search-next prev → backward."""
@@ -8271,17 +8341,19 @@ class Application:
                             self._update_help_search()
                         elif key in (ord('\n'), ord('\r'), curses.KEY_ENTER, ord('/')):
                             self.help_search_active = False  # confirm, keep highlights
-                        elif key == 27:  # Esc — cancel search
+                        elif key == 27:  # Esc — cancel search, restore scroll
                             self.help_search = ''
                             self.help_search_active = False
                             self.help_search_matches = []
                             self.help_search_match_idx = 0
+                            self.help_scroll = self._help_search_pre_scroll
                         elif 32 <= key <= 126:  # printable
                             self.help_search += chr(key)
                             self._update_help_search()
                     else:
                         if key == ord('/'):
                             self.help_search_active = True
+                            self._help_search_pre_scroll = self.help_scroll
                         elif self.help_search and key == ord('n'):
                             self._help_search_jump(+1)
                         elif self.help_search and key == ord('N'):
