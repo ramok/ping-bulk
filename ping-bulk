@@ -3522,6 +3522,10 @@ class Application:
         self._custom_col_hwm: dict = {}   # cname -> high-water-mark width (expands fast, shrinks slow)
         self._custom_col_hwm_ts: dict = {}  # cname -> time.monotonic() of last expansion
         self._event_cat_width = 0  # cached max host display name length for event log alignment
+        self._filtered_events = []   # cached event list filtered by loglevel
+        self._filtered_events_dirty = True  # True when cache needs rebuild
+        self._name_col_cache: dict = {}  # dns_mode → cached name_col_width value
+        self._name_col_dirty = True      # invalidated on entry/dns/monitor changes
         self.sort_by = 'none'  # none, name, status, latency
         self.history_mode = 0  # index into HISTORY_MODES
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
@@ -3602,7 +3606,7 @@ class Application:
                     m.resolved_hostname = hostname
                     m.resolv_static = True
                 self.monitors.append(m)
-                self.entries.append(m)
+                self._add_entry(m)
             elif kind == 'optional_host':
                 # Only add the monitor when a :resolv mapping exists for this host.
                 # Used by '?host' lines (inside or outside :for loops) to skip hosts
@@ -3619,12 +3623,12 @@ class Application:
                 m.resolved_hostname = hostname
                 m.resolv_static = True
                 self.monitors.append(m)
-                self.entries.append(m)
+                self._add_entry(m)
             elif kind == 'section':
                 level = rest[1] if len(rest) > 1 else 1
                 folded_default = rest[2] if len(rest) > 2 else False
                 no_autofold = rest[3] if len(rest) > 3 else False
-                self.entries.append(SectionLabel(value, level, folded_default, no_autofold))
+                self._add_entry(SectionLabel(value, level, folded_default, no_autofold))
             elif kind == 'cmd':
                 self._dispatch_cmd(value)
             elif kind == 'warn':
@@ -3657,6 +3661,17 @@ class Application:
         line = f"{timestamp}   {category:<{max_host_len}} {message}"
         entry = EventEntry(level=level, category=category, text=line)
         self.events.append(entry)
+        # Mark cached filtered list dirty; only add to it if the event would be
+        # visible at the current loglevel (avoids full rebuild on every add).
+        if level <= self.loglevel:
+            self._filtered_events.append(entry)
+            # Trim to log_size (the deque self.events is already bounded, but the
+            # plain list is not — keep them in sync by evicting from the front).
+            excess = len(self._filtered_events) - self.log_size
+            if excess > 0:
+                del self._filtered_events[:excess]
+        else:
+            self._filtered_events_dirty = True
         if self.log_file:
             try:
                 with open(self.log_file, 'a') as f:
@@ -3935,6 +3950,12 @@ class Application:
         prefix_base = prefix[:prefix.rfind(',') + 1]
         return [prefix_base + c for c in candidates]
 
+    def _add_entry(self, entry):
+        """Append *entry* to self.entries and invalidate layout caches."""
+        self.entries.append(entry)
+        self._name_col_dirty = True
+        self._name_col_cache.clear()
+
     def start_monitoring(self):
         """Start all ping threads"""
         self._monitoring_started = True
@@ -4027,6 +4048,8 @@ class Application:
     def cycle_dns(self, direction=1):
         """Cycle through DNS display modes. direction=1 forward, -1 backward."""
         self.dns_mode = (self.dns_mode + direction) % len(DNS_MODES)
+        self._name_col_dirty = True  # display names change with dns mode
+        self._name_col_cache.clear()
         # Trigger resolution threads for monitors not yet resolved when entering a resolve mode
         if DNS_MODES[self.dns_mode] in ('hostname', 'ip'):
             for monitor in self.monitors:
@@ -5376,24 +5399,7 @@ class Application:
         # Adaptive hostname column: wide enough for all display names (including
         # their per-level indentation), the header label, and section title prefixes.
         dns_mode_str = DNS_MODES[self.dns_mode]
-        # Walk entries tracking current section level to compute indented name width.
-        max_name_len = len("Hostname")
-        _sec_stack: list[SectionLabel] = []
-        for e in self.entries:
-            if isinstance(e, SectionLabel):
-                while _sec_stack and _sec_stack[-1].level >= e.level:
-                    _sec_stack.pop()
-                _sec_stack.append(e)
-            elif isinstance(e, Monitor):
-                indent = _sec_stack[-1].level * 2 if _sec_stack else 0
-                max_name_len = max(max_name_len, indent + len(e.get_display_name(dns_mode_str)))
-        # Each section header: (level-1)*2 spaces + "── [-] " (7) + title
-        max_section_len = max(
-            ((e.level - 1) * 2 + 7 + len(e.title)
-             for e in self.entries if isinstance(e, SectionLabel)),
-            default=0
-        )
-        name_col_width = max(len("Hostname"), max_name_len, max_section_len)
+        name_col_width = self._get_name_col_width(dns_mode_str)
         stat_col = name_col_width + 1   # stat value starts 1 col after hostname
         # Badge width: worst case is all monitors in one section → "N↑/N↓/N-"
         n = len(self.monitors)
@@ -5963,6 +5969,50 @@ class Application:
         return (f"{avg_s}  {min_s}  {max_s}  {loss_s}  "
                 f"{stdev_s}  {rx:6d}  {tx:6d}  {xx:6d}")
 
+    def _get_name_col_width(self, dns_mode_str: str) -> int:
+        """Return the cached hostname column width for *dns_mode_str*.
+
+        Rebuilds the cache when _name_col_dirty is True or the dns mode
+        changes (different dns_mode_str than last time).
+        """
+        if not self._name_col_dirty and dns_mode_str in self._name_col_cache:
+            return self._name_col_cache[dns_mode_str]
+
+        max_name_len = len("Hostname")
+        _sec_stack: list = []
+        for e in self.entries:
+            if isinstance(e, SectionLabel):
+                while _sec_stack and _sec_stack[-1].level >= e.level:
+                    _sec_stack.pop()
+                _sec_stack.append(e)
+            elif isinstance(e, Monitor):
+                indent = _sec_stack[-1].level * 2 if _sec_stack else 0
+                max_name_len = max(max_name_len,
+                                   indent + len(e.get_display_name(dns_mode_str)))
+        max_section_len = max(
+            ((e.level - 1) * 2 + 7 + len(e.title)
+             for e in self.entries if isinstance(e, SectionLabel)),
+            default=0
+        )
+        result = max(len("Hostname"), max_name_len, max_section_len)
+        self._name_col_cache[dns_mode_str] = result
+        if len(self._name_col_cache) >= len(DNS_MODES):
+            # All modes computed — clear dirty flag so future calls use cache.
+            self._name_col_dirty = False
+        return result
+
+    def _get_filtered_events(self) -> list:
+        """Return (and cache) the event list filtered to the current loglevel.
+
+        The list is rebuilt only when _filtered_events_dirty is True or when
+        the incremental appends in add_event() have fallen out of sync (e.g.
+        after a log-size change).  All other callers get the cached list at O(1).
+        """
+        if self._filtered_events_dirty:
+            self._filtered_events = [e for e in self.events if e.level <= self.loglevel]
+            self._filtered_events_dirty = False
+        return self._filtered_events
+
     def draw_events(self, stdscr, start_row, height, width):
         """Draw event log at bottom with optional scroll support.
 
@@ -5970,8 +6020,8 @@ class Application:
         log_offset>0  -> scrolled back; header shows position and resume hint
         """
         page_size = max(1, height - start_row - 2)  # rows available for event lines
-        # Filter by current log level (display-time filtering; file always unfiltered)
-        event_list = [e for e in self.events if e.level <= self.loglevel]
+        # Use cached filtered list (rebuilt only when dirty)
+        event_list = self._get_filtered_events()
         total = len(event_list)
 
         overflows = total > page_size  # True when the log cannot fit on screen
@@ -6119,6 +6169,7 @@ class Application:
         elif p['type'] == 'clear':
             if key in (ord('y'), ord('Y')):
                 self.events.clear()
+                self._filtered_events.clear()
                 self.log_offset = 0  # reset scroll position after clearing
             self.prompt = None  # any key closes the clear prompt
 
@@ -6643,7 +6694,7 @@ class Application:
             monitor = PingMonitor(host)
 
         self.monitors.append(monitor)
-        self.entries.append(monitor)
+        self._add_entry(monitor)
 
         if self._monitoring_started:
             thread = threading.Thread(target=monitor.ping, daemon=True)
@@ -6692,7 +6743,7 @@ class Application:
                             m.resolved_hostname = hostname
                             m.resolv_static = True
                         self.monitors.append(m)
-                        self.entries.append(m)
+                        self._add_entry(m)
                         if self._monitoring_started:
                             thread = threading.Thread(target=m.ping, daemon=True)
                             thread.start()
@@ -6701,7 +6752,7 @@ class Application:
                     level = rest[1] if len(rest) > 1 else 1
                     folded_default = rest[2] if len(rest) > 2 else False
                     no_autofold = rest[3] if len(rest) > 3 else False
-                    self.entries.append(SectionLabel(value, level, folded_default, no_autofold))
+                    self._add_entry(SectionLabel(value, level, folded_default, no_autofold))
                 elif kind == 'cmd':
                     self._dispatch_cmd(value)
                 elif kind == 'warn':
@@ -7129,6 +7180,8 @@ class Application:
         self.host_scroll = 0
         self.monitors.clear()
         self.entries.clear()
+        self._name_col_dirty = True
+        self._name_col_cache.clear()
         self.threads.clear()
         self.hosts_map.clear()
 
@@ -7261,6 +7314,8 @@ class Application:
             modes_lower = [m.lower() for m in DNS_MODES]
             if args.lower() in modes_lower:
                 self.dns_mode = modes_lower.index(args.lower())
+                self._name_col_dirty = True
+                self._name_col_cache.clear()
                 if DNS_MODES[self.dns_mode] in ('hostname', 'ip'):
                     for monitor in self.monitors:
                         if monitor.resolved_ip is None:
@@ -7409,6 +7464,7 @@ class Application:
             self._open_prompt_clear()
         else:
             self.events.clear()
+            self._filtered_events.clear()
             self.log_offset = 0
 
     def _cmd_log(self, args=''):
@@ -7448,6 +7504,7 @@ class Application:
             return
         self.log_size = n
         self.events = deque(self.events, maxlen=n)
+        self._filtered_events_dirty = True  # rebuild cache with new size limit
         if self._monitoring_started:
             self.add_event("log-size", f"event log size set to {n}")
 
@@ -7500,6 +7557,7 @@ class Application:
         """Set loglevel and update the module-level exec-trace sink."""
         global _exec_trace
         self.loglevel = level
+        self._filtered_events_dirty = True  # loglevel change invalidates cached filter
         if level >= LEVEL_TRACE:
             _exec_trace = lambda cmd: self.add_event(
                 "exec", shlex.join(cmd), level=LEVEL_TRACE)
@@ -7715,7 +7773,7 @@ class Application:
                                                      original_ssh_args=original_ssh_args,
                                                      hosts_map=self.hosts_map)
                             self.monitors.append(monitor)
-                            self.entries.append(monitor)
+                            self._add_entry(monitor)
                             if self._monitoring_started:
                                 thread = threading.Thread(
                                     target=monitor.ping, daemon=True
@@ -7767,7 +7825,7 @@ class Application:
                         results.append(i)
             self._search_results = results
         else:
-            event_list = [e for e in self.events if e.level <= self.loglevel]
+            event_list = self._get_filtered_events()
             self._search_results = [i for i, e in enumerate(event_list)
                                     if q in e.text.lower()]
 
@@ -7782,7 +7840,7 @@ class Application:
         else:
             # Scroll event log so matched entry is visible at bottom of window
             ev_idx = self._search_results[idx]
-            event_list = [e for e in self.events if e.level <= self.loglevel]
+            event_list = self._get_filtered_events()
             total = len(event_list)
             self.log_offset = max(0, total - ev_idx - 1)
 

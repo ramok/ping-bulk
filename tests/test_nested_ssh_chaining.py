@@ -436,6 +436,8 @@ def _make_app(pb, entries):
     app._fold_stack    = []
     app.kiosk_mode     = False
     app.variables      = {}
+    app._name_col_cache = {}
+    app._name_col_dirty = True
 
     for kind, *rest in entries:
         value = rest[0] if rest else ''
