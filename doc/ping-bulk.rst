@@ -939,12 +939,18 @@ Security features in kiosk mode:
   to ignore ``~/.ssh/`` entirely.
 - If ``/etc/ping-bulk/id_ed25519`` exists it is used as the sole
   identity file (``-i /etc/ping-bulk/id_ed25519``).
+- SSH ``ProxyCommand``, ``LocalCommand``, ``RemoteForward``, and related
+  options are blocked to prevent shell escapes via SSH.
 - ``:mux`` only allows ``ssh`` and ``login`` as commands.
+- ``:log`` and ``:source`` paths are restricted to ``/tmp/``,
+  ``~/.local/state/ping-bulk/``, ``/etc/ping-bulk/``, and the directory
+  containing the hosts file.  Symlinks are resolved before the check.
+- Every ``:cmd`` dispatch is logged to syslog (``LOG_NOTICE``,
+  facility ``DAEMON``) for auditing.
 - ``:q`` / ``q`` quit is not disabled, but ``Restart=always`` in the
   systemd unit ensures ping-bulk is restarted immediately.
 
 See ``kiosk/README.md`` in the repository for the full setup guide.
-
 
 
 Section headers (``##`` / ``:title``, ``###`` / ``:title2``, …) group

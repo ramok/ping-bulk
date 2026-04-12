@@ -19,6 +19,7 @@ import sys
 import textwrap
 import threading
 import time
+import syslog as _syslog
 from abc import ABC, abstractmethod
 from collections import deque
 from datetime import datetime
@@ -4091,6 +4092,24 @@ class Application:
         cycle_len = len(STATS_MODES) + (1 if self.stats_custom is not None else 0)
         self.stats_mode = (self.stats_mode + direction) % cycle_len
 
+    def _set_stats_custom(self, columns):
+        """Set stats_custom and prune the HWM cache of any stale column keys.
+
+        Pass a list of canonical stat names to enable custom mode, or None to
+        clear it.  Old HWM entries whose column names are no longer in *columns*
+        are removed so the dict never accumulates unboundedly.
+        """
+        self.stats_custom = columns
+        if columns is not None:
+            active = set(columns)
+            for key in list(self._custom_col_hwm):
+                if key not in active:
+                    del self._custom_col_hwm[key]
+                    self._custom_col_hwm_ts.pop(key, None)
+        else:
+            self._custom_col_hwm.clear()
+            self._custom_col_hwm_ts.clear()
+
     def cycle_sort(self, direction=1):
         """Cycle through sort options. direction=1 forward, -1 backward."""
         sorts = ['none', 'name', 'status', 'latency']
@@ -6670,6 +6689,9 @@ class Application:
         cmd  = parts[0].lstrip(':').lower()
         args = parts[1].strip() if len(parts) > 1 else ''
 
+        if getattr(self, 'kiosk_mode', False):
+            self._kiosk_audit('cmd', f'{cmd} {args}'.strip())
+
         cmd_def = _CMD_MAP.get(cmd)
         if cmd_def:
             self._last_cmd_name = cmd  # let handlers know which alias was used
@@ -7232,6 +7254,26 @@ class Application:
 
         self.add_event("cmd", f"edit: reloaded {hosts_file}")
 
+    def _kiosk_audit(self, action: str, detail: str = '') -> None:
+        """Write one audit record to syslog when kiosk mode is active.
+
+        Records the executing user, action name, and optional detail string.
+        Uses LOG_NOTICE priority so the record lands in most syslog targets
+        (e.g. ``/var/log/syslog``) without flooding ``/var/log/auth.log``.
+
+        Safe to call on non-Linux platforms — if syslog is unavailable the
+        call is silently ignored.
+        """
+        try:
+            user = os.environ.get('USER') or os.environ.get('LOGNAME') or str(os.getuid())
+            msg = f"kiosk_audit: user={user} action={action}"
+            if detail:
+                msg += f" detail={detail!r}"
+            _syslog.openlog('ping-bulk', _syslog.LOG_PID, _syslog.LOG_DAEMON)
+            _syslog.syslog(_syslog.LOG_NOTICE, msg)
+        except Exception:
+            pass  # syslog not available (non-Linux, permission denied, …)
+
     def _kiosk_allow_path(self, path: str, context: str = '') -> bool:
         """Check whether *path* is allowed for file operations in kiosk mode.
 
@@ -7370,7 +7412,7 @@ class Application:
 
         # Bare comma or empty list → clear custom, reset to off
         if args in (',', ''):
-            self.stats_custom = None
+            self._set_stats_custom(None)
             self.stats_mode = 0
             return
 
@@ -7378,7 +7420,7 @@ class Application:
         if ',' in args:
             tokens = [t.strip().lower() for t in args.split(',') if t.strip()]
             if not tokens:
-                self.stats_custom = None
+                self._set_stats_custom(None)
                 self.stats_mode = 0
                 return
             unknown = [t for t in tokens if t not in STAT_NAMES]
@@ -7388,7 +7430,7 @@ class Application:
                     f"stats: unknown column(s): {', '.join(unknown)} — "
                     f"valid: {', '.join(valid)}")
                 return
-            self.stats_custom = [STAT_NAMES[t] for t in tokens]
+            self._set_stats_custom([STAT_NAMES[t] for t in tokens])
             self.stats_mode = _CUSTOM_STATS_SENTINEL
             return
 
@@ -7397,10 +7439,10 @@ class Application:
         modes_lower = [m.lower() for m in STATS_MODES]
         if arg_lower in modes_lower:
             self.stats_mode = modes_lower.index(arg_lower)
-            self.stats_custom = None
+            self._set_stats_custom(None)
         elif arg_lower in STAT_NAMES:
             # e.g. ':set stats last' → treat as custom single-column
-            self.stats_custom = [STAT_NAMES[arg_lower]]
+            self._set_stats_custom([STAT_NAMES[arg_lower]])
             self.stats_mode = _CUSTOM_STATS_SENTINEL
         else:
             valid = sorted(set(modes_lower) | set(STAT_NAMES.keys()))

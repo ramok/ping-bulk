@@ -85,13 +85,17 @@ automatically in kiosk mode.
 |---------|------------------------|
 | `c` hotkey SSH | Allowed; uses `/etc/ping-bulk/id_ed25519` if present |
 | `~/.ssh/` keys | **Ignored** (`-F none -o IdentityFile=none -o IdentitiesOnly=yes`) |
+| SSH ProxyCommand | **Blocked** — `-o ProxyCommand`, `LocalCommand`, `RemoteForward`, etc. are rejected |
 | `:mux` arbitrary cmds | Blocked — only `ssh` and `login` are whitelisted |
 | `:mux` backend | **tmux only** — screen and X terminals are not used in kiosk mode |
 | New tmux window/pane | Runs `login` for authentication |
-| tmux hotkeys | All removed (`unbind-key -a`) |
+| tmux hotkeys | All removed (`unbind-key -a`); prefix key set to `None` |
 | `:q` / `q` / `Q` | Disabled — systemd `Restart=always` handles cleanup |
 | `:edit` | Uses `rnano` (restricted nano) or `rvim` (restricted vim) — `$VISUAL`/`$EDITOR` are ignored |
 | `:edit` permission | Checked — write access to the hosts file is required |
+| `:log` / `:source` paths | Restricted to `/tmp/`, `~/.local/state/ping-bulk/`, `/etc/ping-bulk/`, and the hosts-file directory |
+| Symlink traversal | Blocked — all path checks use `realpath()` |
+| Command audit log | Every `:cmd` dispatch is logged to syslog (`LOG_NOTICE`, facility `DAEMON`) |
 | Session lock | Optional via `lock-after-time` in `ping-bulk-kiosk.tmux.conf` |
 
 ---
