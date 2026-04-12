@@ -1880,7 +1880,11 @@ class SshPingMonitor(Monitor):
         if dns_mode == 'ip':
             ping_part = self.resolved_ip or self._ping_host
         elif dns_mode == 'hostname':
-            ping_part = self.resolved_hostname or self._ping_host_label
+            # resolved_hostname is set by actual reverse-DNS resolution.
+            # Fall back to _reverse_lookup_alias so :resolv labels (## label)
+            # are honoured when no reverse-DNS result is available.
+            ping_part = (self.resolved_hostname
+                         or self._reverse_lookup_alias(self._ping_host_label))
         else:
             ping_part = self._ping_host_label
         display_parts.append(self._strip_username(ping_part))

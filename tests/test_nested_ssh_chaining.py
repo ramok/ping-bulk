@@ -394,3 +394,135 @@ class TestWithRelayLabel:
         assert any(':remote-ping' in c and '10.10.6.10' in c for c in cmd_entries), (
             f":remote-ping not emitted; cmds={cmd_entries!r}"
         )
+
+
+# ===========================================================================
+# TestRelayTargetHostnameDisplay
+# — dns_mode='hostname' for a host with ## label inside :with remote-ping
+# ===========================================================================
+
+def _make_app(pb, entries):
+    """Build a minimal Application from pre-parsed entry tuples."""
+    app = pb.Application.__new__(pb.Application)
+    app.monitors  = []
+    app.entries   = []
+    app.hosts_map = {}
+    app.port_map  = {}
+    app.events    = pb.deque(maxlen=1000)
+    app.history_size   = 100
+    app.sync_history   = True
+    app.log_size       = 1000
+    app.dns_mode       = 0
+    app.stats_mode     = 0
+    app.sort_by        = 'none'
+    app.history_mode   = 0
+    app.history_offset = 0
+    app._visible_ping_length = 50
+    app.log_offset     = 0
+    app.highlighted_index = None
+    app.log_file       = None
+    app._monitoring_started = False
+    app.prompt         = None
+    app.cmd            = None
+    app.cmd_history    = []
+    app.help_open      = False
+    app.help_scroll    = 0
+    app.details_open   = False
+    app.details_monitor = None
+    app.details_scroll = 0
+    app.running        = True
+    app.threads        = []
+    app._start_time    = None
+    app._fold_stack    = []
+    app.kiosk_mode     = False
+    app.variables      = {}
+
+    for kind, *rest in entries:
+        value = rest[0] if rest else ''
+        if kind == 'cmd':
+            app._dispatch_cmd(value)
+        elif kind in ('host', 'optional_host'):
+            host_str, _ = pb.parse_target(value)
+            m = pb.PingMonitor(host_str)
+            if host_str in app.hosts_map:
+                ip, hostname = app.hosts_map[host_str]
+                m.resolved_ip = ip
+                m.resolved_hostname = hostname
+                m.resolv_static = True
+            app.monitors.append(m)
+            app.entries.append(m)
+        elif kind == 'section':
+            level = rest[1] if len(rest) > 1 else 1
+            folded_default = rest[2] if len(rest) > 2 else False
+            app.entries.append(pb.SectionEntry(value, level=level,
+                                               folded=folded_default))
+    return app
+
+
+class TestRelayTargetHostnameDisplay:
+    """dns_mode='hostname' shows ## label for target inside :with remote-ping."""
+
+    def test_hostname_mode_shows_label_not_ip(self, pb, tmp_path):
+        """Target IP with ## label inside :with block → label shown in hostname mode."""
+        content = """\
+            :with remote-ping komar@10.10.6.117 ## ps-supervisor
+            1.1.1.1 ## internet
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        app = _make_app(pb, entries)
+
+        ssh_monitors = [m for m in app.monitors
+                        if isinstance(m, pb.SshPingMonitor)]
+        assert ssh_monitors, "expected at least one SshPingMonitor"
+
+        m = ssh_monitors[0]
+        display = m.get_display_name('hostname')
+        assert 'internet' in display, (
+            f"Expected 'internet' in hostname display, got: {display!r}\n"
+            f"  resolved_hostname={m.resolved_hostname!r}, "
+            f"  _ping_host_label={m._ping_host_label!r}, "
+            f"  hosts_map={app.hosts_map!r}"
+        )
+        assert '1.1.1.1' not in display, (
+            f"Raw IP should not appear in hostname display, got: {display!r}"
+        )
+
+    def test_hostname_mode_relay_label_shown(self, pb, tmp_path):
+        """Relay IP with ## label → relay label shown in hostname mode."""
+        content = """\
+            :with remote-ping komar@10.10.6.117 ## ps-supervisor
+            1.1.1.1 ## internet
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        app = _make_app(pb, entries)
+
+        m = [m for m in app.monitors if isinstance(m, pb.SshPingMonitor)][0]
+        display = m.get_display_name('hostname')
+        assert 'ps-supervisor' in display, (
+            f"Expected relay label 'ps-supervisor' in display, got: {display!r}"
+        )
+
+    def test_ordering_remote_ping_before_resolv(self, pb, tmp_path):
+        """:remote-ping entry must appear before :resolv in parsed output."""
+        content = """\
+            :with remote-ping komar@relay
+            10.0.0.1 ## myhost
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        cmd_entries = [v for k, v in entries if k == 'cmd']
+        remote_ping_idx = next(
+            (i for i, v in enumerate(cmd_entries) if ':remote-ping' in v and '10.0.0.1' in v),
+            None)
+        resolv_idx = next(
+            (i for i, v in enumerate(cmd_entries) if ':resolv 10.0.0.1' in v),
+            None)
+        assert remote_ping_idx is not None, f":remote-ping not in cmds: {cmd_entries!r}"
+        assert resolv_idx is not None,      f":resolv not in cmds: {cmd_entries!r}"
+        assert remote_ping_idx < resolv_idx, (
+            f":remote-ping (idx {remote_ping_idx}) must come before "
+            f":resolv (idx {resolv_idx}) so the monitor exists when "
+            f"_apply_hosts_entry runs"
+        )
