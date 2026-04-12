@@ -5436,7 +5436,7 @@ class Application:
                                actual_entry_index in self._search_results)
 
             # Base attribute for the entire row (highlight if selected)
-            row_attr = curses.A_REVERSE if is_highlighted else (curses.A_BOLD if is_search_match else 0)
+            row_attr = curses.A_REVERSE if is_highlighted else (curses.A_UNDERLINE if is_search_match else 0)
 
             # Section label — render header row with status badge, and history when folded
             if isinstance(item, SectionLabel):
