@@ -4916,9 +4916,14 @@ class Application:
         :unbind-key [--mode MODE] [--%x] <key>  — remove a binding
 
         --mode MODE:  normal (default), help, details, command
+                      comma-separated to bind in multiple overlay modes at once:
+                        --mode help,details,settings
+                        --mode normal,help,details
         --desc TEXT:  description shown in help overlay custom-bindings section
         --hint TEXT:  short label shown in the menu bar (e.g. "[t]ool")
-        Context flags (--%h/--%s/--%p/--%r/--%d/--%j) restrict to context.
+        --if-cmd PRG: only bind if PRG is found in PATH (shutil.which)
+        --if-sh "CMD": only bind if CMD exits 0 (blocked in kiosk mode)
+        Context flags (--%h/--%s/--%p/--%r/--%d/--%j) restrict to context (normal only).
         """
         if self.kiosk_mode and not getattr(self, '_loading_file', False):
             self.add_event("cmd", "bind-key: blocked in kiosk mode")
@@ -4931,16 +4936,17 @@ class Application:
             self._cmd_bindkey_show_all()
             return
 
-        # Parse --mode, --desc, --hint flags before context flags
-        bind_mode = 'normal'
+        # Parse --mode, --desc, --hint, --if-cmd, --if-sh flags before context flags
+        bind_modes = ['normal']
         bind_desc = ''
         bind_hint = ''
-        # Allow flags in any order, up to 3 passes
-        for _ in range(6):
+        if_cmd_checks = []
+        if_sh_checks = []
+        for _ in range(16):
             if args.startswith('--mode '):
                 rest = args[7:].lstrip()
                 val, _, args = rest.partition(' ')
-                bind_mode = val.strip()
+                bind_modes = [m.strip() for m in val.split(',') if m.strip()]
                 args = args.strip()
             elif args.startswith('--desc '):
                 rest = args[7:].lstrip()
@@ -4972,17 +4978,68 @@ class Application:
                     parts = rest.split(' --', 1)
                     bind_hint = parts[0].strip()
                     args = ('--' + parts[1]) if len(parts) > 1 else ''
+            elif args.startswith('--if-cmd '):
+                rest = args[9:].lstrip()
+                val, _, args = rest.partition(' ')
+                if_cmd_checks.append(val.strip())
+                args = args.strip()
+            elif args.startswith('--if-sh '):
+                rest = args[8:].lstrip()
+                if rest and rest[0] in ('"', "'"):
+                    q = rest[0]
+                    end = rest.find(q, 1)
+                    if end != -1:
+                        if_sh_checks.append(rest[1:end])
+                        args = rest[end + 1:].lstrip()
+                    else:
+                        if_sh_checks.append(rest[1:])
+                        args = ''
+                else:
+                    parts = rest.split(' --', 1)
+                    if_sh_checks.append(parts[0].strip())
+                    args = ('--' + parts[1]) if len(parts) > 1 else ''
             else:
                 break
 
-        if bind_mode not in ('normal', 'help', 'details', 'command'):
+        _VALID_MODES = frozenset(('normal', 'help', 'details', 'command'))
+        invalid = [m for m in bind_modes if m not in _VALID_MODES]
+        if invalid:
             self.add_event("cmd",
-                f"bind-key: unknown mode '{bind_mode}' (use normal/help/details/command)")
+                f"bind-key: unknown mode(s) {', '.join(repr(m) for m in invalid)}"
+                " (use normal/help/details/command)")
             return
+
+        # Evaluate --if-cmd / --if-sh conditions (load-time gates)
+        if if_sh_checks and self.kiosk_mode:
+            self.add_event("bind-key",
+                           "skipped: --if-sh blocked in kiosk mode",
+                           level=LEVEL_INFO)
+            return
+        for prog in if_cmd_checks:
+            if not shutil.which(prog):
+                self.add_event("bind-key",
+                               f"skipped ({prog} not in PATH)",
+                               level=LEVEL_INFO)
+                return
+        for sh_cmd in if_sh_checks:
+            try:
+                result = subprocess.run(
+                    sh_cmd, shell=True, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=5)
+                if result.returncode != 0:
+                    self.add_event("bind-key",
+                                   f"skipped (--if-sh failed: {sh_cmd})",
+                                   level=LEVEL_INFO)
+                    return
+            except (subprocess.TimeoutExpired, OSError):
+                self.add_event("bind-key",
+                               f"skipped (--if-sh error: {sh_cmd})",
+                               level=LEVEL_INFO)
+                return
 
         # Parse context flags (--%h, --%s, --%p, --%j) — only for normal mode
         context = None
-        if bind_mode == 'normal':
+        if bind_modes == ['normal']:
             context, args = _parse_context_flags(args)
             if context is False:
                 self.add_event("cmd", f"bind-key: {args}")
@@ -5001,107 +5058,105 @@ class Application:
             self.add_event("cmd", f"bind-key: {e}")
             return
 
-        if bind_mode != 'normal':
-            # Mode bindings: store by key_code in _mode_bindings
+        overlay_modes = [m for m in bind_modes if m != 'normal']
+        has_normal = 'normal' in bind_modes
+        mode_str = ','.join(bind_modes)
+
+        # For overlay-mode operations we need a single key_code (no multi-key)
+        if overlay_modes:
             key_code = key_codes[0] if key_codes else None
             if key_code is None:
                 self.add_event("cmd", "bind-key: empty key sequence")
                 return
-            if not rest:
-                # Query or unbind depending on which command was used
-                if getattr(self, '_last_cmd_name', None) == 'unbind-key':
-                    mode_dict = self._mode_bindings.get(bind_mode, {})
+
+        if not rest:
+            # Query or unbind
+            is_unbind = getattr(self, '_last_cmd_name', None) == 'unbind-key'
+            if has_normal:
+                ctx_str = _format_context(context)
+                if is_unbind:
+                    removed = self._key_trie.remove(key_codes, context)
+                    if removed:
+                        self._unbound_defaults.add(f"{ctx_str}{key_str}")
+                        self.add_event("bind-key", f"unbound {ctx_str}{key_str}")
+                    else:
+                        self.add_event("bind-key", f"no binding for {key_str}")
+                else:
+                    bindings_dict, has_children = self._key_trie.lookup(key_codes)
+                    if bindings_dict:
+                        b = next(iter(bindings_dict.values()))
+                        cmds_display = ' \\; '.join(b.commands)
+                        suffix = '...' if b.edit_mode else ''
+                        self.add_event("bind-key",
+                                       f"{ctx_str}{key_str} → {cmds_display}{suffix}")
+                    elif has_children:
+                        self.add_event("bind-key",
+                                       f"{ctx_str}{key_str} is a prefix (multi-key sequence)")
+                    else:
+                        self.add_event("bind-key", f"no binding for {key_str}")
+            for bm in overlay_modes:
+                if is_unbind:
+                    mode_dict = self._mode_bindings.get(bm, {})
                     if key_code in mode_dict:
                         del mode_dict[key_code]
-                        self.add_event("bind-key", f"unbound --mode {bind_mode} {key_str}")
+                        self.add_event("bind-key", f"unbound --mode {bm} {key_str}")
                     else:
                         self.add_event("bind-key",
-                                       f"no binding for --mode {bind_mode} {key_str}")
+                                       f"no binding for --mode {bm} {key_str}")
                 else:
-                    # :bind-key — query
-                    b = self._mode_bindings.get(bind_mode, {}).get(key_code)
+                    b = self._mode_bindings.get(bm, {}).get(key_code)
                     if b:
                         cmds_display = ' \\; '.join(b.commands)
                         self.add_event("bind-key",
-                                       f"--mode {bind_mode} {key_str} → {cmds_display}")
+                                       f"--mode {bm} {key_str} → {cmds_display}")
                     else:
                         self.add_event("bind-key",
-                                       f"no binding for --mode {bind_mode} {key_str}")
-                return
-            # Bind to mode
-            edit_mode = rest.endswith('...')
-            cmd_text = rest[:-3].rstrip() if edit_mode else rest
-            commands = [c.strip() for c in re.split(r'(?<!\\)\\\;', cmd_text)]
-            commands = [c for c in commands if c]
-            if not commands:
-                self.add_event("cmd", "bind-key: empty command")
-                return
-            b = _Binding(commands, edit_mode=edit_mode, key_notation=key_str,
-                         origin='user', mode=bind_mode, desc=bind_desc,
-                         hint=bind_hint)
-            self._mode_bindings.setdefault(bind_mode, {})[key_code] = b
-            if key_str == '<CR>':
-                for extra in (ord('\n'), ord('\r'), curses.KEY_ENTER):
-                    self._mode_bindings[bind_mode][extra] = b
-            cmds_display = ' \\; '.join(commands)
-            self.add_event("bind-key",
-                           f"--mode {bind_mode} {key_str} → {cmds_display}")
+                                       f"no binding for --mode {bm} {key_str}")
             return
 
-        if not rest:
-            # Query or unbind depending on which command was used
-            if getattr(self, '_last_cmd_name', None) == 'unbind-key':
-                removed = self._key_trie.remove(key_codes, context)
-                if removed:
-                    ctx_str = _format_context(context)
-                    self._unbound_defaults.add(f"{ctx_str}{key_str}")
-                    self.add_event("bind-key", f"unbound {ctx_str}{key_str}")
-                else:
-                    self.add_event("bind-key", f"no binding for {key_str}")
-            else:
-                # :bind-key — query: show what is bound to this key
-                ctx_str = _format_context(context)
-                bindings_dict, has_children = self._key_trie.lookup(key_codes)
-                if bindings_dict:
-                    b = next(iter(bindings_dict.values()))
-                    cmds_display = ' \\; '.join(b.commands)
-                    suffix = '...' if b.edit_mode else ''
-                    self.add_event("bind-key",
-                                   f"{ctx_str}{key_str} → {cmds_display}{suffix}")
-                elif has_children:
-                    self.add_event("bind-key",
-                                   f"{ctx_str}{key_str} is a prefix (multi-key sequence)")
-                else:
-                    self.add_event("bind-key", f"no binding for {ctx_str}{key_str}")
-            return
-
-        # Bind: rest is the command(s)
+        # Bind: parse the command(s)
         edit_mode = rest.endswith('...')
         cmd_text = rest[:-3].rstrip() if edit_mode else rest
-        # Split on \; for multi-command
         commands = [c.strip() for c in re.split(r'(?<!\\)\\\;', cmd_text)]
         commands = [c for c in commands if c]
         if not commands:
             self.add_event("cmd", "bind-key: empty command")
             return
 
-        # If user is rebinding a key that was a prefix, clear its subtree
-        bindings_dict, has_children = self._key_trie.lookup(key_codes)
-        if has_children and not bindings_dict:
-            self._key_trie.clear_subtree(key_codes)
+        if has_normal:
+            # Register in trie (supports multi-key, context flags)
+            bindings_dict, has_children = self._key_trie.lookup(key_codes)
+            if has_children and not bindings_dict:
+                self._key_trie.clear_subtree(key_codes)
+            binding = _Binding(commands, edit_mode=edit_mode,
+                               key_notation=key_str, origin='user',
+                               context=context, mode=mode_str,
+                               desc=bind_desc, hint=bind_hint)
+            self._key_trie.insert(key_codes, binding)
+            ctx_str = _format_context(context)
+            self._unbound_defaults.discard(f"{ctx_str}{key_str}")
 
-        binding = _Binding(commands, edit_mode=edit_mode,
-                           key_notation=key_str, origin='user',
-                           context=context, mode=bind_mode,
-                           desc=bind_desc, hint=bind_hint)
-        self._key_trie.insert(key_codes, binding)
-        ctx_str = _format_context(context)
-        self._unbound_defaults.discard(f"{ctx_str}{key_str}")
+        if overlay_modes:
+            # Register in each overlay mode table (single key_code, no context)
+            b = _Binding(commands, edit_mode=edit_mode, key_notation=key_str,
+                         origin='user', mode=mode_str, desc=bind_desc,
+                         hint=bind_hint)
+            for bm in overlay_modes:
+                self._mode_bindings.setdefault(bm, {})[key_code] = b
+                if key_str == '<CR>':
+                    for extra in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+                        self._mode_bindings[bm][extra] = b
+
         cmds_display = ' \\; '.join(commands)
         suffix = '...' if edit_mode else ''
-        desc_str = f'  [{bind_desc}]' if bind_desc else ''
-        self.add_event("bind-key",
-                       f"{ctx_str}{key_str} → {cmds_display}{suffix}{desc_str}")
+        if has_normal and not overlay_modes:
+            ctx_str = _format_context(context)
+            desc_str = f'  [{bind_desc}]' if bind_desc else ''
+            self.add_event("bind-key",
+                           f"{ctx_str}{key_str} → {cmds_display}{suffix}{desc_str}")
+        else:
+            self.add_event("bind-key",
+                           f"--mode {mode_str} {key_str} → {cmds_display}{suffix}")
 
     @staticmethod
     def _split_bindkey_args(args):

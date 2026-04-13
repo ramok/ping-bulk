@@ -261,8 +261,27 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :bind-key x :set stats down \; :set dns hostname
 :bind-key <C-p> :pause
 
-# Overlay-mode bindings — bind h to show help even while in the help overlay:
-# :bind-key --mode help h :close
+# ── Conditional bindings ──────────────────────────────────────────────────
+# --if-cmd PRG  — only bind if PRG is found in PATH (checked once at load time).
+# --if-sh "CMD" — only bind if CMD exits 0 (blocked in kiosk mode).
+# When the condition fails, the binding is silently skipped.
+
+# Bind [m] to open mtr only if mtr is installed:
+:bind-key --if-cmd mtr --desc "MTR (conditional)" --%h m :mux mtr %r
+
+# Bind [M] to open the man page only if the man page file exists:
+:bind-key --if-sh "man -w ping-bulk >/dev/null 2>&1" \
+          --mode help --desc "man page" M :mux man ping-bulk
+
+# Multiple conditions — all must pass:
+:bind-key --if-cmd nmap --if-cmd mtr --desc "scan+trace" --%h n \
+          :mux nmap -sP %r \; :mux mtr %r
+
+# Overlay-mode bindings — bind q to close in both help and details overlay:
+# :bind-key --mode help,details q :close
+#
+# Or bind q to quit from any context (main view + all overlays):
+# :bind-key --mode normal,help,details,command q :quit
 
 # ── Dynamic Additions ──────────────────────────────────────────────────────
 # You can also dynamically source other config files or add specific hosts

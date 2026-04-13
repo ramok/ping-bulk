@@ -283,7 +283,7 @@ Configuration
 Key bindings
 ------------
 
-``:bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] <key> <command>``
+``:bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] [--if-cmd PRG] [--if-sh "CMD"] <key> <command>``
     Bind *key* to *command*.  The key is specified in vim-like notation
     (see **KEY NOTATION** below).  The command is any ``:``-prefixed
     command (e.g. ``:quit``, ``:set dns hostname``).
@@ -308,6 +308,16 @@ Key bindings
         ``details``  Host details overlay (``Enter``).
         ``command``  ``:`` command line.
 
+        Multiple modes can be given as a comma-separated list, registering
+        the same binding in each mode at once::
+
+            :bind-key --mode help,details q :close
+            :bind-key --mode normal,help,details q :quit
+
+        When ``normal`` is included, the binding is also registered in the
+        main key trie (supports multi-key sequences and context flags).
+        When only overlay modes are listed, context flags are ignored.
+
         Example — close the help overlay with ``h``::
 
             :bind-key --mode help h :close
@@ -323,6 +333,24 @@ Key bindings
         notation to mark the hotkey character::
 
             :bind-key --hint "[t]race" t :mux mtr %i
+
+    ``--if-cmd PRG``
+        Only register the binding if *PRG* is found in ``PATH``
+        (checked via ``shutil.which`` at load time).  When the
+        check fails the binding is silently skipped and an
+        info-level event is logged.  Multiple ``--if-cmd`` flags
+        may be given; all must pass::
+
+            :bind-key --if-cmd mtr --%h t :mux mtr %r
+
+    ``--if-sh "CMD"``
+        Only register the binding if *CMD* exits with status 0
+        (run via ``sh -c`` at load time, 5 s timeout).  Useful for
+        checking file existence or more complex conditions.
+        **Blocked in kiosk mode** for security::
+
+            :bind-key --if-sh "man -wW ping-bulk 2> /dev/null" \
+                      --mode help m :mux man ping-bulk
 
 ``:bind-key <key>``
     Query: print what command is bound to *key* in the event log.
@@ -942,6 +970,7 @@ Security features in kiosk mode:
 - SSH ``ProxyCommand``, ``LocalCommand``, ``RemoteForward``, and related
   options are blocked to prevent shell escapes via SSH.
 - ``:mux`` only allows ``ssh`` and ``login`` as commands.
+- ``:bind-key --if-sh`` is blocked (arbitrary shell execution).
 - ``:log`` and ``:source`` paths are restricted to ``/tmp/``,
   ``~/.local/state/ping-bulk/``, ``/etc/ping-bulk/``, and the directory
   containing the hosts file.  Symlinks are resolved before the check.
@@ -1238,7 +1267,7 @@ Recognised settings
 ``:set multikey-timeout <ms>``
     Multi-key sequence timeout in milliseconds (0–2000).  Default: ``0``.
 
-``:bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] <key> <command>``
+``:bind-key [--mode MODE] [--desc TEXT] [--hint TEXT] [--if-cmd PRG] [--if-sh "CMD"] <key> <command>``
     User key bindings.  Only bindings that differ from the defaults
     are saved.  Explicit unbinds of default keys are stored as
     ``:unbind-key <key>`` lines.

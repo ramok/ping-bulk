@@ -461,6 +461,97 @@ class TestBindkeyCommand:
 
 
 # ===========================================================================
+# TestMultiModeBindings — comma-separated --mode values
+# ===========================================================================
+
+class TestMultiModeBindings:
+    """Test --mode with comma-separated mode lists."""
+
+    def test_multi_mode_registers_in_each(self, app, pb):
+        """--mode help,details registers the binding in both mode tables."""
+        app._cmd_bindkey('--mode help,details q :close')
+        key_code = ord('q')
+        assert key_code in app._mode_bindings.get('help', {})
+        assert key_code in app._mode_bindings.get('details', {})
+
+    def test_multi_mode_same_binding_object(self, app, pb):
+        """A single binding object is shared across all specified modes."""
+        app._cmd_bindkey('--mode help,details q :close')
+        key_code = ord('q')
+        b_help = app._mode_bindings['help'][key_code]
+        b_details = app._mode_bindings['details'][key_code]
+        assert b_help is b_details
+
+    def test_multi_mode_commands(self, app, pb):
+        """Binding commands are correct for multi-mode."""
+        app._cmd_bindkey('--mode help,details q :close')
+        key_code = ord('q')
+        b = app._mode_bindings['help'][key_code]
+        assert b.commands == [':close']
+
+    def test_multi_mode_three_modes(self, app, pb):
+        """Three modes can be specified at once."""
+        app._cmd_bindkey('--mode help,details,command q :close')
+        key_code = ord('q')
+        assert key_code in app._mode_bindings.get('help', {})
+        assert key_code in app._mode_bindings.get('details', {})
+        assert key_code in app._mode_bindings.get('command', {})
+
+    def test_multi_mode_with_desc(self, app, pb):
+        """--desc is applied to the shared binding object."""
+        app._cmd_bindkey('--mode help,details --desc "Close overlay" q :close')
+        b = app._mode_bindings['help'][ord('q')]
+        assert b.desc == 'Close overlay'
+
+    def test_multi_mode_unbind_each(self, app, pb):
+        """Unbinding with multi-mode removes from each mode table."""
+        app._cmd_bindkey('--mode help,details q :close')
+        app._last_cmd_name = 'unbind-key'
+        app._cmd_bindkey('--mode help,details q')
+        assert ord('q') not in app._mode_bindings.get('help', {})
+        assert ord('q') not in app._mode_bindings.get('details', {})
+
+    def test_multi_mode_query_each(self, app, pb):
+        """Query with multi-mode reports for each mode."""
+        app._cmd_bindkey('--mode help,details q :close')
+        app._cmd_bindkey('--mode help,details q')  # query
+        event_texts = [e.text for e in app.events]
+        assert any('--mode help' in t and '→' in t for t in event_texts)
+        assert any('--mode details' in t and '→' in t for t in event_texts)
+
+    def test_normal_combined_with_other_modes(self, app, pb):
+        """'normal' can be combined with other modes."""
+        app._cmd_bindkey('--mode normal,help t :close')
+        # Registered in help mode table
+        assert ord('t') in app._mode_bindings.get('help', {})
+        # Also registered in trie (normal mode)
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('t'), set())
+        assert binding is not None and binding.origin == 'user'
+
+    def test_invalid_mode_in_list_rejected(self, app, pb):
+        """An invalid mode name in the comma list is rejected."""
+        app._cmd_bindkey('--mode help,badmode t :close')
+        user_in_help = any(
+            b.origin == 'user'
+            for b in app._mode_bindings.get('help', {}).values()
+            if b.key_notation == 't')
+        assert not user_in_help
+        assert any("unknown mode" in e.text for e in app.events)
+
+    def test_single_mode_unchanged(self, app, pb):
+        """Single --mode value still works as before."""
+        app._cmd_bindkey('--mode help t :close')
+        key_code = ord('t')
+        assert key_code in app._mode_bindings.get('help', {})
+        # Not registered in other modes as user binding
+        user_in_details = any(
+            b.origin == 'user'
+            for b in app._mode_bindings.get('details', {}).values()
+            if b.key_notation == 't')
+        assert not user_in_details
+
+
+# ===========================================================================
 # TestDefaultBindings — verify default bindings are registered
 # ===========================================================================
 
@@ -1197,3 +1288,147 @@ class TestHintFlag:
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding.desc == 'Run MTR'
         assert binding.hint == '[m]tr'
+
+
+# ---------------------------------------------------------------------------
+# Conditional binding flags: --if-cmd / --if-sh
+# ---------------------------------------------------------------------------
+
+class TestConditionalBindings:
+    """Test --if-cmd and --if-sh flags for conditional key binding."""
+
+    def test_if_cmd_present_binds(self, app, pb):
+        """--if-cmd with a program that exists → binding is registered."""
+        # 'python3' is always in PATH during tests
+        app._cmd_bindkey('--if-cmd python3 t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+        assert binding.commands == [':quit']
+
+    def test_if_cmd_missing_skips(self, app, pb):
+        """--if-cmd with a nonexistent program → binding is skipped."""
+        app._cmd_bindkey('--if-cmd zzz_no_such_program_999 t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is None
+
+    def test_if_cmd_missing_logs_event(self, app, pb):
+        """Skipped --if-cmd logs an info-level event."""
+        app._cmd_bindkey('--if-cmd zzz_no_such_program_999 t :quit')
+        matching = [e for e in app.events
+                    if 'zzz_no_such_program_999' in e.text
+                    and 'not in PATH' in e.text]
+        assert len(matching) == 1
+        assert matching[0].level == pb.LEVEL_INFO
+
+    def test_if_cmd_multiple_all_pass(self, app, pb):
+        """Multiple --if-cmd flags: binding registered when all pass."""
+        app._cmd_bindkey('--if-cmd python3 --if-cmd sh t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+
+    def test_if_cmd_multiple_one_fails(self, app, pb):
+        """Multiple --if-cmd flags: first failure skips the binding."""
+        app._cmd_bindkey(
+            '--if-cmd python3 --if-cmd zzz_no_such_program_999 t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is None
+
+    def test_if_sh_true_binds(self, app, pb):
+        """--if-sh with a true condition → binding is registered."""
+        app._cmd_bindkey('--if-sh "true" t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+
+    def test_if_sh_false_skips(self, app, pb):
+        """--if-sh with a false condition → binding is skipped."""
+        app._cmd_bindkey('--if-sh "false" t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is None
+
+    def test_if_sh_false_logs_event(self, app, pb):
+        """Skipped --if-sh logs an info-level event."""
+        app._cmd_bindkey('--if-sh "false" t :quit')
+        matching = [e for e in app.events
+                    if '--if-sh failed' in e.text]
+        assert len(matching) == 1
+        assert matching[0].level == pb.LEVEL_INFO
+
+    def test_if_sh_quoted_command(self, app, pb):
+        """--if-sh with a quoted multi-word command."""
+        app._cmd_bindkey('--if-sh "test 1 = 1" t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+
+    def test_if_sh_kiosk_blocked(self, app, pb):
+        """--if-sh is blocked in kiosk mode."""
+        app.kiosk_mode = True
+        app._loading_file = True  # even during file loading
+        app._cmd_bindkey('--if-sh "true" t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is None
+        matching = [e for e in app.events
+                    if 'kiosk' in e.text and '--if-sh' in e.text]
+        assert len(matching) == 1
+
+    def test_if_cmd_kiosk_allowed(self, app, pb):
+        """--if-cmd is allowed in kiosk mode (during file loading)."""
+        app.kiosk_mode = True
+        app._loading_file = True
+        app._cmd_bindkey('--if-cmd python3 t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+
+    def test_if_cmd_with_context_flags(self, app, pb):
+        """--if-cmd combined with --%h context flag."""
+        app._cmd_bindkey('--if-cmd python3 --%h t :quit')
+        keys = pb._parse_key_notation('t')
+        # With no context vars, shouldn't resolve
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is None
+        # With 'h' context var, should resolve
+        binding, _ = app._key_trie.resolve(keys, {'h'})
+        assert binding is not None
+
+    def test_if_cmd_with_mode(self, app, pb):
+        """--if-cmd combined with --mode help."""
+        app._cmd_bindkey('--if-cmd python3 --mode help t :quit')
+        assert ord('t') in app._mode_bindings.get('help', {})
+
+    def test_if_cmd_missing_with_mode(self, app, pb):
+        """--if-cmd missing combined with --mode: mode binding not created."""
+        app._cmd_bindkey(
+            '--if-cmd zzz_no_such_program_999 --mode help t :quit')
+        assert ord('t') not in app._mode_bindings.get('help', {})
+
+    def test_if_cmd_with_desc_hint(self, app, pb):
+        """--if-cmd combined with --desc and --hint."""
+        app._cmd_bindkey(
+            '--if-cmd python3 --desc "Run tool" --hint "[t]ool" t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+        assert binding.desc == 'Run tool'
+        assert binding.hint == '[t]ool'
+
+    def test_if_cmd_and_if_sh_combined(self, app, pb):
+        """Both --if-cmd and --if-sh can be used together."""
+        app._cmd_bindkey('--if-cmd python3 --if-sh "true" t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is not None
+
+    def test_if_cmd_pass_if_sh_fail(self, app, pb):
+        """--if-cmd passes but --if-sh fails → binding skipped."""
+        app._cmd_bindkey('--if-cmd python3 --if-sh "false" t :quit')
+        keys = pb._parse_key_notation('t')
+        binding, _ = app._key_trie.resolve(keys, set())
+        assert binding is None
