@@ -467,40 +467,44 @@ class TestBindkeyCommand:
 class TestMultiModeBindings:
     """Test --mode with comma-separated mode lists."""
 
+    @staticmethod
+    def _resolve(app, key_code, mode):
+        """Resolve a single-key binding in the given mode via trie."""
+        return app._key_trie.resolve([key_code], set(), mode=mode)[0]
+
     def test_multi_mode_registers_in_each(self, app, pb):
         """--mode help,details registers the binding in both mode tables."""
         app._cmd_bindkey('--mode help,details q :close')
         key_code = ord('q')
-        assert key_code in app._mode_bindings.get('help', {})
-        assert key_code in app._mode_bindings.get('details', {})
+        assert self._resolve(app, key_code, 'help') is not None
+        assert self._resolve(app, key_code, 'details') is not None
 
     def test_multi_mode_same_binding_object(self, app, pb):
         """A single binding object is shared across all specified modes."""
         app._cmd_bindkey('--mode help,details q :close')
         key_code = ord('q')
-        b_help = app._mode_bindings['help'][key_code]
-        b_details = app._mode_bindings['details'][key_code]
+        b_help = self._resolve(app, key_code, 'help')
+        b_details = self._resolve(app, key_code, 'details')
         assert b_help is b_details
 
     def test_multi_mode_commands(self, app, pb):
         """Binding commands are correct for multi-mode."""
         app._cmd_bindkey('--mode help,details q :close')
-        key_code = ord('q')
-        b = app._mode_bindings['help'][key_code]
+        b = self._resolve(app, ord('q'), 'help')
         assert b.commands == [':close']
 
     def test_multi_mode_three_modes(self, app, pb):
         """Three modes can be specified at once."""
         app._cmd_bindkey('--mode help,details,command q :close')
         key_code = ord('q')
-        assert key_code in app._mode_bindings.get('help', {})
-        assert key_code in app._mode_bindings.get('details', {})
-        assert key_code in app._mode_bindings.get('command', {})
+        assert self._resolve(app, key_code, 'help') is not None
+        assert self._resolve(app, key_code, 'details') is not None
+        assert self._resolve(app, key_code, 'command') is not None
 
     def test_multi_mode_with_desc(self, app, pb):
         """--desc is applied to the shared binding object."""
         app._cmd_bindkey('--mode help,details --desc "Close overlay" q :close')
-        b = app._mode_bindings['help'][ord('q')]
+        b = self._resolve(app, ord('q'), 'help')
         assert b.desc == 'Close overlay'
 
     def test_multi_mode_unbind_each(self, app, pb):
@@ -508,8 +512,8 @@ class TestMultiModeBindings:
         app._cmd_bindkey('--mode help,details q :close')
         app._last_cmd_name = 'unbind-key'
         app._cmd_bindkey('--mode help,details q')
-        assert ord('q') not in app._mode_bindings.get('help', {})
-        assert ord('q') not in app._mode_bindings.get('details', {})
+        assert self._resolve(app, ord('q'), 'help') is None
+        assert self._resolve(app, ord('q'), 'details') is None
 
     def test_multi_mode_query_each(self, app, pb):
         """Query with multi-mode reports for each mode."""
@@ -522,33 +526,26 @@ class TestMultiModeBindings:
     def test_normal_combined_with_other_modes(self, app, pb):
         """'normal' can be combined with other modes."""
         app._cmd_bindkey('--mode normal,help t :close')
-        # Registered in help mode table
-        assert ord('t') in app._mode_bindings.get('help', {})
-        # Also registered in trie (normal mode)
+        # Registered in help mode
+        assert self._resolve(app, ord('t'), 'help') is not None
+        # Also registered in normal mode
         binding, _ = app._key_trie.resolve(pb._parse_key_notation('t'), set())
         assert binding is not None and binding.origin == 'user'
 
     def test_invalid_mode_in_list_rejected(self, app, pb):
         """An invalid mode name in the comma list is rejected."""
         app._cmd_bindkey('--mode help,badmode t :close')
-        user_in_help = any(
-            b.origin == 'user'
-            for b in app._mode_bindings.get('help', {}).values()
-            if b.key_notation == 't')
-        assert not user_in_help
+        b = self._resolve(app, ord('t'), 'help')
+        assert b is None or b.origin != 'user'
         assert any("unknown mode" in e.text for e in app.events)
 
     def test_single_mode_unchanged(self, app, pb):
         """Single --mode value still works as before."""
         app._cmd_bindkey('--mode help t :close')
-        key_code = ord('t')
-        assert key_code in app._mode_bindings.get('help', {})
-        # Not registered in other modes as user binding
-        user_in_details = any(
-            b.origin == 'user'
-            for b in app._mode_bindings.get('details', {}).values()
-            if b.key_notation == 't')
-        assert not user_in_details
+        assert self._resolve(app, ord('t'), 'help') is not None
+        # Not registered in details mode as user binding
+        b_details = self._resolve(app, ord('t'), 'details')
+        assert b_details is None or b_details.origin != 'user'
 
 
 # ===========================================================================
@@ -1112,39 +1109,39 @@ class TestScrollDirectionArgs:
 # ===========================================================================
 
 class TestModeFlag:
-    """--mode stores bindings in _mode_bindings for non-normal modes."""
+    """--mode stores bindings in the trie for non-normal modes."""
+
+    @staticmethod
+    def _resolve(app, key_code, mode):
+        return app._key_trie.resolve([key_code], set(), mode=mode)[0]
 
     def test_default_help_mode_bindings_exist(self, app, pb):
         """Default help-mode bindings for q, Esc, Up, Down are registered."""
         import curses
-        help_bindings = app._mode_bindings.get('help', {})
-        assert ord('q') in help_bindings
-        assert 27 in help_bindings           # Esc
-        assert curses.KEY_UP in help_bindings
-        assert curses.KEY_DOWN in help_bindings
+        assert self._resolve(app, ord('q'), 'help') is not None
+        assert self._resolve(app, 27, 'help') is not None    # Esc
+        assert self._resolve(app, curses.KEY_UP, 'help') is not None
+        assert self._resolve(app, curses.KEY_DOWN, 'help') is not None
 
     def test_default_details_mode_bindings_exist(self, app, pb):
         """Default details-mode bindings for q, Esc, Up, Down are registered."""
         import curses
-        details = app._mode_bindings.get('details', {})
-        assert ord('q') in details
-        assert 27 in details
-        assert curses.KEY_UP in details
+        assert self._resolve(app, ord('q'), 'details') is not None
+        assert self._resolve(app, 27, 'details') is not None
+        assert self._resolve(app, curses.KEY_UP, 'details') is not None
 
     def test_user_help_mode_binding(self, app, pb):
-        """--mode help stores binding in _mode_bindings['help']."""
+        """--mode help stores binding accessible via trie for help mode."""
         app._cmd_bindkey('--mode help h :help')
-        help_bindings = app._mode_bindings.get('help', {})
-        assert ord('h') in help_bindings
-        b = help_bindings[ord('h')]
+        b = self._resolve(app, ord('h'), 'help')
+        assert b is not None
         assert b.commands == [':help']
         assert b.mode == 'help'
 
     def test_user_details_mode_binding(self, app, pb):
-        """--mode details stores binding in _mode_bindings['details']."""
+        """--mode details stores binding accessible via trie for details mode."""
         app._cmd_bindkey('--mode details i :ping-view')
-        details = app._mode_bindings.get('details', {})
-        assert ord('i') in details
+        assert self._resolve(app, ord('i'), 'details') is not None
 
     def test_mode_binding_not_in_main_trie(self, app, pb):
         """A --mode help binding does NOT appear in the main key trie."""
@@ -1241,9 +1238,9 @@ class TestDescFlag:
     def test_desc_with_mode(self, app, pb):
         """--mode and --desc can be combined."""
         app._cmd_bindkey('--mode help --desc "Show help" h :help')
-        help_bindings = app._mode_bindings.get('help', {})
-        assert ord('h') in help_bindings
-        assert help_bindings[ord('h')].desc == 'Show help'
+        b = app._key_trie.resolve([ord('h')], set(), mode='help')[0]
+        assert b is not None
+        assert b.desc == 'Show help'
 
 
 # ===========================================================================
@@ -1401,13 +1398,13 @@ class TestConditionalBindings:
     def test_if_cmd_with_mode(self, app, pb):
         """--if-cmd combined with --mode help."""
         app._cmd_bindkey('--if-cmd python3 --mode help t :quit')
-        assert ord('t') in app._mode_bindings.get('help', {})
+        assert app._key_trie.resolve([ord('t')], set(), mode='help')[0] is not None
 
     def test_if_cmd_missing_with_mode(self, app, pb):
         """--if-cmd missing combined with --mode: mode binding not created."""
         app._cmd_bindkey(
             '--if-cmd zzz_no_such_program_999 --mode help t :quit')
-        assert ord('t') not in app._mode_bindings.get('help', {})
+        assert app._key_trie.resolve([ord('t')], set(), mode='help')[0] is None
 
     def test_if_cmd_with_desc_hint(self, app, pb):
         """--if-cmd combined with --desc and --hint."""

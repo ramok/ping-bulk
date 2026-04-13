@@ -297,33 +297,46 @@ class _BindingVarMissing(Exception):
 
 
 class _KeyTrie:
-    """Prefix tree mapping key-code sequences to context-aware bindings.
+    """Prefix tree mapping key-code sequences to mode- and context-aware bindings.
 
-    Each node stores a dict ``bindings`` mapping context keys to _Binding
-    objects.  A ``None`` key is the unconditional (fallback) binding; a
-    frozenset key restricts the binding to states where all listed context
-    variables are available.
+    Each node stores a dict ``bindings`` keyed by UI mode name (``'normal'``,
+    ``'help'``, ``'details'``, ``'command'``).  Each mode bucket maps context
+    keys to ``_Binding`` objects.  A ``None`` context key is the unconditional
+    (fallback) binding; a frozenset key restricts the binding to states where
+    all listed context variables are available.
+
+    This single structure replaces the former ``_mode_bindings`` parallel dict,
+    giving one dispatch path and one save/load path for all modes.
     """
     __slots__ = ('children', 'bindings')
 
     def __init__(self):
         self.children = {}   # dict[int, _KeyTrie]
-        self.bindings = {}   # dict[frozenset|None, _Binding]
+        self.bindings = {}   # dict[mode_str, dict[frozenset|None, _Binding]]
 
     def insert(self, keys, binding):
-        """Insert a binding for a sequence of key codes."""
+        """Insert a binding for a sequence of key codes.
+
+        The binding's ``mode`` attribute (comma-separated) determines which
+        mode buckets it is stored in.  For non-normal modes context guards are
+        irrelevant, so the binding is always stored under the ``None`` context
+        key in those buckets (the same ``_Binding`` object is shared).
+        """
         node = self
         for key in keys:
             if key not in node.children:
                 node.children[key] = _KeyTrie()
             node = node.children[key]
-        node.bindings[binding.context] = binding
+        for mode in binding.mode.split(','):
+            mode = mode.strip()
+            ctx_key = binding.context if mode == 'normal' else None
+            node.bindings.setdefault(mode, {})[ctx_key] = binding
 
     def lookup(self, keys):
         """Look up a key sequence.
 
         Returns ``(bindings_dict, has_children)`` where *bindings_dict* maps
-        context keys to _Binding objects (empty dict when no bindings exist).
+        mode names to context-keyed dicts of ``_Binding`` objects.
         """
         node = self
         for key in keys:
@@ -332,22 +345,27 @@ class _KeyTrie:
             node = node.children[key]
         return (node.bindings, bool(node.children))
 
-    def resolve(self, keys, ctx_keys):
+    def resolve(self, keys, ctx_keys, mode='normal'):
         """Look up a key sequence and resolve the best matching binding.
 
         *ctx_keys* is a set of available context variable names (e.g.
-        ``{'h', 'i'}`` when a host is selected).
+        ``{'h', 'i'}`` when a host is selected).  *mode* selects the mode
+        bucket to search in.
 
         Returns ``(binding|None, has_children)``.  The most-specific
         matching context wins (largest subset of *ctx_keys*); ``None``
         context is the fallback.
         """
-        bindings, has_children = self.lookup(keys)
-        binding = _resolve_binding(bindings, ctx_keys)
-        return (binding, has_children)
+        node = self
+        for key in keys:
+            if key not in node.children:
+                return (None, False)
+            node = node.children[key]
+        binding = _resolve_binding(node.bindings.get(mode, {}), ctx_keys)
+        return (binding, bool(node.children))
 
-    def remove(self, keys, context=None):
-        """Remove binding at *keys* for *context*, pruning empty ancestors.
+    def remove(self, keys, context=None, mode='normal'):
+        """Remove binding at *keys* for *context* in *mode*, pruning empty ancestors.
 
         Returns True if a binding was removed.
         """
@@ -360,9 +378,12 @@ class _KeyTrie:
                 return False
             node = node.children[key]
             path.append(node)
-        if context not in node.bindings:
+        mode_dict = node.bindings.get(mode)
+        if mode_dict is None or context not in mode_dict:
             return False
-        del node.bindings[context]
+        del mode_dict[context]
+        if not mode_dict:
+            del node.bindings[mode]
         # Prune empty ancestors
         for i in range(len(keys) - 1, -1, -1):
             child = path[i + 1]
@@ -371,8 +392,8 @@ class _KeyTrie:
             del path[i].children[keys[i]]
         return True
 
-    def remove_all(self, keys):
-        """Remove ALL context bindings at *keys*, pruning empty ancestors.
+    def remove_all(self, keys, mode=None):
+        """Remove ALL bindings at *keys* for *mode* (or all modes if None).
 
         Returns True if any binding was removed.
         """
@@ -385,9 +406,15 @@ class _KeyTrie:
                 return False
             node = node.children[key]
             path.append(node)
-        if not node.bindings:
-            return False
-        node.bindings.clear()
+        if mode is not None:
+            if mode not in node.bindings:
+                return False
+            del node.bindings[mode]
+        else:
+            if not node.bindings:
+                return False
+            node.bindings.clear()
+        # Prune empty ancestors
         for i in range(len(keys) - 1, -1, -1):
             child = path[i + 1]
             if child.bindings or child.children:
@@ -407,15 +434,24 @@ class _KeyTrie:
     def __iter__(self):
         """Yield ``(key_list, binding)`` for every binding (DFS, sorted).
 
-        Nodes with multiple context bindings yield one tuple per binding.
+        Multi-mode bindings (same ``_Binding`` object in multiple mode buckets)
+        are yielded only once.
         """
+        seen_ids = set()
+
         def _walk(node, prefix):
-            for ctx in sorted(node.bindings, key=lambda c: (c is not None, c or frozenset())):
-                yield (prefix[:], node.bindings[ctx])
+            for mode in sorted(node.bindings):
+                ctx_dict = node.bindings[mode]
+                for ctx in sorted(ctx_dict, key=lambda c: (c is not None, c or frozenset())):
+                    b = ctx_dict[ctx]
+                    if id(b) not in seen_ids:
+                        seen_ids.add(id(b))
+                        yield (prefix[:], b)
             for key, child in sorted(node.children.items()):
                 prefix.append(key)
                 yield from _walk(child, prefix)
                 prefix.pop()
+
         yield from _walk(self, [])
 
     def node_at(self, keys):
@@ -3631,7 +3667,6 @@ class Application:
         self._unbound_defaults = set()  # key notations the user explicitly unbound
         self.multikey_timeout = 0 # ms; 0 = always wait for next key
         self._current_mode = 'normal'  # current UI mode: normal/help/details/command
-        self._mode_bindings = {}  # mode → {key_code: _Binding} for overlay modes
         self._register_default_bindings()
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
@@ -3844,7 +3879,7 @@ class Application:
                             f.write(f":prog-options {prog} {pattern} --disable\n")
                         else:
                             f.write(f":prog-options {prog} {pattern} {opts}\n")
-                # User key bindings (only non-default)
+                # User key bindings (only non-default, all modes)
                 user_bindings = [(keys, b) for keys, b in self._key_trie
                                  if b.origin == 'user']
                 if user_bindings or self._unbound_defaults:
@@ -3854,20 +3889,15 @@ class Application:
                     for keys, b in user_bindings:
                         cmds = ' \\; '.join(b.commands)
                         suffix = '...' if b.edit_mode else ''
-                        ctx_str = _format_context(b.context)
                         desc_flag = f' --desc "{b.desc}"' if b.desc else ''
                         hint_flag = f' --hint "{b.hint}"' if b.hint else ''
-                        f.write(f":bind-key{desc_flag}{hint_flag} {ctx_str}{b.key_notation} {cmds}{suffix}\n")
-                # Mode bindings (only user-defined)
-                for mode, mode_dict in self._mode_bindings.items():
-                    seen = set()
-                    for b in mode_dict.values():
-                        if b.origin == 'user' and id(b) not in seen:
-                            seen.add(id(b))
-                            cmds = ' \\; '.join(b.commands)
-                            desc_flag = f' --desc "{b.desc}"' if b.desc else ''
-                            hint_flag = f' --hint "{b.hint}"' if b.hint else ''
-                            f.write(f":bind-key --mode {mode}{desc_flag}{hint_flag} {b.key_notation} {cmds}\n")
+                        if b.mode and b.mode != 'normal':
+                            f.write(f":bind-key --mode {b.mode}{desc_flag}{hint_flag}"
+                                    f" {b.key_notation} {cmds}{suffix}\n")
+                        else:
+                            ctx_str = _format_context(b.context)
+                            f.write(f":bind-key{desc_flag}{hint_flag}"
+                                    f" {ctx_str}{b.key_notation} {cmds}{suffix}\n")
         except OSError as e:
             self.add_event("config", f"error saving config: {e}")
             return False
@@ -4673,16 +4703,15 @@ class Application:
                 keys = _parse_key_notation(notation)
             except ValueError:
                 return
-            key_code = keys[0] if keys else None
-            if key_code is None:
+            if not keys:
                 return
             b = _Binding(list(commands), key_notation=notation,
                          origin='default', mode=mode, desc=desc)
-            self._mode_bindings.setdefault(mode, {})[key_code] = b
-            # Register Enter variants together
+            self._key_trie.insert(keys, b)
+            # Register Enter variants together so any terminal Enter code works
             if notation == '<CR>':
                 for extra in (ord('\n'), ord('\r'), curses.KEY_ENTER):
-                    self._mode_bindings[mode][extra] = b
+                    self._key_trie.insert([extra], b)
 
         # help mode bindings
         _mb('help', 'q',       ':close',                   desc='close help overlay')
@@ -4752,11 +4781,11 @@ class Application:
     def _dispatch_mode_key(self, mode, key):
         """Dispatch a keypress in a non-normal UI mode (help/details/command).
 
-        Looks up *key* in self._mode_bindings[mode] and executes the binding's
+        Looks up *key* in the trie for *mode* and executes the binding's
         commands via _dispatch_cmd.  Returns True if a binding was found and
         executed, False otherwise.
         """
-        binding = self._mode_bindings.get(mode, {}).get(key)
+        binding, _ = self._key_trie.resolve([key], set(), mode=mode)
         if binding is None:
             return False
         for cmd in binding.commands:
@@ -5062,7 +5091,7 @@ class Application:
         has_normal = 'normal' in bind_modes
         mode_str = ','.join(bind_modes)
 
-        # For overlay-mode operations we need a single key_code (no multi-key)
+        # For overlay-mode operations we only support single key_code (no multi-key)
         if overlay_modes:
             key_code = key_codes[0] if key_codes else None
             if key_code is None:
@@ -5083,8 +5112,9 @@ class Application:
                         self.add_event("bind-key", f"no binding for {key_str}")
                 else:
                     bindings_dict, has_children = self._key_trie.lookup(key_codes)
-                    if bindings_dict:
-                        b = next(iter(bindings_dict.values()))
+                    normal_bindings = bindings_dict.get('normal', {})
+                    if normal_bindings:
+                        b = next(iter(normal_bindings.values()))
                         cmds_display = ' \\; '.join(b.commands)
                         suffix = '...' if b.edit_mode else ''
                         self.add_event("bind-key",
@@ -5096,15 +5126,15 @@ class Application:
                         self.add_event("bind-key", f"no binding for {key_str}")
             for bm in overlay_modes:
                 if is_unbind:
-                    mode_dict = self._mode_bindings.get(bm, {})
-                    if key_code in mode_dict:
-                        del mode_dict[key_code]
+                    removed = self._key_trie.remove([key_code], None, mode=bm)
+                    if removed:
+                        self._unbound_defaults.add(f"--mode {bm} {key_str}")
                         self.add_event("bind-key", f"unbound --mode {bm} {key_str}")
                     else:
                         self.add_event("bind-key",
                                        f"no binding for --mode {bm} {key_str}")
                 else:
-                    b = self._mode_bindings.get(bm, {}).get(key_code)
+                    b, _ = self._key_trie.resolve([key_code], set(), mode=bm)
                     if b:
                         cmds_display = ' \\; '.join(b.commands)
                         self.add_event("bind-key",
@@ -5123,29 +5153,28 @@ class Application:
             self.add_event("cmd", "bind-key: empty command")
             return
 
+        binding = _Binding(commands, edit_mode=edit_mode,
+                           key_notation=key_str, origin='user',
+                           context=context, mode=mode_str,
+                           desc=bind_desc, hint=bind_hint)
+
+        # If replacing a normal-mode prefix node with a binding, clear the children
+        bindings_dict, has_children = self._key_trie.lookup(key_codes)
+        if has_children and not bindings_dict:
+            self._key_trie.clear_subtree(key_codes)
+
+        self._key_trie.insert(key_codes, binding)
+
+        # For non-normal modes with <CR>, also register the other Enter variants
+        if overlay_modes and key_codes == [curses.KEY_ENTER]:
+            for extra in (ord('\n'), ord('\r')):
+                self._key_trie.insert([extra], binding)
+
         if has_normal:
-            # Register in trie (supports multi-key, context flags)
-            bindings_dict, has_children = self._key_trie.lookup(key_codes)
-            if has_children and not bindings_dict:
-                self._key_trie.clear_subtree(key_codes)
-            binding = _Binding(commands, edit_mode=edit_mode,
-                               key_notation=key_str, origin='user',
-                               context=context, mode=mode_str,
-                               desc=bind_desc, hint=bind_hint)
-            self._key_trie.insert(key_codes, binding)
             ctx_str = _format_context(context)
             self._unbound_defaults.discard(f"{ctx_str}{key_str}")
-
-        if overlay_modes:
-            # Register in each overlay mode table (single key_code, no context)
-            b = _Binding(commands, edit_mode=edit_mode, key_notation=key_str,
-                         origin='user', mode=mode_str, desc=bind_desc,
-                         hint=bind_hint)
-            for bm in overlay_modes:
-                self._mode_bindings.setdefault(bm, {})[key_code] = b
-                if key_str == '<CR>':
-                    for extra in (ord('\n'), ord('\r'), curses.KEY_ENTER):
-                        self._mode_bindings[bm][extra] = b
+        for bm in overlay_modes:
+            self._unbound_defaults.discard(f"--mode {bm} {key_str}")
 
         cmds_display = ' \\; '.join(commands)
         suffix = '...' if edit_mode else ''
@@ -5410,20 +5439,12 @@ class Application:
             (f"[S]ync:{'on' if self.sync_history else 'off'}", self.sync_history),
             (pause_label, paused_count > 0),
         ]
-        # Add hint items from trie bindings (in insertion order, deduplicated)
+        # Add hint items from trie bindings (all modes, deduplicated by id)
         seen_hints = set()
         for _keys, b in self._key_trie:
             if b.hint and b.hint not in seen_hints:
                 seen_hints.add(b.hint)
                 menu_items.append((b.hint, False))
-        # Also add hints from mode bindings
-        for mode_dict in self._mode_bindings.values():
-            seen_mb = set()
-            for b in mode_dict.values():
-                if b.hint and b.hint not in seen_hints and id(b) not in seen_mb:
-                    seen_mb.add(id(b))
-                    seen_hints.add(b.hint)
-                    menu_items.append((b.hint, False))
 
         col = 0
 
@@ -8452,18 +8473,12 @@ class Application:
 
         lines = list(_FULL_HELP)
 
-        # Collect user bindings with --desc, grouped by mode
+        # Collect user bindings with --desc, grouped by mode (trie covers all modes)
         by_mode = {}
         for _keys, b in self._key_trie:
             if b.origin == 'user' and b.desc:
                 by_mode.setdefault(b.mode or 'normal', []).append(
                     (b.key_notation, b.desc))
-        for mode, mode_dict in self._mode_bindings.items():
-            seen = set()
-            for b in mode_dict.values():
-                if b.origin == 'user' and b.desc and id(b) not in seen:
-                    seen.add(id(b))
-                    by_mode.setdefault(mode, []).append((b.key_notation, b.desc))
 
         if by_mode:
             lines.append('-DIVIDER-')
@@ -8540,7 +8555,7 @@ class Application:
         for key_code in sorted(node.children):
             child = node.children[key_code]
             key_label = _format_key_notation([key_code])
-            binding = _resolve_binding(child.bindings, ctx_keys)
+            binding = _resolve_binding(child.bindings.get('normal', {}), ctx_keys)
             if binding:
                 cmd_str = '(' + ' \\; '.join(binding.commands) + ')'
                 desc = binding.desc or binding.hint or ''
@@ -8699,33 +8714,34 @@ class Application:
 
     def _build_all_bindings_lines(self):
         """Build auto-generated lines listing every key binding (all origins)."""
+        # Group bindings by mode; multi-mode bindings appear in each mode section
+        by_mode = {}
+        for keys, b in self._key_trie:
+            for m in b.mode.split(','):
+                m = m.strip()
+                by_mode.setdefault(m, []).append((b.key_notation, b.commands,
+                                                  b.context, b.origin))
+
         lines = [
             "  All key bindings  [A] back to help",
             "-DIVIDER-",
-            "  Normal mode",
         ]
-        seen = set()
-        for keys, b in self._key_trie:
-            dedup_key = (b.key_notation, tuple(b.commands), _format_context(b.context))
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
-            cmds = ' \\; '.join(b.commands)
-            origin_tag = '' if b.origin == 'default' else '  [user]'
-            ctx_str = _format_context(b.context)
-            lines.append(f"    {ctx_str}{b.key_notation:<12} → {cmds}{origin_tag}")
-        for mode in sorted(self._mode_bindings):
-            lines.append('-DIVIDER-')
+        all_modes = sorted(by_mode, key=lambda m: (m != 'normal', m))
+        for mode in all_modes:
             lines.append(f"  {mode} mode")
-            seen_m = set()
-            for b in self._mode_bindings[mode].values():
-                dedup_key = (b.key_notation, tuple(b.commands))
-                if dedup_key in seen_m:
+            seen = set()
+            for notation, commands, context, origin in by_mode[mode]:
+                ctx_str = _format_context(context)
+                dedup_key = (notation, tuple(commands), ctx_str)
+                if dedup_key in seen:
                     continue
-                seen_m.add(dedup_key)
-                cmds = ' \\; '.join(b.commands)
-                origin_tag = '' if b.origin == 'default' else '  [user]'
-                lines.append(f"    {b.key_notation:<12} → {cmds}{origin_tag}")
+                seen.add(dedup_key)
+                cmds = ' \\; '.join(commands)
+                origin_tag = '' if origin == 'default' else '  [user]'
+                lines.append(f"    {ctx_str}{notation:<12} → {cmds}{origin_tag}")
+            lines.append('-DIVIDER-')
+        if lines and lines[-1] == '-DIVIDER-':
+            lines.pop()
         return lines
 
     def _draw_details_overlay(self, stdscr, height, width):
