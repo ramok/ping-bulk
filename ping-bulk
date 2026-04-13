@@ -9096,10 +9096,6 @@ class Application:
                             self._cmd_settings_cursor('up')
                         elif self.help_show_settings and key in (curses.KEY_DOWN, ord('j')):
                             self._cmd_settings_cursor('down')
-                        elif self.help_show_settings and key in (curses.KEY_LEFT, ord('h')):
-                            self._cmd_settings_apply('prev')
-                        elif self.help_show_settings and key in (curses.KEY_RIGHT, ord('l')):
-                            self._cmd_settings_apply()
                         elif self.help_show_settings and key == ord(' '):
                             self._cmd_settings_apply()
                         elif self.help_show_settings and key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
