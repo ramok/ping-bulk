@@ -808,6 +808,17 @@ example.com:443
 # Multi-mode: same key active in both help and details overlays
 # :bind-key --mode help,details r :close
 
+# ── Filter mode ─────────────────────────────────────────────────────────────
+# [f]  open filter prompt — type a glob pattern to show only matching hosts.
+#      A bare string is auto-wrapped as *pattern* (substring match).
+# [F]  clear the active filter immediately.
+# [Esc] clears the filter (first press), then host selection (second press).
+#
+# Filter from the command line:
+#   :filter web*          # show only hosts matching web*
+#   :filter 10.0.1.*      # show only 10.0.1.x subnet
+#   :filter --clear       # remove filter
+
 """
 
 
@@ -3237,6 +3248,9 @@ CMD_REGISTRY = [
     CmdDef(['search-next'],      '_cmd_search_next', None,
            '[prev]',              'jump to next (or prev) search match',
            completable=False),
+    CmdDef(['filter'],           '_cmd_filter',      None,
+           '[pattern|--clear]',   'filter host list by glob pattern; no args = open prompt',
+           completable=False),
     CmdDef(['bind-key'],             '_cmd_bindkey',    None,
            '[--show] [key] [command]', 'bind/query/list key bindings',
            flags=['--show', '--mode', '--desc', '--hint',
@@ -3681,6 +3695,10 @@ class Application:
         self._unbound_defaults = set()  # key notations the user explicitly unbound
         self.multikey_timeout = 0 # ms; 0 = always wait for next key
         self._current_mode = 'normal'  # current UI mode: normal/help/details/command
+        # Filter mode: show only hosts matching a glob pattern (must be set before _load_config)
+        self._filter_query   = ''    # '' = inactive; glob pattern when active
+        self._filter_visible = set() # entry indices visible under current filter
+        self._filter_visible_monitors = set()  # monitor entry indices matching filter (for banner count)
         self._register_default_bindings()
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
@@ -4191,6 +4209,8 @@ class Application:
             for monitor in self.monitors:
                 if monitor.resolved_ip is None:
                     threading.Thread(target=monitor.resolve_dns, daemon=True).start()
+        if self._filter_query:
+            self._update_filter_visible()
 
     def cycle_stats(self, direction=1):
         """Cycle through stats display modes. direction=1 forward, -1 backward.
@@ -4476,6 +4496,11 @@ class Application:
         if not visible:
             return
         if action == 'none':
+            if self._filter_query:
+                # Esc first clears the active filter; a second Esc clears selection
+                self._filter_query = ''
+                self._update_filter_visible()
+                return
             self.highlighted_index = None
             self._search_query = ''
             self._search_results = []
@@ -4704,9 +4729,12 @@ class Application:
         _b('<PageUp>',   ':scroll event-history page',  desc='scroll event log up')
         _b('<PageDown>', ':scroll event-history page-', desc='scroll event log down')
         # Search
-        _b('/', ':search',      desc='search hosts')
-        _b('n', ':search-next', desc='next search match')
+        _b('/', ':search',        desc='search hosts')
+        _b('n', ':search-next',   desc='next search match')
         _b('N', ':search-next prev', desc='previous search match')
+        # Filter
+        _b('f', ':filter',        desc='filter hosts by glob pattern')
+        _b('F', ':filter --clear', desc='clear host filter')
 
         self._register_mode_bindings()
 
@@ -5365,6 +5393,9 @@ class Application:
         - It's a section label AND sort_by == 'none' AND no ancestor section is folded
         - It's a monitor AND (sort_by != 'none' OR no ancestor section is folded)
 
+        When a filter is active (_filter_query is set), only entries in
+        _filter_visible are included.
+
         Folding is hierarchical: folding a level-1 section hides its level-2
         subsections and all hosts underneath.  A section stack tracks ancestors
         — when a level-N section is encountered, all stack entries with
@@ -5383,19 +5414,24 @@ class Application:
                         section_stack.pop()
                     # Section labels are always navigable (draw_hosts always renders them)
                     # regardless of whether a parent section is folded.
-                    visible.append(idx)
+                    if not self._filter_query or idx in self._filter_visible:
+                        visible.append(idx)
                     section_stack.append(entry)
                 else:
                     # Monitor: visible only if its immediate parent section is not folded.
                     if not (section_stack and section_stack[-1].folded):
-                        visible.append(idx)
+                        if not self._filter_query or idx in self._filter_visible:
+                            visible.append(idx)
             return visible
         else:
             # Sorting active: only monitors are shown, no section labels
             # Return indices of all monitors in self.entries, in sorted display order
             sorted_monitors = self.get_sorted_monitors()
             entry_idx = {id(e): i for i, e in enumerate(self.entries)}
-            return [entry_idx[id(m)] for m in sorted_monitors if id(m) in entry_idx]
+            result = [entry_idx[id(m)] for m in sorted_monitors if id(m) in entry_idx]
+            if self._filter_query:
+                result = [i for i in result if i in self._filter_visible]
+            return result
 
     def get_sorted_monitors(self):
         """Get display entries sorted by current sort option.
@@ -5612,6 +5648,25 @@ class Application:
                 max_rtt = v
         return max(3, len(str(int(max_rtt))) + 1)
 
+    def _mode_banners(self):
+        """Yield (label, attr) for each active mode banner row.
+
+        Banners are drawn below the column header, one row each.  Any code that
+        needs to know how many banner rows are active can call:
+            n = sum(1 for _ in self._mode_banners())
+        """
+        if self.history_offset > 0:
+            n = self.history_offset
+            label = (f"  ⏸  HISTORY  ←{n} step{'s' if n != 1 else ''} back"
+                     f"  [←] older  [→] newer  [Esc] return to live")
+            yield label, curses.A_REVERSE | curses.A_BOLD
+        if self._filter_query:
+            n_vis = len(self._filter_visible_monitors)
+            n_tot = len(self.monitors)
+            label = (f"  🔍  FILTER  {self._filter_query}"
+                     f"  [{n_vis}/{n_tot}]  [f] edit  [Esc] clear")
+            yield label, curses.A_REVERSE | curses.A_BOLD
+
     def draw_hosts(self, stdscr, start_row, max_rows, width, height, show_header=True):
         """Draw host list with ping history.
 
@@ -5721,7 +5776,9 @@ class Application:
                     hist_suffix += r"  [\[/\] (un)fold-all]"
 
             if self.history_offset > 0:
-                hist_suffix += "  [←/→ scroll]  [Esc] live"
+                hist_suffix += "  [←/→ scroll]"
+            if self._filter_query:
+                hist_suffix += "  [f edit filter]"
 
             # Draw title in white/bold, then hints with [key desc] colouring.
             self._draw_column_header(stdscr, start_row, hist_col_effective,
@@ -5745,17 +5802,10 @@ class Application:
 
         data_start = start_row + (1 if show_header else 0)
 
-        # History-mode banner: a full-width reverse-video row that makes it
-        # unmistakably clear the view is frozen (not live).
-        if self.history_offset > 0:
-            n_steps = self.history_offset
-            label = (f"  ⏸  HISTORY  ←{n_steps} step{'s' if n_steps != 1 else ''} back"
-                     f"  [←] older  [→] newer  [Esc] return to live  ")
-            banner = label.ljust(width)[:width]
-            try:
-                stdscr.addstr(data_start, 0, banner, curses.A_REVERSE | curses.A_BOLD)
-            except curses.error:
-                pass
+        # Mode banners: one full-width reverse-video row per active mode
+        # (HISTORY, FILTER, …).  Each banner consumes one host row.
+        for _blabel, _battr in self._mode_banners():
+            self._safe_addstr(stdscr, data_start, 0, _blabel.ljust(width)[:width], _battr)
             data_start += 1
         row = data_start
         sorted_monitors = self.get_sorted_monitors()
@@ -5824,6 +5874,22 @@ class Application:
             if row >= data_start + max_rows or row >= height:
                 break
 
+            # Compute actual_entry_index once, used by both skip paths and draw path
+            if self.sort_by == 'none':
+                actual_entry_index = entry_index
+            else:
+                actual_entry_index = _entry_idx_map.get(id(item), -1)
+
+            # Filter mode: skip entries not in the visible set; maintain section_stack
+            # but do NOT count them toward host_scroll so navigation still works.
+            if self._filter_query and actual_entry_index not in self._filter_visible:
+                if isinstance(item, SectionLabel):
+                    while section_stack and section_stack[-1].level >= item.level:
+                        section_stack.pop()
+                    section_stack.append(item)
+                entry_index += 1
+                continue
+
             # Skip the first host_scroll visible entries (vertical scroll offset).
             if skipped < self.host_scroll:
                 # Still need to track section_stack even for skipped entries so
@@ -5832,22 +5898,9 @@ class Application:
                     while section_stack and section_stack[-1].level >= item.level:
                         section_stack.pop()
                     section_stack.append(item)
-                if self.sort_by == 'none':
-                    actual_entry_index = entry_index
-                else:
-                    actual_entry_index = _entry_idx_map.get(id(item), -1)
                 entry_index += 1
                 skipped += 1
                 continue
-
-            # Find the actual index of this item in self.entries for highlighting
-            # (sorted_monitors may be in different order than self.entries)
-            if self.sort_by == 'none':
-                # No sorting: entry_index matches position in sorted_monitors
-                actual_entry_index = entry_index
-            else:
-                # Sorted: find the item's position in original self.entries
-                actual_entry_index = _entry_idx_map.get(id(item), -1)
 
             # Check if this entry is highlighted or a search match
             is_highlighted = (self.highlighted_index is not None and
@@ -6356,7 +6409,21 @@ class Application:
             text  = ''.join(p['chars'])
             n_hits = len(self._search_results) if text else 0
             suffix = f"  [{n_hits} match{'es' if n_hits != 1 else ''}]" if text else \
-                     "  [Enter=confirm  Esc=cancel]"
+                     "  [Enter=confirm  Tab=filter  Esc=cancel]"
+            full_line = (label + text + suffix).ljust(width - 1)[:width - 1]
+            stdscr.addstr(height - 1, 0, full_line, curses.A_REVERSE)
+            cursor_x = min(len(label) + len(text), width - 2)
+            stdscr.move(height - 1, cursor_x)
+        elif p['type'] == 'filter':
+            label = "/filter/ "
+            text  = ''.join(p['chars'])
+            if text:
+                # Live preview: temporarily apply to get count
+                n_vis = len(self._filter_visible_monitors)
+                n_tot = len(self.monitors)
+                suffix = f"  [{n_vis}/{n_tot} visible]"
+            else:
+                suffix = "  [Enter=confirm  Tab=search  Esc=cancel]"
             full_line = (label + text + suffix).ljust(width - 1)[:width - 1]
             stdscr.addstr(height - 1, 0, full_line, curses.A_REVERSE)
             cursor_x = min(len(label) + len(text), width - 2)
@@ -6494,12 +6561,50 @@ class Application:
                 self._search_mode  = p['mode']
                 self._update_search_results()
                 self._search_live_update()
+            elif key == ord('\t'):  # Tab — switch to filter prompt
+                # Cancel search cleanly: restore fold state and position
+                for section in self._search_auto_unfolded:
+                    section.folded = self._search_pre_fold.get(section, section.folded)
+                self._search_auto_unfolded.clear()
+                self.highlighted_index = self._search_pre_highlighted
+                self._search_query = ''
+                self._search_results = []
+                self._search_idx = 0
+                self.prompt = None
+                self._cmd_filter_open()
             elif 32 <= key < 127:
                 p['chars'].append(chr(key))
                 self._search_query = ''.join(p['chars'])
                 self._search_mode  = p['mode']
                 self._update_search_results()
                 self._search_live_update()
+
+        elif p['type'] == 'filter':
+            if key == 27:  # Esc — cancel: restore previous filter
+                self._filter_query = p['prev_query']
+                self._update_filter_visible()
+                self.prompt = None
+            elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+                self._filter_query = ''.join(p['chars'])
+                self._update_filter_visible()
+                self.prompt = None
+            elif key == ord('\t'):  # Tab — switch to search prompt
+                # Discard in-progress filter edits; keep whatever was active before
+                self._filter_query = p['prev_query']
+                self._update_filter_visible()
+                self.prompt = None
+                self._cmd_search_open()
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if p['chars']:
+                    p['chars'].pop()
+                # Live preview
+                self._filter_query = ''.join(p['chars'])
+                self._update_filter_visible()
+            elif 32 <= key < 127:
+                p['chars'].append(chr(key))
+                # Live preview
+                self._filter_query = ''.join(p['chars'])
+                self._update_filter_visible()
 
     def save_to_file(self, filename, append=False, write_separator=True):
         """Write the current event log to a file.
@@ -7602,6 +7707,8 @@ class Application:
                             threading.Thread(
                                 target=monitor.resolve_dns, daemon=True
                             ).start()
+                if self._filter_query:
+                    self._update_filter_visible()
             else:
                 self.add_event("cmd",
                     f"dns: unknown mode '{args}' — choices: {' '.join(DNS_MODES)}")
@@ -8278,6 +8385,80 @@ class Application:
         direction = args.strip()
         step = -1 if direction == 'prev' else 1
         self._apply_search_result(self._search_idx + step)
+
+    def _update_filter_visible(self):
+        """Recompute _filter_visible from _filter_query.
+
+        Sets _filter_visible to the set of entry indices that should be rendered:
+        matching Monitor entries plus all their ancestor SectionLabel entries.
+        Clears both sets when no query is active.
+        Auto-expands any folded sections that contain matching descendants.
+        """
+        if not self._filter_query:
+            self._filter_visible = set()
+            self._filter_visible_monitors = set()
+            return
+
+        q = self._filter_query
+        # Bare strings (no glob metacharacters) auto-wrapped as *query*
+        if not any(c in q for c in '*?[]'):
+            pattern = f'*{q}*'
+        else:
+            pattern = q
+        pattern = pattern.lower()
+
+        dns_mode = DNS_MODES[self.dns_mode]
+        entry_idx_map = {id(e): i for i, e in enumerate(self.entries)}
+        matching_indices = set()
+
+        for i, entry in enumerate(self.entries):
+            if isinstance(entry, Monitor):
+                name = entry.get_display_name(dns_mode).lower()
+                ip   = (entry.resolved_ip or '').lower()
+                host = (entry.resolved_hostname or '').lower()
+                if (fnmatch.fnmatch(name, pattern) or
+                        fnmatch.fnmatch(ip, pattern) or
+                        fnmatch.fnmatch(host, pattern)):
+                    matching_indices.add(i)
+
+        self._filter_visible_monitors = set(matching_indices)
+
+        # Walk upward from each match to include ancestor SectionLabel indices
+        visible = set(matching_indices)
+        for idx in matching_indices:
+            for section in self._get_ancestor_sections(idx):
+                si = entry_idx_map.get(id(section))
+                if si is not None:
+                    visible.add(si)
+                    # Auto-expand folded sections that contain matching children
+                    if section.folded:
+                        section.folded = False
+
+        self._filter_visible = visible
+
+    def _cmd_filter_open(self, args=''):
+        """Open the interactive filter prompt."""
+        self.prompt = {
+            'type': 'filter',
+            'prev_query': self._filter_query,
+            'chars': list(self._filter_query),
+        }
+
+    def _cmd_filter(self, args=''):
+        """Set or clear the host filter.
+
+        :filter [pattern]   — set filter to *pattern* (opens prompt if no args)
+        :filter --clear     — clear active filter
+        """
+        a = args.strip()
+        if a == '--clear':
+            self._filter_query = ''
+            self._update_filter_visible()
+        elif a:
+            self._filter_query = a
+            self._update_filter_visible()
+        else:
+            self._cmd_filter_open()
 
     def _cmd_close(self, args=''):
         """Close the currently open overlay (help or details)."""
@@ -9064,7 +9245,8 @@ class Application:
                 # When the column header is shown it occupies one extra row, so the
                 # number of data rows is one less than the total space available.
                 header_rows = 1 if show_header else 0
-                visible_hosts = min(num_hosts, max(0, height - 1 - header_rows))
+                n_banners = sum(1 for _ in self._mode_banners())
+                visible_hosts = min(num_hosts, max(0, height - 1 - header_rows - n_banners))
 
                 # Events get whatever space remains between hosts and the menu row
                 section_end = hosts_start + (1 if show_header else 0) + visible_hosts

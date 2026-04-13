@@ -127,6 +127,23 @@ Navigation
     Open the search prompt.  When a host is selected, searches hostnames;
     otherwise searches the event log.  ``n`` / ``N`` navigate to the
     next / previous match.  ``Esc`` cancels and clears highlights.
+    Press **Tab** inside the search prompt to switch to filter mode.
+
+``f``
+    Open the filter prompt.  Type a glob pattern to show only matching
+    hosts; non-matching hosts are hidden.  A bare string (no ``*``, ``?``,
+    or ``[``) is automatically wrapped as ``*pattern*`` for substring
+    matching.  A full-width banner below the column header shows the
+    active filter and match count.  Press **Enter** to confirm, **Esc** to
+    cancel (restoring the previous filter), **Tab** to switch to search
+    mode.
+
+``F``
+    Clear the active host filter immediately.
+
+``Esc``
+    Clear the active host filter (if one is set), or clear the host
+    selection and return to live ping history.
 
 Display
 -------
@@ -581,18 +598,40 @@ Folding
     Fold / unfold all sections at once (shorthand for ``:fold close-all``
     and ``:fold open-all``).
 
-Search
-------
+Search and Filter
+-----------------
 
 ``:search``
     Open the search prompt (same as ``/``).  When a host is selected,
     searches host display names; otherwise searches the event log.
     Matching is case-insensitive substring.  Press ``Enter`` to confirm and
-    jump to the first match, ``Esc`` to cancel.
+    jump to the first match, ``Esc`` to cancel.  Press **Tab** to switch to
+    the filter prompt.
 
 ``:search-next [prev]``
     Jump to the next search match (same as ``n``).  With ``prev``,
     jump to the previous match (same as ``N``).
+
+``:filter [pattern|--clear]``
+    Set or clear the host filter (same as ``f`` / ``F``).
+
+    With a *pattern*, show only hosts whose display name, resolved IP, or
+    resolved hostname matches the glob.  A bare string is auto-wrapped as
+    ``*pattern*``.  With no arguments, open the interactive filter prompt.
+    With ``--clear``, clear the active filter.
+
+    When a filter is active:
+
+    * A full-width reverse-video banner is shown below the column header,
+      displaying the pattern and the number of visible hosts.
+    * Sections with at least one matching child are kept; empty sections
+      are hidden.  Folded sections that contain a match are automatically
+      expanded.
+    * Navigation (``↑``/``↓``, ``j``/``k``, ``G``/``gg``) operates only
+      over the visible (matching) hosts.
+    * Pressing **Esc** from the normal view clears the filter first; a
+      second press clears the host selection.
+    * The filter is transient and is **not** saved to the config file.
 
 
 HOSTS FILE

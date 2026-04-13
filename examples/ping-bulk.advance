@@ -283,6 +283,15 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # Or bind q to quit from any context (main view + all overlays):
 # :bind-key --mode normal,help,details,command q :quit
 
+# ── Filter mode ───────────────────────────────────────────────────────────
+# [f] opens the filter prompt — type a glob pattern to show only matching
+# hosts.  A bare string (no *, ?, [) is auto-wrapped as *pattern*.
+# [F] / Esc clears the active filter.
+# The filter banner is shown below the column header when a filter is active.
+#
+# Bind Ctrl+F to filter only within the "production" section:
+# :bind-key <C-f> :filter prod*
+
 # ── Dynamic Additions ──────────────────────────────────────────────────────
 # You can also dynamically source other config files or add specific hosts
 # directly from within this script or interactively at runtime.
