@@ -8381,14 +8381,14 @@ class Application:
 
         return scroll_offset, h_scroll
 
-    def _build_help_lines(self, content_width=72):
+    def _build_help_lines(self):
         """Return the content lines list for the help overlay.
 
         Factors out the line-building logic used by both _draw_help_overlay
         and the incremental search helpers.
         """
         if self.help_show_settings:
-            return self._build_settings_lines(content_width)
+            return self._build_settings_lines()
         if self.help_show_all:
             return self._build_all_bindings_lines()
 
@@ -8426,7 +8426,7 @@ class Application:
             self.help_search_matches = []
             self.help_search_match_idx = 0
             return
-        lines = self._build_help_lines(getattr(self, '_settings_content_width', 72))
+        lines = self._build_help_lines()
         self.help_search_matches = [
             i for i, line in enumerate(lines)
             if line != '-DIVIDER-' and q in line.lower()
@@ -8548,7 +8548,7 @@ class Application:
         Press [A] inside the overlay to toggle.  Press [/] to search.
         """
         self._settings_content_width = max(20, width - 4)
-        lines = self._build_help_lines(self._settings_content_width)
+        lines = self._build_help_lines()
 
         # Search state for display
         current_match = None
@@ -8599,25 +8599,24 @@ class Application:
     def _build_settings_lines(self, content_width=72):
         """Build lines for the settings overlay tab as a 4-column table.
 
-        Columns:  Setting (name)  |  Current  |  Values  |  Description
-        Each param occupies exactly one row; description is truncated to fit.
+        Columns:  Setting  |  Current  |  Values  |  Description
+        Column widths are computed from actual data so content is never
+        truncated here — the overlay box handles horizontal clipping and
+        h-scroll lets the user reveal hidden columns.
         Also rebuilds self._settings_line_map: {line_index -> SET_PARAMS index}.
         """
         max_name = max(len(p.name) for p in SET_PARAMS)
-        GAP = 2
-        INDENT = 2
         C1 = len(':set ') + max_name   # e.g. 21: ':set autofold-delay'
-        C2 = 12                         # current value
-        C3 = 38                         # values list
-        base_w = INDENT + C1 + GAP + C2 + GAP + C3
-        C4 = content_width - base_w - GAP
-        show_desc = C4 >= 8
-        sep = ' ' * GAP
+        sep = '  '
 
-        def trunc(s, w):
-            if len(s) <= w:
-                return s.ljust(w)
-            return s[:w - 1] + '…'
+        # Compute natural column widths from actual data (no truncation).
+        cur_vals, vals_strs = [], []
+        for p in SET_PARAMS:
+            cur_vals.append(p.get_current(self))
+            v = p.get_values()
+            vals_strs.append('<free-form>' if isinstance(v, str) else ' | '.join(v))
+        C2 = max(len(s) for s in cur_vals)
+        C3 = max(len(s) for s in vals_strs)
 
         line_map = {}
         lines = [
@@ -8625,24 +8624,15 @@ class Application:
             "-DIVIDER-",
             "  [↑/↓] navigate  [Space] cycle value  [Enter] edit  [/] search",
             "-DIVIDER-",
+            f"  {'Setting':<{C1}}{sep}{'Current':<{C2}}{sep}{'Values':<{C3}}{sep}Description",
+            "-DIVIDER-",
         ]
-        # Column header
-        hdr = f"{'':>{INDENT}}{'Setting':<{C1}}{sep}{'Current':<{C2}}{sep}{'Values':<{C3}}"
-        if show_desc:
-            hdr += f"{sep}Description"
-        lines.append(hdr)
-        lines.append("-DIVIDER-")
 
-        for i, param in enumerate(SET_PARAMS):
-            cur = param.get_current(self)
-            vals = param.get_values()
-            vals_str = '<free-form>' if isinstance(vals, str) else ' | '.join(vals)
-            name_cell = f':set {param.name}'
-            row = (f"{'':>{INDENT}}{name_cell:<{C1}}{sep}"
-                   f"{trunc(cur, C2)}{sep}"
-                   f"{trunc(vals_str, C3)}")
-            if show_desc:
-                row += f"{sep}{trunc(param.help, C4).rstrip()}"
+        for i, (param, cur, vals_str) in enumerate(zip(SET_PARAMS, cur_vals, vals_strs)):
+            row = (f"  {(':set ' + param.name):<{C1}}{sep}"
+                   f"{cur:<{C2}}{sep}"
+                   f"{vals_str:<{C3}}{sep}"
+                   f"{param.help}")
             line_map[len(lines)] = i
             lines.append(row)
 

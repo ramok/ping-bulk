@@ -789,14 +789,15 @@ class TestSettingsOverlay:
         assert 'none' in sort_row and 'latency' in sort_row
 
     def test_build_settings_lines_one_row_per_param(self, pb, tmp_path):
-        """Each param occupies exactly one data row regardless of terminal width."""
+        """Each param occupies exactly one data row; description always shown (no truncation)."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        lines_narrow = app._build_settings_lines(content_width=30)
-        lines_wide   = app._build_settings_lines(content_width=300)
-        # Same number of lines: narrow hides description column but doesn't wrap
-        assert len(lines_narrow) == len(lines_wide), \
-            "4-column format: line count must not change with terminal width"
+        lines = app._build_settings_lines()
+        # Every param must have its description visible (no terminal-width hiding)
+        for p in pb.SET_PARAMS:
+            row = next((l for l in lines if l.strip().startswith(f':set {p.name}')), None)
+            assert row is not None
+            assert p.help in row, f"Description for {p.name!r} should appear untruncated"
 
     # ------------------------------------------------------------------
     # _open_settings_overlay
