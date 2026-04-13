@@ -8572,52 +8572,55 @@ class Application:
         self._help_visible_count = max(0, box_h - 2)
 
     def _build_settings_lines(self, content_width=72):
-        """Build lines for the settings overlay tab.
+        """Build lines for the settings overlay tab as a 4-column table.
 
-        Each setting renders as four lines:
-          :set <name>
-              = <current>
-              values: val1 | val2 | ...
-              <description (word-wrapped to content_width)>
-        separated by -DIVIDER- between entries.
-
-        Also rebuilds self._settings_line_map: {line_index -> SET_PARAMS index}
-        mapping the name lines to their param so the cursor can find them.
+        Columns:  Setting (name)  |  Current  |  Values  |  Description
+        Each param occupies exactly one row; description is truncated to fit.
+        Also rebuilds self._settings_line_map: {line_index -> SET_PARAMS index}.
         """
+        max_name = max(len(p.name) for p in SET_PARAMS)
+        GAP = 2
+        INDENT = 2
+        C1 = len(':set ') + max_name   # e.g. 21: ':set autofold-delay'
+        C2 = 12                         # current value
+        C3 = 38                         # values list
+        base_w = INDENT + C1 + GAP + C2 + GAP + C3
+        C4 = content_width - base_w - GAP
+        show_desc = C4 >= 8
+        sep = ' ' * GAP
+
+        def trunc(s, w):
+            if len(s) <= w:
+                return s.ljust(w)
+            return s[:w - 1] + '…'
+
         line_map = {}
-        lines = ["  Settings  [?] help  [A] bindings  [S] settings",
-                 "-DIVIDER-",
-                 "  [↑/↓] navigate  [Space] cycle value  [Enter] edit  [/] search",
-                 "-DIVIDER-"]
-        indent = "      "
-        desc_wrap = max(20, content_width - len(indent))
+        lines = [
+            "  Settings  [?] help  [A] bindings  [S] settings",
+            "-DIVIDER-",
+            "  [↑/↓] navigate  [Space] cycle value  [Enter] edit  [/] search",
+            "-DIVIDER-",
+        ]
+        # Column header
+        hdr = f"{'':>{INDENT}}{'Setting':<{C1}}{sep}{'Current':<{C2}}{sep}{'Values':<{C3}}"
+        if show_desc:
+            hdr += f"{sep}Description"
+        lines.append(hdr)
+        lines.append("-DIVIDER-")
+
         for i, param in enumerate(SET_PARAMS):
             cur = param.get_current(self)
             vals = param.get_values()
-            if isinstance(vals, str):
-                vals_str = '<free-form>'
-            else:
-                vals_str = ' | '.join(vals)
+            vals_str = '<free-form>' if isinstance(vals, str) else ' | '.join(vals)
+            name_cell = f':set {param.name}'
+            row = (f"{'':>{INDENT}}{name_cell:<{C1}}{sep}"
+                   f"{trunc(cur, C2)}{sep}"
+                   f"{trunc(vals_str, C3)}")
+            if show_desc:
+                row += f"{sep}{trunc(param.help, C4).rstrip()}"
             line_map[len(lines)] = i
-            lines.append(f"  :set {param.name}")
-            lines.append(f"{indent}= {cur}")
-            lines.append(f"{indent}values: {vals_str}")
-            # Word-wrap description
-            words = param.help.split()
-            row, current = '', ''
-            for word in words:
-                test = (current + ' ' + word) if current else word
-                if len(test) <= desc_wrap:
-                    current = test
-                else:
-                    if current:
-                        lines.append(f"{indent}{current}")
-                    current = word
-            if current:
-                lines.append(f"{indent}{current}")
-            lines.append('-DIVIDER-')
-        if lines and lines[-1] == '-DIVIDER-':
-            lines.pop()
+            lines.append(row)
+
         self._settings_line_map = line_map
         return lines
 

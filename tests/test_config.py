@@ -755,52 +755,48 @@ class TestSettingsOverlay:
     # ------------------------------------------------------------------
 
     def test_build_settings_lines_has_name_row(self, pb, tmp_path):
-        """Each param produces a ':set <name>' header row."""
+        """Each param produces a row that starts with ':set <name>'."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        lines = app._build_settings_lines(content_width=100)
-        names = [p.name for p in pb.SET_PARAMS]
-        for name in names:
-            assert any(line.strip().startswith(f':set {name}') and '=' not in line
+        lines = app._build_settings_lines(content_width=200)
+        for p in pb.SET_PARAMS:
+            assert any(line.strip().startswith(f':set {p.name}')
                        for line in lines), \
-                f"No standalone ':set {name}' header row in settings lines"
+                f"No ':set {p.name}' row in settings lines"
 
-    def test_build_settings_lines_has_current_row(self, pb, tmp_path):
-        """Each param has a '= <value>' current-value row."""
+    def test_build_settings_lines_has_current_value(self, pb, tmp_path):
+        """Each param's current value appears on its row."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        lines = app._build_settings_lines(content_width=100)
-        # At least one line per param must start with '= '
-        value_rows = [l for l in lines if l.strip().startswith('= ')]
-        assert len(value_rows) == len(pb.SET_PARAMS), \
-            f"Expected {len(pb.SET_PARAMS)} '= value' rows, got {len(value_rows)}"
+        lines = app._build_settings_lines(content_width=200)
+        for p in pb.SET_PARAMS:
+            cur = p.get_current(app)
+            # Find the row for this param
+            row = next((l for l in lines if l.strip().startswith(f':set {p.name}')), None)
+            assert row is not None
+            assert cur in row, f"Current value {cur!r} not found in row for {p.name!r}"
 
-    def test_build_settings_lines_has_values_row(self, pb, tmp_path):
-        """Each param has a 'values: ...' row."""
+    def test_build_settings_lines_has_values_inline(self, pb, tmp_path):
+        """Each param's values appear inline on its row (not on a separate 'values:' line)."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        lines = app._build_settings_lines(content_width=100)
+        lines = app._build_settings_lines(content_width=200)
+        # No separate 'values:' rows — table format embeds values in each row
         val_rows = [l for l in lines if 'values:' in l]
-        assert len(val_rows) == len(pb.SET_PARAMS)
+        assert len(val_rows) == 0, "4-column format must not emit separate 'values:' lines"
+        # A known short values list must appear directly on the param's row
+        sort_row = next(l for l in lines if l.strip().startswith(':set sort'))
+        assert 'none' in sort_row and 'latency' in sort_row
 
-    def test_build_settings_lines_populates_line_map(self, pb, tmp_path):
-        """_settings_line_map maps header line indices → param indices after build."""
+    def test_build_settings_lines_one_row_per_param(self, pb, tmp_path):
+        """Each param occupies exactly one data row regardless of terminal width."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        app._build_settings_lines(content_width=100)
-        assert len(app._settings_line_map) == len(pb.SET_PARAMS)
-        assert set(app._settings_line_map.values()) == set(range(len(pb.SET_PARAMS)))
-
-    def test_description_wraps_when_narrow(self, pb, tmp_path):
-        """Long descriptions produce multiple lines when content_width is narrow."""
-        cfg = str(tmp_path / 'ping-bulk' / 'config')
-        app = make_app(pb, cfg, '')
-        # Use a very narrow width so at least one description must wrap
         lines_narrow = app._build_settings_lines(content_width=30)
         lines_wide   = app._build_settings_lines(content_width=300)
-        # Narrow should have more lines than wide (some descriptions wrapped)
-        assert len(lines_narrow) > len(lines_wide), \
-            "Narrow content_width should produce more wrapped lines"
+        # Same number of lines: narrow hides description column but doesn't wrap
+        assert len(lines_narrow) == len(lines_wide), \
+            "4-column format: line count must not change with terminal width"
 
     # ------------------------------------------------------------------
     # _open_settings_overlay
