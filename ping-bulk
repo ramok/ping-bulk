@@ -8330,6 +8330,9 @@ class Application:
                     stdscr.addstr(r, col0, '│', border_attr)
                     # Apply horizontal scroll: slice the line before display.
                     sliced = line[h_scroll:h_scroll + inner_w]
+                    # Show … when content is cut on the right
+                    if len(line) > h_scroll + inner_w:
+                        sliced = sliced[:inner_w - 1] + '…'
                     text = sliced.ljust(inner_w)[:inner_w]
                     # Cursor row in settings overlay: highlight whole line
                     if selected_line is not None and abs_line_idx == selected_line:
