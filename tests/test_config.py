@@ -473,15 +473,13 @@ class TestLogSize:
         assert len(event_list) == 5
         assert 'event 0' in event_list
 
-    def test_no_args_shows_current_size(self, pb, tmp_path):
-        """Calling :set log-size with no argument reports the current size in the event log."""
+    def test_no_args_opens_settings_overlay(self, pb, tmp_path):
+        """:set log-size with no argument opens settings overlay focused on 'log-size'."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         app._dispatch_cmd(':set log-size')
-        events = list(app.events)
-        assert any('10000' in e for e in events), (
-            f"Current log size not reported in events: {events}"
-        )
+        assert app.help_open and app.help_show_settings
+        assert app.help_search == 'log-size'
 
     def test_invalid_non_integer_rejected(self, pb, tmp_path):
         """A non-integer value must be rejected and log_size must stay unchanged."""
@@ -581,15 +579,13 @@ class TestSetCommand:
         app._dispatch_cmd(':set ping-view rtt')
         assert app.history_mode == pb.HISTORY_MODES.index('rtt')
 
-    def test_set_no_args_emits_usage(self, pb, tmp_path):
-        """:set with no arguments emits a usage error to the event log."""
+    def test_set_no_args_opens_settings_overlay(self, pb, tmp_path):
+        """:set with no arguments opens the settings overlay (help_open + help_show_settings)."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         app._dispatch_cmd(':set')
-        events = list(app.events)
-        assert any('set:' in e and 'usage' in e for e in events), (
-            f"Expected usage error in events; got: {events}"
-        )
+        assert app.help_open, "help overlay should be open after :set"
+        assert app.help_show_settings, "settings tab should be active after :set"
 
     def test_set_unknown_param_emits_error(self, pb, tmp_path):
         """:set unknownparam emits an 'unknown setting' error to the event log."""
@@ -601,13 +597,16 @@ class TestSetCommand:
             f"Expected unknown-setting error in events; got: {events}"
         )
 
-    def test_set_dns_no_value_cycles_forward(self, pb, tmp_path):
-        """:set dns with no value cycles dns_mode forward by one step."""
+    def test_set_dns_no_value_opens_settings_overlay(self, pb, tmp_path):
+        """:set dns with no value opens settings overlay focused on 'dns'."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         initial = app.dns_mode
         app._dispatch_cmd(':set dns')
-        assert app.dns_mode == (initial + 1) % len(pb.DNS_MODES)
+        assert app.help_open, "help overlay should be open"
+        assert app.help_show_settings, "settings tab should be active"
+        assert app.dns_mode == initial, "dns_mode must not change when no value given"
+        assert app.help_search == 'dns', "search should be pre-populated with param name"
 
 
 class TestLogFileCliOverride:
@@ -669,15 +668,13 @@ class TestHistorySize:
         app._dispatch_cmd(':set history-size 10000')
         assert list(m.history) == [1.0, 2.0, 3.0]
 
-    def test_no_args_shows_current_size(self, pb, tmp_path):
-        """Calling :set history-size with no argument reports the current size in the event log."""
+    def test_no_args_opens_settings_overlay(self, pb, tmp_path):
+        """:set history-size with no argument opens settings overlay focused on 'history-size'."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         app._dispatch_cmd(':set history-size')
-        events = list(app.events)
-        assert any('86400' in e for e in events), (
-            f"Current history size not reported in events: {events}"
-        )
+        assert app.help_open and app.help_show_settings
+        assert app.help_search == 'history-size'
 
     def test_invalid_non_integer_rejected(self, pb, tmp_path):
         """A non-integer value must be rejected and history_size must stay unchanged."""
