@@ -794,6 +794,20 @@ example.com:443
 ### Site B
 :remote-ping ops@remote-b 10.20.0.{1..5}
 
+# ── Key bindings ───────────────────────────────────────────────────────────
+:bind-key --desc "MTR trace" --hint "[t]race" t :mux mtr %i
+:bind-key x :set stats down \; :set dns hostname
+
+# Conditional: only bind if mtr is installed
+:bind-key --if-cmd mtr --%h m :mux mtr %r
+
+# Conditional: only bind if man page exists (in help overlay)
+:bind-key --if-sh "man -w ping-bulk >/dev/null 2>&1" \
+          --mode help --desc "man page" M :mux man ping-bulk
+
+# Multi-mode: same key active in both help and details overlays
+# :bind-key --mode help,details r :close
+
 """
 
 
