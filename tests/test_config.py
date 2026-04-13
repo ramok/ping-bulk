@@ -868,16 +868,19 @@ class TestSettingsOverlay:
     # ------------------------------------------------------------------
 
     def test_space_cycles_dns_mode(self, pb, tmp_path):
-        """Space cycles dns_mode to the next value without closing the overlay."""
+        """Space / → cycles dns_mode forward; ← cycles it backward."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         dns_idx = next(i for i, p in enumerate(pb.SET_PARAMS) if p.name == 'dns')
         app._open_settings_overlay()
         app.settings_cursor = dns_idx
         before = app.dns_mode
+        # Forward (Space / →)
         app._cmd_settings_apply()
-        after = app.dns_mode
-        assert after == (before + 1) % len(pb.DNS_MODES)
+        assert app.dns_mode == (before + 1) % len(pb.DNS_MODES)
+        # Backward (←)
+        app._cmd_settings_apply('prev')
+        assert app.dns_mode == before
         # Overlay must stay open
         assert app.help_open
         assert app.help_show_settings

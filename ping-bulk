@@ -191,8 +191,8 @@ class SetParam:
                 pass
         return '?'
 
-    def next_value(self, app):
-        """Return the next value in the cycle after the current one, or None if free-form."""
+    def next_value(self, app, direction=1):
+        """Return the next (direction=+1) or previous (direction=-1) value, or None if free-form."""
         vals = self.get_values()
         # String sentinel '_complete_stats_arg' means free-form (stats column)
         if not vals or self.values == '_complete_stats_arg':
@@ -203,7 +203,7 @@ class SetParam:
             idx = vals_lower.index(cur)
         except ValueError:
             idx = -1
-        return vals[(idx + 1) % len(vals)]
+        return vals[(idx + direction) % len(vals)]
 
 
 # Single source of truth for all parameters accepted by the ':set' command.
@@ -8068,11 +8068,12 @@ class Application:
         return None
 
     def _cmd_settings_apply(self, args=''):
-        """Cycle the current setting value (Space in settings overlay)."""
+        """Cycle the current setting value forward (Space/→) or backward (←) in settings overlay."""
         if not (self.help_open and self.help_show_settings):
             return
         param = SET_PARAMS[self.settings_cursor]
-        nxt = param.next_value(self)
+        direction = -1 if args == 'prev' else 1
+        nxt = param.next_value(self, direction)
         if nxt is not None:
             self._cmd_set(f'{param.name} {nxt}')
         else:
@@ -8216,6 +8217,30 @@ class Application:
             self.help_h_scroll = max(0, self.help_h_scroll + delta)
         elif self.details_open:
             self.details_h_scroll = max(0, self.details_h_scroll + delta)
+
+    def _dispatch_overlay_nav_key(self, key):
+        """Handle universal overlay navigation keys (scroll up/down/left/right/page).
+
+        Returns True if the key was handled, False otherwise.  This is called
+        from both the help and details overlay key handlers so navigation
+        behaviour is identical in all overlay windows without duplicating
+        mode-binding definitions.
+        """
+        if key in (curses.KEY_UP, ord('k')):
+            self._cmd_scroll_overlay('up')
+        elif key in (curses.KEY_DOWN, ord('j')):
+            self._cmd_scroll_overlay('down')
+        elif key == curses.KEY_PPAGE:
+            self._cmd_scroll_overlay('page-')
+        elif key == curses.KEY_NPAGE:
+            self._cmd_scroll_overlay('page')
+        elif key in (curses.KEY_LEFT, ord('h')):
+            self._cmd_scroll_overlay_h('left')
+        elif key in (curses.KEY_RIGHT, ord('l')):
+            self._cmd_scroll_overlay_h('right')
+        else:
+            return False
+        return True
 
     def _draw_overlay_box(self, stdscr, height, width, lines, scroll_offset, inner_w, *,
                           handle_dividers=False, search_bar=None,
@@ -9071,11 +9096,15 @@ class Application:
                             self._cmd_settings_cursor('up')
                         elif self.help_show_settings and key in (curses.KEY_DOWN, ord('j')):
                             self._cmd_settings_cursor('down')
+                        elif self.help_show_settings and key in (curses.KEY_LEFT, ord('h')):
+                            self._cmd_settings_apply('prev')
+                        elif self.help_show_settings and key in (curses.KEY_RIGHT, ord('l')):
+                            self._cmd_settings_apply()
                         elif self.help_show_settings and key == ord(' '):
                             self._cmd_settings_apply()
                         elif self.help_show_settings and key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                             self._cmd_settings_edit()
-                        else:
+                        elif not self._dispatch_overlay_nav_key(key):
                             self._dispatch_mode_key('help', key)
                     continue
                 if self.details_open:
@@ -9091,7 +9120,8 @@ class Application:
                         self._open_cmd_line()
                         continue
                     was_open = self.details_open
-                    self._dispatch_mode_key('details', key)
+                    if not self._dispatch_overlay_nav_key(key):
+                        self._dispatch_mode_key('details', key)
                     if was_open and not self.details_open and key == ord('c'):
                         pass  # fall through to normal trie dispatch
                     else:
