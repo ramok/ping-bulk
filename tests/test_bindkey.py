@@ -975,44 +975,44 @@ class TestDefaultCBinding:
 # ===========================================================================
 
 class TestScrollDirectionArgs:
-    """scroll-history and scroll-log accept trailing-dash reverse direction."""
+    """scroll ping-history and scroll event-history accept trailing-dash reverse direction."""
 
     def test_scroll_history_half_forward(self, app):
         app.scroll_history = lambda d: setattr(app, '_last_delta', d)
         app._visible_ping_length = 100
-        app._cmd_scroll_history('half')
+        app._cmd_scroll('ping-history half')
         assert app._last_delta == 50
 
     def test_scroll_history_half_dash_reverse(self, app):
         app.scroll_history = lambda d: setattr(app, '_last_delta', d)
         app._visible_ping_length = 100
-        app._cmd_scroll_history('half-')
+        app._cmd_scroll('ping-history half-')
         assert app._last_delta == -50
 
     def test_scroll_history_legacy_minus_half_invalid(self, app):
         """-half is no longer valid; treated as invalid arg."""
         app.scroll_history = lambda d: setattr(app, '_last_delta', d)
         app._visible_ping_length = 100
-        app._cmd_scroll_history('-half')
+        app._cmd_scroll('ping-history -half')
         assert not hasattr(app, '_last_delta')
 
     def test_scroll_history_full_dash(self, app):
         app.scroll_history = lambda d: setattr(app, '_last_delta', d)
         app._visible_ping_length = 40
-        app._cmd_scroll_history('full-')
+        app._cmd_scroll('ping-history full-')
         assert app._last_delta == -40
 
     def test_scroll_log_page_dash(self, app):
         app.scroll_log = lambda d: setattr(app, '_last_log_delta', d)
         app._log_page_size = 20
-        app._cmd_scroll_log('page-')
+        app._cmd_scroll('event-history page-')
         assert app._last_log_delta == -20
 
     def test_scroll_log_legacy_minus_page_invalid(self, app):
         """-page is no longer valid; treated as invalid arg."""
         app.scroll_log = lambda d: setattr(app, '_last_log_delta', d)
         app._log_page_size = 20
-        app._cmd_scroll_log('-page')
+        app._cmd_scroll('event-history -page')
         assert not hasattr(app, '_last_log_delta')
 
 

@@ -144,18 +144,18 @@ class TestVimNavDefaults:
         assert ':select first' in binding.commands
 
     def test_ctrl_f_bound_to_scroll_log_page_forward(self, app, pb):
-        """Ctrl-F is bound to ':scroll-log page-' (forward)."""
+        """Ctrl-F is bound to ':scroll event-history page-' (forward)."""
         keys = pb._parse_key_notation('<C-f>')
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
-        assert ':scroll-log page-' in binding.commands
+        assert ':scroll event-history page-' in binding.commands
 
     def test_ctrl_b_bound_to_scroll_log_page_back(self, app, pb):
-        """Ctrl-B is bound to ':scroll-log page' (backward)."""
+        """Ctrl-B is bound to ':scroll event-history page' (backward)."""
         keys = pb._parse_key_notation('<C-b>')
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is not None
-        assert ':scroll-log page' in binding.commands
+        assert ':scroll event-history page' in binding.commands
 
 
 # ===========================================================================

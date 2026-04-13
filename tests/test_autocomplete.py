@@ -110,7 +110,7 @@ class TestGetCompletions:
     def test_partial_prefix_s_filters_to_matching_commands(self, app):
         """'s' prefix must match all completable commands starting with 's'."""
         result = app._get_completions('s')
-        assert set(result) == {'saveconfig', 'screen', 'scroll', 'scroll-history', 'scroll-log',
+        assert set(result) == {'saveconfig', 'screen', 'scroll',
                                 'scroll-overlay', 'scroll-overlay-h', 'seen', 'select', 'set', 'sort',
                                 'source', 'stats', 'sync-history'}, (
             f"Unexpected results for 's': {sorted(result)}"
