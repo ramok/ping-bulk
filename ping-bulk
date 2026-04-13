@@ -524,46 +524,49 @@ _FULL_HELP = [
     "  ping-bulk — keyboard reference   [?/q/Esc] close  [/] search  [n/N] next/prev  [A] all bindings",
     "-DIVIDER-",
     "  Hotkeys",
-    "  [q] / [Q]                     (:quit)  quit",
-    "  [D]                            (:dns)   cycle DNS display mode",
-    "  [s]                            (:stats) cycle stats column",
-    "  [o] / [O]                      (:sort / :sort reverse)  cycle sort order forward / backward",
-    "  [H]                            (:ping-view)  cycle ping-history display mode",
-    "  [S]                            (:sync-history)  toggle sync-history (wall-clock alignment)",
-    "  [p]                            (:pause-selected)  pause/unpause selected host or section",
-    "  [P]                            (:pause)  toggle global pause (all monitors)",
-    "  [↑] / [↓]  ([k] / [j])        (:select up/down)  navigate host list",
-    "  [g][g]                         (:select first)  jump to first host",
-    "  [G]                            (:select last)   jump to last host",
-    "  [Enter]                        (:details)  show detailed stats for highlighted host",
-    "  [Space]                        (:seen)  insert 'seen' marker (or :fold toggle on section)",
-    "  [C]                            (:clear)  clear event log",
-    "  [Esc]                          (:select none)  clear host selection",
-    "  [:]                            open command line",
-    "  [?]                            (:help)  show this help  ([A] = show all bindings)",
-    "  [←] / [→]                      (:scroll-history half/half-)  scroll history ← older / → live",
-    "  [Ctrl+←] / [Ctrl+→]            (:scroll-history full/full-)  scroll history ← older (page) / → live (page)",
-    "  [↑] / [↓]                      (:scroll-log page/page-)  scroll event log up / down",
-    "  [PgUp] / [PgDn]                (:scroll-log page/page-)  scroll event log by page",
-    "  [Ctrl+B] / [Ctrl+F]            (:scroll-log page/page-)  vim-style event log scroll",
+    "  [q]/[Q]               (:quit)  quit",
+    "  [D]                     (:dns)   cycle DNS display mode",
+    "  [s]                     (:stats) cycle stats column",
+    "  [o]/[O]               (:sort / :sort reverse)  cycle sort order forward / backward",
+    "  [H]                     (:ping-view)  cycle ping-history display mode",
+    "  [S]                     (:sync-history)  toggle sync-history (wall-clock alignment)",
+    "  [p]                     (:pause-selected)  pause/unpause selected host or section",
+    "  [P]                     (:pause)  toggle global pause (all monitors)",
+    "  [↑]/[↓] ([k]/[j])  (:select up/down)  navigate host list",
+    "  [g][g]                  (:select first)  jump to first host",
+    "  [G]                     (:select last)   jump to last host",
+    "  [Enter]                 (:details)  show detailed stats for highlighted host",
+    "  [Space]                 (:seen)  insert 'seen' marker (or :fold toggle on section)",
+    "  [C]                     (:clear)  clear event log",
+    "  [Esc]                   (:select none)  clear host selection + return to live history",
+    "  [:]                     open command line",
+    "  [?]                     (:help)  show this help  ([A] = show all bindings)",
+    "  [←]/[→]               (:scroll-history half/half-)  scroll history ← older / → live",
+    "  [Ctrl+←]/[Ctrl+→]     (:scroll-history full/full-)  scroll history ← older (page) / → live (page)",
+    "  [Esc] (in history)     (:scroll ping-history reset)  return to live view",
+    "  [↑]/[↓]               (:scroll-log page/page-)  scroll event log up / down",
+    "  [PgUp]/[PgDn]         (:scroll-log page/page-)  scroll event log by page",
+    "  [Ctrl+B]/[Ctrl+F]     (:scroll-log page/page-)  vim-style event log scroll",
     "-DIVIDER-",
     "  Search",
     "  [/]   open search  (host selected → search hostnames/IPs; no selection → search event log)",
-    "  [n] / [N]  next / previous match (wraps)",
+    "  [n]/[N]  next / previous match (wraps)",
     "  [Enter]  confirm + jump to first match   [Esc]  cancel search",
     "  Section folding  (highlight a section header, then press)",
-    "  [za] / [Space]   (:fold toggle)        toggle fold of highlighted section",
-    "  [zA] / [Ctrl+Spc]  (:fold toggle-recursive)  toggle fold recursively",
-    "  [zo]             (:fold open)          open (unfold) highlighted section",
-    "  [zO]             (:fold open-recursive)  open section and all sub-sections",
-    "  [zc]             (:fold close)         close (fold) highlighted section",
-    "  [zC]             (:fold close-recursive)  close section and all sub-sections",
-    "  [zR] / [\\]]     (:fold open-all)      open (unfold) ALL sections",
-    "  [zM] / [\\[]     (:fold close-all)     close (fold) ALL sections",
-    "  [zr]             (:fold open-level)    open one fold level (deepest closed)",
-    "  [zm]             (:fold close-level)   close one fold level (shallowest open)",
-    "  [z\\[]           (:fold close-healthy)   fold sections where all hosts are up",
-    "  [z\\]]           (:fold close-unhealthy) fold sections where any host is down",
+    "-DIVIDER-",
+    "  Section folding",
+    "  [za]/[Space]    (:fold toggle)        toggle fold of highlighted section",
+    "  [zA]/[Ctrl+Spc] (:fold toggle-recursive)  toggle fold recursively",
+    "  [zo]            (:fold open)          open (unfold) highlighted section",
+    "  [zO]            (:fold open-recursive)  open section and all sub-sections",
+    "  [zc]            (:fold close)         close (fold) highlighted section",
+    "  [zC]            (:fold close-recursive)  close section and all sub-sections",
+    "  [zR]/[\\]]      (:fold open-all)      open (unfold) ALL sections",
+    "  [zM]/[\\[]      (:fold close-all)     close (fold) ALL sections",
+    "  [zr]            (:fold open-level)    open one fold level (deepest closed)",
+    "  [zm]            (:fold close-level)   close one fold level (shallowest open)",
+    "  [z\\[]          (:fold close-healthy)   fold sections where all hosts are up",
+    "  [z\\]]          (:fold close-unhealthy) fold sections where any host is down",
     "  (type '[z]' → [z] appears bottom-right → press second key)",
     "-DIVIDER-",
     "  Commands",
@@ -3150,6 +3153,8 @@ CMD_REGISTRY = [
            '<action>',            'fold action (toggle, open, close, open-all, …)'),
     CmdDef(['scroll-history'],   '_cmd_scroll_history', None,
            '<n|half|half-|full|full->', 'scroll ping history (trailing - = back/older)'),
+    CmdDef(['scroll'],           '_cmd_scroll', None,
+           '<ping-history|event-history> <action>', 'scroll a named view (ping-history, event-history)'),
     CmdDef(['scroll-log'],       '_cmd_scroll_log', None,
            '<n|page|page->',     'scroll event log (trailing - = back/older)'),
     CmdDef(['scroll-overlay'],   '_cmd_scroll_overlay', None,
@@ -4374,6 +4379,7 @@ class Application:
             self.highlighted_index = None
             self._search_query = ''
             self._search_results = []
+            self.history_offset = 0
         elif action == 'first':
             self.highlighted_index = visible[0]
         elif action == 'last':
@@ -4463,6 +4469,34 @@ class Application:
                 self.scroll_history(int(a))
             except ValueError:
                 self.add_event("cmd", f"scroll-history: invalid value '{a}'")
+
+    def _cmd_scroll(self, args=''):
+        """Scroll a named view: :scroll <target> <action>.
+
+        Targets
+        -------
+        ping-history    Scroll or reset the ping history offset.
+                        Actions: reset, half, half-, full, full-, <n>
+        event-history   (reserved for future use)
+
+        Examples
+        --------
+        :scroll ping-history reset   — return to live view
+        :scroll ping-history half    — scroll back half a screen
+        :scroll ping-history half-   — scroll forward (toward live)
+        """
+        parts = args.strip().split(None, 1)
+        if len(parts) < 2:
+            self.add_event("cmd", f"scroll: usage: scroll <ping-history|event-history> <action>")
+            return
+        target, action = parts[0], parts[1].strip()
+        if target == 'ping-history':
+            if action == 'reset':
+                self.history_offset = 0
+            else:
+                self._cmd_scroll_history(action)
+        else:
+            self.add_event("cmd", f"scroll: unknown target '{target}'")
 
     def _cmd_scroll_log(self, args=''):
         """Scroll event log: numeric delta, page/page-.
@@ -5553,7 +5587,7 @@ class Application:
                     hist_suffix += r"  [\[/\] (un)fold-all]"
 
             if self.history_offset > 0:
-                hist_suffix += f" [←{self.history_offset}  →live]"
+                hist_suffix += "  [←/→ scroll]  [Esc] live"
 
             # Draw title in white/bold, then hints with [key desc] colouring.
             self._draw_column_header(stdscr, start_row, hist_col_effective,
@@ -5576,6 +5610,19 @@ class Application:
                               custom_header[:max(0, width - 1 - custom_start_col)], curses.A_BOLD)
 
         data_start = start_row + (1 if show_header else 0)
+
+        # History-mode banner: a full-width reverse-video row that makes it
+        # unmistakably clear the view is frozen (not live).
+        if self.history_offset > 0:
+            n_steps = self.history_offset
+            label = (f"  ⏸  HISTORY  ←{n_steps} step{'s' if n_steps != 1 else ''} back"
+                     f"  [←] older  [→] newer  [Esc] return to live  ")
+            banner = label.ljust(width)[:width]
+            try:
+                stdscr.addstr(data_start, 0, banner, curses.A_REVERSE | curses.A_BOLD)
+            except curses.error:
+                pass
+            data_start += 1
         row = data_start
         sorted_monitors = self.get_sorted_monitors()
         # O(n) reverse-lookup: id(entry) → index in self.entries; avoids O(n²) .index() calls
