@@ -166,54 +166,95 @@ class SetParam:
     action — name of the Application method to delegate to (e.g. '_cmd_dns')
     values — list[str] or zero-argument callable returning list[str]
     help   — short description shown in the help overlay
+    getter — callable(app) -> str returning the current value; used by the
+             settings overlay to display live values without side-effects
     """
-    __slots__ = ('name', 'action', 'values', 'help')
+    __slots__ = ('name', 'action', 'values', 'help', 'getter')
 
-    def __init__(self, name, action, values, help=''):
+    def __init__(self, name, action, values, help='', getter=None):
         self.name   = name
         self.action = action
         self.values = values
         self.help   = help
+        self.getter = getter
 
     def get_values(self):
         """Return the list of valid values, evaluating a callable if necessary."""
         return self.values() if callable(self.values) else self.values
 
+    def get_current(self, app):
+        """Return the current value string for this parameter (read-only, no side-effects)."""
+        if self.getter is not None:
+            try:
+                return str(self.getter(app))
+            except Exception:
+                pass
+        return '?'
+
+    def next_value(self, app):
+        """Return the next value in the cycle after the current one, or None if free-form."""
+        vals = self.get_values()
+        # String sentinel '_complete_stats_arg' means free-form (stats column)
+        if not vals or self.values == '_complete_stats_arg':
+            return None
+        cur = self.get_current(app).lower()
+        vals_lower = [v.lower() for v in vals]
+        try:
+            idx = vals_lower.index(cur)
+        except ValueError:
+            idx = -1
+        return vals[(idx + 1) % len(vals)]
+
 
 # Single source of truth for all parameters accepted by the ':set' command.
 SET_PARAMS = [
     SetParam('dns',       '_cmd_dns',      lambda: [m.lower() for m in DNS_MODES],
-             'DNS display mode'),
+             'DNS display mode',
+             getter=lambda app: DNS_MODES[app.dns_mode].lower()),
     SetParam('stats',     '_cmd_stats',    '_complete_stats_arg',
-             'stats column mode (single name or comma-separated list e.g. last,avg,stdev)'),
+             'stats column mode (single name or comma-separated list e.g. last,avg,stdev)',
+             getter=lambda app: (','.join(h.lower() for h in app.stats_custom)
+                                 if app.stats_custom else STATS_MODES[app.stats_mode].lower())),
     SetParam('sort',      '_cmd_sort',     ['none', 'name', 'status', 'latency'],
-             'sort order'),
+             'sort order',
+             getter=lambda app: app.sort_by),
     SetParam('ping-view', '_cmd_history',  lambda: [m.lower() for m in HISTORY_MODES],
-             'ping history display mode'),
+             'ping history display mode',
+             getter=lambda app: HISTORY_MODES[app.history_mode].lower()),
     SetParam('log-size',  '_cmd_log_size', ['1000', '5000', '10000', '50000', '100000'],
-             'event log max lines (default 10000)'),
+             'event log max lines (default 10000)',
+             getter=lambda app: str(app.log_size)),
     SetParam('history-size', '_cmd_history_size', ['1000', '10000', '86400', '604800'],
-             'per-host ping history depth (default 86400)'),
+             'per-host ping history depth (default 86400)',
+             getter=lambda app: str(app.history_size)),
     SetParam('sync-history', '_cmd_sync_history', ['on', 'off'],
-             'align history bars to wall-clock time (default on)'),
+             'align history bars to wall-clock time (default on)',
+             getter=lambda app: 'on' if app.sync_history else 'off'),
     SetParam('pause', '_cmd_pause', ['on', 'off'],
-             'pause all monitors (stop sending pings)'),
+             'pause all monitors (stop sending pings)',
+             getter=lambda app: 'on' if all(m.paused for m in app.monitors) else 'off'),
     SetParam('mux-split', '_cmd_mux_split', ['v', 'h', 'window'],
-             'default pane split direction for :mux (v=below h=right window=new)'),
+             'default pane split direction for :mux (v=below h=right window=new)',
+             getter=lambda app: app.mux_split),
     SetParam('terminal', '_cmd_set_terminal',
              lambda: ['auto'] + [b for b, _ in _XTERM_CANDIDATES],
-             'X/Wayland terminal emulator for :term (auto = x-terminal-emulator, fallback xterm)'),
+             'X/Wayland terminal emulator for :term (auto = x-terminal-emulator, fallback xterm)',
+             getter=lambda app: app.terminal),
     SetParam('multikey-timeout', '_cmd_multikey_timeout',
              ['0', '200', '500', '1000'],
-             'ms to wait for follow-up key in multi-key binding (0 = wait forever)'),
-        SetParam('log-level', '_cmd_loglevel',
+             'ms to wait for follow-up key in multi-key binding (0 = wait forever)',
+             getter=lambda app: str(app.multikey_timeout)),
+    SetParam('log-level', '_cmd_loglevel',
              ['quiet', 'normal', 'info', 'debug', 'trace'],
-             'event log verbosity (quiet=host status only, normal=+errors/warnings, info=+cmd/config, debug=all, trace=+exec)'),
+             'event log verbosity (quiet=host status only, normal=+errors/warnings, info=+cmd/config, debug=all, trace=+exec)',
+             getter=lambda app: app._LOGLEVEL_LABELS.get(app.loglevel, 'normal')),
     SetParam('autofold', '_cmd_autofold', ['on', 'off'],
-             'auto fold sections when all hosts are up, unfold when any go down (default off)'),
+             'auto fold sections when all hosts are up, unfold when any go down (default off)',
+             getter=lambda app: 'on' if app.autofold else 'off'),
     SetParam('autofold-delay', '_cmd_autofold_delay',
              ['5', '15', '30', '60', '120'],
-             'seconds to wait before auto-folding a recovered section (default 30)'),
+             'seconds to wait before auto-folding a recovered section (default 30)',
+             getter=lambda app: str(int(app.autofold_delay))),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -3125,8 +3166,20 @@ CMD_REGISTRY = [
            '',                    'open hosts file in editor; reloads on exit'),
     CmdDef(['help'],             '_cmd_help',       None,
            '',                    'show this help'),
-    CmdDef(['help-toggle-all'],  '_cmd_help_toggle_all', None,
+    CmdDef(['help-toggle-all'],      '_cmd_help_toggle_all', None,
            '',                    'toggle all-bindings view in help overlay',
+           completable=False),
+    CmdDef(['help-toggle-settings'], '_cmd_help_toggle_settings', None,
+           '',                    'toggle settings view in help overlay',
+           completable=False),
+    CmdDef(['settings-cursor'],      '_cmd_settings_cursor', None,
+           '<up|down>',           'move cursor in settings overlay',
+           completable=False),
+    CmdDef(['settings-apply'],       '_cmd_settings_apply', None,
+           '',                    'cycle current setting value (Space in settings overlay)',
+           completable=False),
+    CmdDef(['settings-edit'],        '_cmd_settings_edit', None,
+           '',                    'open command line to edit current setting (Enter in settings overlay)',
            completable=False),
     CmdDef(['search'],           '_cmd_search_open', None,
            '',                    'open search prompt',
@@ -3593,11 +3646,18 @@ class Application:
         self._load_cmd_history()
         self.help_open = False    # True while the help overlay is visible
         self.help_scroll = 0      # first visible line index in the help overlay
-        self.help_show_all = False # True = show auto-generated full binding list
+        self.help_show_all = False      # True = show auto-generated full binding list
+        self.help_show_settings = False # True = show settings tab
         self.help_search = ''            # current search query within help overlay
         self.help_search_active = False  # True while user is typing the search
         self.help_search_matches = []    # line indices in rendered lines that match
         self.help_search_match_idx = 0   # current highlighted match index
+        # Settings overlay cursor (index into SET_PARAMS list)
+        self.settings_cursor = 0
+        self._settings_line_map: dict = {}  # {line_index: param_index}
+        self._settings_content_width = 72   # updated each draw frame; used by search
+        self._settings_scroll_to_cursor = False
+        self._help_visible_count = 20  # updated on each draw
         self.details_open = False # True while the host details overlay is visible
         self.details_monitor = None  # PingMonitor instance whose details are shown
         self.details_scroll = 0   # vertical scroll offset for host details overlay
@@ -4631,6 +4691,7 @@ class Application:
         _mb('help', '<Esc>',   ':close',                   desc='close help overlay')
         _mb('help', '<CR>',    ':close',                   desc='close help overlay')
         _mb('help', 'A',       ':help-toggle-all',         desc='toggle all-bindings view')
+        _mb('help', 'S',       ':help-toggle-settings',    desc='toggle settings view')
         _mb('help', '<Up>',    ':scroll-overlay up',       desc='scroll up')
         _mb('help', '<Down>',  ':scroll-overlay down',     desc='scroll down')
         _mb('help', '<PgUp>',  ':scroll-overlay page-',    desc='scroll up one page')
@@ -6713,11 +6774,16 @@ class Application:
             self.add_event("resolv",
                 f"no monitor matched '{ip}' / '{hostname}' — mapping stored for future use")
 
-    def _open_cmd_line(self):
-        """Open the ':' command line, clearing any pending key sequence."""
+    def _open_cmd_line(self, prefill=''):
+        """Open the ':' command line, clearing any pending key sequence.
+
+        If *prefill* is given (e.g. ``'set dns hostname'``), the command buffer
+        is pre-populated with that text and the cursor placed at the end.
+        """
         self._key_seq = []
+        chars = list(prefill)
         self.cmd = {
-            'chars': [], 'cursor': 0,
+            'chars': chars, 'cursor': len(chars),
             'hist_idx': -1, 'saved_line': '',
             'completions': [], 'comp_idx': -1, 'comp_prefix': '',
         }
@@ -7538,28 +7604,56 @@ class Application:
     def _cmd_set(self, args=''):
         """Set a display mode by name: :set <setting> [value].
 
-        Delegates to the corresponding individual command handler, so every
-        value accepted by the individual commands is also accepted here.
-        With no value the targeted setting is cycled forward (same behaviour
-        as calling the individual command with no argument).
+        With no arguments or a single param name: opens the settings overlay.
+        With param + value: delegates to the corresponding _cmd_* handler.
 
         Supported settings are defined in SET_PARAMS (dns, stats, sort,
-        ping-view).  Each entry maps to the corresponding _cmd_* method.
+        ping-view, log-level, autofold, …).
         """
         parts = args.split(None, 1)
         if not parts:
-            choices = '|'.join(p.name for p in SET_PARAMS)
-            self.add_event("cmd", f"set: usage: :set {choices} [value]")
+            # :set with no args — open settings overlay showing all settings
+            self._open_settings_overlay()
             return
         subcmd = parts[0].lower()
-        subargs = parts[1].strip() if len(parts) > 1 else ''
         param = _SET_PARAM_MAP.get(subcmd)
         if param is None:
             choices = '  '.join(p.name for p in SET_PARAMS)
             self.add_event("cmd",
                 f"set: unknown setting '{subcmd}' — choices: {choices}")
+            return
+        if len(parts) == 1:
+            # :set <param> with no value — open settings overlay focused on that param
+            self._open_settings_overlay(param_name=subcmd)
         else:
-            getattr(self, param.action)(subargs)
+            getattr(self, param.action)(parts[1].strip())
+
+    def _open_settings_overlay(self, param_name=''):
+        """Open the help overlay in settings tab, optionally focused on a param."""
+        self.help_open = True
+        self.help_show_settings = True
+        self.help_show_all = False
+        self.help_search_active = False
+        self.help_scroll = 0
+        self.help_h_scroll = 0
+        self._current_mode = 'help'
+        if param_name:
+            # Find the param index and set cursor to it; also pre-search
+            for i, p in enumerate(SET_PARAMS):
+                if p.name == param_name:
+                    self.settings_cursor = i
+                    break
+            # Pre-populate search so the param is highlighted
+            self.help_search = param_name
+            self._update_help_search()
+            # Scroll to cursor after line map is built (on next draw)
+            # We defer by setting a flag — handled in _draw_help_overlay
+            self._settings_scroll_to_cursor = True
+        else:
+            self.settings_cursor = 0
+            self.help_search = ''
+            self.help_search_matches = []
+            self._settings_scroll_to_cursor = False
 
     def _cmd_pause(self, args=''):
         """Toggle or set global pause (all monitors). Args: on | off | (empty = toggle)."""
@@ -7934,7 +8028,66 @@ class Application:
     def _cmd_help_toggle_all(self, args=''):
         """Toggle between curated help and full auto-generated binding list."""
         self.help_show_all = not self.help_show_all
+        if self.help_show_all:
+            self.help_show_settings = False
         self.help_scroll = 0
+
+    def _cmd_help_toggle_settings(self, args=''):
+        """Toggle the settings view in the help overlay."""
+        self.help_show_settings = not self.help_show_settings
+        if self.help_show_settings:
+            self.help_show_all = False
+        self.help_scroll = 0
+        self.settings_cursor = 0
+
+    def _cmd_settings_cursor(self, args=''):
+        """Move cursor up or down in the settings overlay."""
+        if not (self.help_open and self.help_show_settings):
+            return
+        direction = args.strip()
+        n = len(SET_PARAMS)
+        if direction == 'up':
+            self.settings_cursor = (self.settings_cursor - 1) % n
+        elif direction == 'down':
+            self.settings_cursor = (self.settings_cursor + 1) % n
+        # Scroll overlay so cursor line is visible
+        cursor_line = self._settings_param_line(self.settings_cursor)
+        if cursor_line is not None:
+            # Estimate visible lines (we don't have terminal height here; use 20 as fallback)
+            visible = max(5, getattr(self, '_help_visible_count', 20))
+            if cursor_line < self.help_scroll:
+                self.help_scroll = cursor_line
+            elif cursor_line >= self.help_scroll + visible:
+                self.help_scroll = cursor_line - visible + 1
+
+    def _settings_param_line(self, param_idx):
+        """Return the line index in the settings overlay for the given param index."""
+        for line_idx, pidx in self._settings_line_map.items():
+            if pidx == param_idx:
+                return line_idx
+        return None
+
+    def _cmd_settings_apply(self, args=''):
+        """Cycle the current setting value (Space in settings overlay)."""
+        if not (self.help_open and self.help_show_settings):
+            return
+        param = SET_PARAMS[self.settings_cursor]
+        nxt = param.next_value(self)
+        if nxt is not None:
+            self._cmd_set(f'{param.name} {nxt}')
+        else:
+            # free-form: fall back to edit
+            self._cmd_settings_edit()
+
+    def _cmd_settings_edit(self, args=''):
+        """Close settings overlay and open command line pre-filled with :set <name> <value>."""
+        if not (self.help_open and self.help_show_settings):
+            return
+        param = SET_PARAMS[self.settings_cursor]
+        cur = param.get_current(self)
+        self._cmd_close()
+        prefill = f'set {param.name} {cur}'
+        self._open_cmd_line(prefill=prefill)
 
     def _update_search_results(self):
         """Recompute self._search_results from self._search_query and _search_mode."""
@@ -8067,7 +8220,7 @@ class Application:
     def _draw_overlay_box(self, stdscr, height, width, lines, scroll_offset, inner_w, *,
                           handle_dividers=False, search_bar=None,
                           match_set=None, current_match=None, search_query='',
-                          h_scroll=0):
+                          h_scroll=0, selected_line=None):
         """Draw a centered bordered overlay popup; return (v_scroll, h_scroll).
 
         Draws a ┌─┐ / │ │ / └─┘ box centered on the terminal.  Content lines
@@ -8153,8 +8306,12 @@ class Application:
                     # Apply horizontal scroll: slice the line before display.
                     sliced = line[h_scroll:h_scroll + inner_w]
                     text = sliced.ljust(inner_w)[:inner_w]
-                    self._draw_hint_text(stdscr, r, col0 + 1, text,
-                                         col0 + 1 + inner_w + 1)
+                    # Cursor row in settings overlay: highlight whole line
+                    if selected_line is not None and abs_line_idx == selected_line:
+                        stdscr.addstr(r, col0 + 1, text, curses.A_BOLD | curses.A_REVERSE)
+                    else:
+                        self._draw_hint_text(stdscr, r, col0 + 1, text,
+                                             col0 + 1 + inner_w + 1)
                     if col0 + 1 + inner_w < width:
                         stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
                     # Highlight search match substring via chgat (overwrites attrs
@@ -8199,12 +8356,14 @@ class Application:
 
         return scroll_offset, h_scroll
 
-    def _build_help_lines(self):
+    def _build_help_lines(self, content_width=72):
         """Return the content lines list for the help overlay.
 
         Factors out the line-building logic used by both _draw_help_overlay
         and the incremental search helpers.
         """
+        if self.help_show_settings:
+            return self._build_settings_lines(content_width)
         if self.help_show_all:
             return self._build_all_bindings_lines()
 
@@ -8242,7 +8401,7 @@ class Application:
             self.help_search_matches = []
             self.help_search_match_idx = 0
             return
-        lines = self._build_help_lines()
+        lines = self._build_help_lines(getattr(self, '_settings_content_width', 72))
         self.help_search_matches = [
             i for i, line in enumerate(lines)
             if line != '-DIVIDER-' and q in line.lower()
@@ -8250,6 +8409,8 @@ class Application:
         self.help_search_match_idx = 0
         if self.help_search_matches:
             self._help_search_scroll_to_current()
+            if self.help_show_settings:
+                self._sync_settings_cursor_to_match()
 
     def _help_search_jump(self, direction):
         """Move to next (+1) or previous (-1) help search match."""
@@ -8258,6 +8419,18 @@ class Application:
         n = len(self.help_search_matches)
         self.help_search_match_idx = (self.help_search_match_idx + direction) % n
         self._help_search_scroll_to_current()
+        if self.help_show_settings:
+            self._sync_settings_cursor_to_match()
+
+    def _sync_settings_cursor_to_match(self):
+        """Update settings_cursor to the param containing the current search match."""
+        if not self.help_search_matches:
+            return
+        target = self.help_search_matches[self.help_search_match_idx]
+        for line_idx in range(target, -1, -1):
+            if line_idx in self._settings_line_map:
+                self.settings_cursor = self._settings_line_map[line_idx]
+                return
 
     def _help_search_scroll_to_current(self):
         """Scroll the help overlay so the current match is near the top."""
@@ -8349,7 +8522,8 @@ class Application:
         All-bindings view (help_show_all=True): auto-generated from full key trie.
         Press [A] inside the overlay to toggle.  Press [/] to search.
         """
-        lines = self._build_help_lines()
+        self._settings_content_width = max(20, width - 4)
+        lines = self._build_help_lines(self._settings_content_width)
 
         # Search state for display
         current_match = None
@@ -8366,6 +8540,21 @@ class Application:
             cursor_ch = '█' if self.help_search_active else ''
             search_bar = f'{self.help_search}{cursor_ch}{count_str}'
 
+        # In settings mode, compute the cursor line to pass to the overlay renderer
+        selected_line = None
+        if self.help_show_settings:
+            selected_line = self._settings_param_line(self.settings_cursor)
+            # Deferred scroll-to-cursor after _open_settings_overlay set cursor
+            if getattr(self, '_settings_scroll_to_cursor', False):
+                self._settings_scroll_to_cursor = False
+                if selected_line is not None:
+                    box_h_est = min(len(lines) + 2, height)
+                    vis = max(1, box_h_est - 2)
+                    if selected_line < self.help_scroll:
+                        self.help_scroll = selected_line
+                    elif selected_line >= self.help_scroll + vis:
+                        self.help_scroll = selected_line - vis + 1
+
         ideal_w = max(len(line) for line in lines if line != "-DIVIDER-")
         inner_w = min(ideal_w, max(20, width - 4))
         self.help_scroll, self.help_h_scroll = self._draw_overlay_box(
@@ -8376,7 +8565,61 @@ class Application:
             current_match=current_match,
             search_query=self.help_search,
             h_scroll=self.help_h_scroll,
+            selected_line=selected_line,
         )
+        # Store visible count for scroll-to-cursor in _cmd_settings_cursor
+        box_h = min(len(lines) + 2, height)
+        self._help_visible_count = max(0, box_h - 2)
+
+    def _build_settings_lines(self, content_width=72):
+        """Build lines for the settings overlay tab.
+
+        Each setting renders as four lines:
+          :set <name>
+              = <current>
+              values: val1 | val2 | ...
+              <description (word-wrapped to content_width)>
+        separated by -DIVIDER- between entries.
+
+        Also rebuilds self._settings_line_map: {line_index -> SET_PARAMS index}
+        mapping the name lines to their param so the cursor can find them.
+        """
+        line_map = {}
+        lines = ["  Settings  [?] help  [A] bindings  [S] settings",
+                 "-DIVIDER-",
+                 "  [↑/↓] navigate  [Space] cycle value  [Enter] edit  [/] search",
+                 "-DIVIDER-"]
+        indent = "      "
+        desc_wrap = max(20, content_width - len(indent))
+        for i, param in enumerate(SET_PARAMS):
+            cur = param.get_current(self)
+            vals = param.get_values()
+            if isinstance(vals, str):
+                vals_str = '<free-form>'
+            else:
+                vals_str = ' | '.join(vals)
+            line_map[len(lines)] = i
+            lines.append(f"  :set {param.name}")
+            lines.append(f"{indent}= {cur}")
+            lines.append(f"{indent}values: {vals_str}")
+            # Word-wrap description
+            words = param.help.split()
+            row, current = '', ''
+            for word in words:
+                test = (current + ' ' + word) if current else word
+                if len(test) <= desc_wrap:
+                    current = test
+                else:
+                    if current:
+                        lines.append(f"{indent}{current}")
+                    current = word
+            if current:
+                lines.append(f"{indent}{current}")
+            lines.append('-DIVIDER-')
+        if lines and lines[-1] == '-DIVIDER-':
+            lines.pop()
+        self._settings_line_map = line_map
+        return lines
 
     def _build_all_bindings_lines(self):
         """Build auto-generated lines listing every key binding (all origins)."""
@@ -8821,6 +9064,14 @@ class Application:
                             self._help_search_jump(+1)
                         elif self.help_search and key == ord('N'):
                             self._help_search_jump(-1)
+                        elif self.help_show_settings and key in (curses.KEY_UP, ord('k')):
+                            self._cmd_settings_cursor('up')
+                        elif self.help_show_settings and key in (curses.KEY_DOWN, ord('j')):
+                            self._cmd_settings_cursor('down')
+                        elif self.help_show_settings and key == ord(' '):
+                            self._cmd_settings_apply()
+                        elif self.help_show_settings and key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+                            self._cmd_settings_edit()
                         else:
                             self._dispatch_mode_key('help', key)
                     continue

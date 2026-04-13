@@ -741,3 +741,229 @@ class TestHistorySize:
         names = [p.name for p in pb.SET_PARAMS]
         assert 'history-size' in names, f"history-size not found in SET_PARAMS: {names}"
 
+
+
+# ===========================================================================
+# TestSettingsOverlay  (S1-nav)
+# ===========================================================================
+
+class TestSettingsOverlay:
+    """Settings overlay tab: navigation, Space-cycle, Enter pre-fill, search sync."""
+
+    # ------------------------------------------------------------------
+    # Layout: _build_settings_lines must produce 4 data rows per param
+    # ------------------------------------------------------------------
+
+    def test_build_settings_lines_has_name_row(self, pb, tmp_path):
+        """Each param produces a ':set <name>' header row."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        lines = app._build_settings_lines(content_width=100)
+        names = [p.name for p in pb.SET_PARAMS]
+        for name in names:
+            assert any(line.strip().startswith(f':set {name}') and '=' not in line
+                       for line in lines), \
+                f"No standalone ':set {name}' header row in settings lines"
+
+    def test_build_settings_lines_has_current_row(self, pb, tmp_path):
+        """Each param has a '= <value>' current-value row."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        lines = app._build_settings_lines(content_width=100)
+        # At least one line per param must start with '= '
+        value_rows = [l for l in lines if l.strip().startswith('= ')]
+        assert len(value_rows) == len(pb.SET_PARAMS), \
+            f"Expected {len(pb.SET_PARAMS)} '= value' rows, got {len(value_rows)}"
+
+    def test_build_settings_lines_has_values_row(self, pb, tmp_path):
+        """Each param has a 'values: ...' row."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        lines = app._build_settings_lines(content_width=100)
+        val_rows = [l for l in lines if 'values:' in l]
+        assert len(val_rows) == len(pb.SET_PARAMS)
+
+    def test_build_settings_lines_populates_line_map(self, pb, tmp_path):
+        """_settings_line_map maps header line indices → param indices after build."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._build_settings_lines(content_width=100)
+        assert len(app._settings_line_map) == len(pb.SET_PARAMS)
+        assert set(app._settings_line_map.values()) == set(range(len(pb.SET_PARAMS)))
+
+    def test_description_wraps_when_narrow(self, pb, tmp_path):
+        """Long descriptions produce multiple lines when content_width is narrow."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        # Use a very narrow width so at least one description must wrap
+        lines_narrow = app._build_settings_lines(content_width=30)
+        lines_wide   = app._build_settings_lines(content_width=300)
+        # Narrow should have more lines than wide (some descriptions wrapped)
+        assert len(lines_narrow) > len(lines_wide), \
+            "Narrow content_width should produce more wrapped lines"
+
+    # ------------------------------------------------------------------
+    # _open_settings_overlay
+    # ------------------------------------------------------------------
+
+    def test_open_settings_overlay_no_param(self, pb, tmp_path):
+        """:set with no args opens overlay at cursor=0 with empty search."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._dispatch_cmd(':set')
+        assert app.help_open
+        assert app.help_show_settings
+        assert app.settings_cursor == 0
+        assert app.help_search == ''
+
+    def test_open_settings_overlay_with_param(self, pb, tmp_path):
+        """:set <param> opens overlay with search pre-populated and cursor on param."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        # Use 'sort' (index 2 in SET_PARAMS)
+        sort_idx = next(i for i, p in enumerate(pb.SET_PARAMS) if p.name == 'sort')
+        app._dispatch_cmd(':set sort')
+        assert app.help_open
+        assert app.help_show_settings
+        assert app.help_search == 'sort'
+        assert app.settings_cursor == sort_idx
+
+    # ------------------------------------------------------------------
+    # Cursor navigation
+    # ------------------------------------------------------------------
+
+    def test_cursor_wraps_down(self, pb, tmp_path):
+        """Cursor wraps from last param back to first."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._open_settings_overlay()
+        app.settings_cursor = len(pb.SET_PARAMS) - 1
+        app._cmd_settings_cursor('down')
+        assert app.settings_cursor == 0
+
+    def test_cursor_wraps_up(self, pb, tmp_path):
+        """Cursor wraps from first param back to last."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._open_settings_overlay()
+        app.settings_cursor = 0
+        app._cmd_settings_cursor('up')
+        assert app.settings_cursor == len(pb.SET_PARAMS) - 1
+
+    def test_cursor_moves_down(self, pb, tmp_path):
+        """Cursor moves down by one."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._open_settings_overlay()
+        app.settings_cursor = 0
+        app._cmd_settings_cursor('down')
+        assert app.settings_cursor == 1
+
+    def test_cursor_ignored_when_overlay_closed(self, pb, tmp_path):
+        """_cmd_settings_cursor is a no-op when help overlay is closed."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app.settings_cursor = 0
+        app._cmd_settings_cursor('down')  # overlay not open
+        assert app.settings_cursor == 0
+
+    # ------------------------------------------------------------------
+    # Space: cycle value (_cmd_settings_apply)
+    # ------------------------------------------------------------------
+
+    def test_space_cycles_dns_mode(self, pb, tmp_path):
+        """Space cycles dns_mode to the next value without closing the overlay."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        dns_idx = next(i for i, p in enumerate(pb.SET_PARAMS) if p.name == 'dns')
+        app._open_settings_overlay()
+        app.settings_cursor = dns_idx
+        before = app.dns_mode
+        app._cmd_settings_apply()
+        after = app.dns_mode
+        assert after == (before + 1) % len(pb.DNS_MODES)
+        # Overlay must stay open
+        assert app.help_open
+        assert app.help_show_settings
+
+    def test_space_free_form_opens_edit(self, pb, tmp_path):
+        """Space on a free-form param (stats) falls back to edit mode."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        stats_idx = next(i for i, p in enumerate(pb.SET_PARAMS) if p.name == 'stats')
+        app._open_settings_overlay()
+        app.settings_cursor = stats_idx
+        app._cmd_settings_apply()
+        # Edit mode: overlay closed, command line pre-filled
+        assert not app.help_open
+        assert app.cmd is not None
+        assert 'stats' in ''.join(app.cmd['chars'])
+
+    def test_space_ignored_when_overlay_closed(self, pb, tmp_path):
+        """_cmd_settings_apply is a no-op when help overlay is closed."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        before = app.dns_mode
+        app._cmd_settings_apply()  # overlay not open
+        assert app.dns_mode == before
+
+    # ------------------------------------------------------------------
+    # Enter: pre-fill command line (_cmd_settings_edit)
+    # ------------------------------------------------------------------
+
+    def test_enter_closes_overlay_and_prefills_cmdline(self, pb, tmp_path):
+        """Enter closes the overlay and opens the command line with :set <n> <v>."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        dns_idx = next(i for i, p in enumerate(pb.SET_PARAMS) if p.name == 'dns')
+        app._open_settings_overlay()
+        app.settings_cursor = dns_idx
+        app._cmd_settings_edit()
+        assert not app.help_open, "Overlay should be closed after Enter"
+        assert app.cmd is not None, "Command line should be open"
+        cmd_text = ''.join(app.cmd['chars'])
+        assert 'set dns' in cmd_text, f"Command line should contain 'set dns', got: {cmd_text!r}"
+        cur = pb.SET_PARAMS[dns_idx].get_current(app)
+        assert cur in cmd_text, f"Current value {cur!r} should be pre-filled"
+
+    def test_enter_ignored_when_overlay_closed(self, pb, tmp_path):
+        """_cmd_settings_edit is a no-op when overlay is closed."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._cmd_settings_edit()
+        assert app.cmd is None
+
+    # ------------------------------------------------------------------
+    # Search → cursor sync (_sync_settings_cursor_to_match)
+    # ------------------------------------------------------------------
+
+    def test_search_updates_cursor(self, pb, tmp_path):
+        """Typing in search while in settings mode moves settings_cursor to match."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._open_settings_overlay()
+        # Force _settings_line_map by building lines
+        app._build_settings_lines(content_width=100)
+        # Search for 'autofold-delay' — should move cursor to that param
+        autofold_delay_idx = next(
+            i for i, p in enumerate(pb.SET_PARAMS) if p.name == 'autofold-delay')
+        app.help_search = 'autofold-delay'
+        app._update_help_search()
+        assert app.settings_cursor == autofold_delay_idx, \
+            f"Expected cursor={autofold_delay_idx}, got {app.settings_cursor}"
+
+    def test_search_jump_updates_cursor(self, pb, tmp_path):
+        """n/N (search jump) also updates settings_cursor."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = make_app(pb, cfg, '')
+        app._open_settings_overlay()
+        app._build_settings_lines(content_width=100)
+        # Search for 'on' — matches many params; first match should set cursor
+        app.help_search = 'on'
+        app._update_help_search()
+        first_cursor = app.settings_cursor
+        # Jump to next match — cursor may change
+        if len(app.help_search_matches) > 1:
+            app._help_search_jump(+1)
+            # Cursor is still a valid param index
+            assert 0 <= app.settings_cursor < len(pb.SET_PARAMS)
