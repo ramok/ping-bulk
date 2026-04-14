@@ -3267,6 +3267,8 @@ CMD_REGISTRY = [
            cli_flags=('--sync-history',),
            cli_kwargs={'choices': ['on', 'off'], 'default': None,
                        'help': 'align history bars to wall-clock time (default: on)'}),
+    CmdDef(['autofold'],         '_cmd_autofold',   ['on', 'off'],
+           '[on|off]',            'auto fold sections when all hosts are up, unfold when any go down'),
     CmdDef(['let'],              '_cmd_let',        None,
            '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
     CmdDef(['mux', 'tmux', 'screen'], '_cmd_mux', None,
@@ -4736,7 +4738,7 @@ class Application:
         _b('P', ':pause', desc='pause/resume all monitoring')
         _b('p', ':pause-selected', desc='pause/resume selected host')
         # Actions
-        _b('A', ':set autofold', desc='toggle autofold on/off')
+        _b('A', ':autofold', desc='toggle autofold on/off')
         _b('C', ':clear --confirm', desc='clear event log')
         _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'),
            desc='open SSH connection to selected host')
@@ -5375,6 +5377,25 @@ class Application:
                     hidden.append(entry)
         return hidden
 
+    def _section_autofold_locked(self, section_idx):
+        """Return True if this section is locked open by autofold.
+
+        A section is locked when autofold is on, it is not exempt (no_autofold),
+        and at least one of its *direct* monitors is currently down.  In this
+        state autofold will immediately reopen the section if the user folds it.
+        """
+        if not self.autofold:
+            return False
+        entry = self.entries[section_idx]
+        if not isinstance(entry, SectionLabel) or entry.no_autofold:
+            return False
+        monitors = self._get_direct_section_monitors(section_idx)
+        active = [m for m in monitors if not m.paused]
+        if not active:
+            return False
+        known = [m for m in active if m.alive is not None]
+        return bool(known) and any(m.alive is False for m in known)
+
     def _autofold_tick(self):
         """Check all sections for autofold/autounfold conditions."""
         if not self.autofold:
@@ -5868,7 +5889,9 @@ class Application:
                 else:
                     entry = self.entries[self.highlighted_index] if 0 <= self.highlighted_index < len(self.entries) else None
                     if isinstance(entry, SectionLabel):
-                        hist_suffix += " [↑↓/jk navigate] [SPACE toggle] [C-SPACE toggle+children] [p pause] [ESC clear]"
+                        locked = self._section_autofold_locked(self.highlighted_index)
+                        fold_hint = "" if locked else " [(C-)SPACE fold]"
+                        hist_suffix += f" [↑↓/jk navigate]{fold_hint} [p pause] [ESC clear]"
                     else:
                         hist_suffix += " [↑↓/jk navigate] [ENTER details] [p pause host] [ESC clear]"
                         # Show connect hint if connect is not disabled for this host
@@ -6043,10 +6066,18 @@ class Application:
                 prefix = f"{sec_indent}── {fold_indicator} "
                 
                 # Compute hidden-host count suffix when folded AND some hosts are visible
-                # (when all are hidden, the badge count already tells the story)
+                # (when all are hidden, the badge count already tells the story).
+                # When autofold is active and the section has a down host, it is
+                # "locked open" — show a label so the user knows why Space won't fold it.
                 n_total = len(sec_monitors)
                 show_count = item.folded and n_hidden > 0 and n_hidden < n_total
-                count_suffix = f" ({n_hidden} folded)" if show_count else ""
+                is_locked = self._section_autofold_locked(actual_entry_index)
+                if is_locked:
+                    count_suffix = " (autofold lock)"
+                elif show_count:
+                    count_suffix = f" ({n_hidden} folded)"
+                else:
+                    count_suffix = ""
                 
                 # Truncate title to fit: reserve space for prefix + title + suffix
                 available = stat_col - len(prefix) - len(count_suffix) - 1
