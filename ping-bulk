@@ -839,7 +839,7 @@ example.com:443
 
 # ── Key bindings ───────────────────────────────────────────────────────────
 :bind-key --desc "MTR trace" --hint "[t]race" t :mux mtr %i
-:bind-key x :set stats down \; :set dns hostname
+:bind-key x :set stats down \\; :set dns hostname
 
 # Conditional: only bind if mtr is installed
 :bind-key --if-cmd mtr --%h m :mux mtr %r
