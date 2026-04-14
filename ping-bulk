@@ -4405,6 +4405,7 @@ class Application:
         if not recursive:
             return
         in_subtree = False
+        fold_count = 0
         for entry in self.entries:
             if entry is section:
                 in_subtree = True
@@ -4413,8 +4414,10 @@ class Application:
                 continue
             if in_subtree and entry.level > section.level:
                 entry.folded = state
+                fold_count += 1
             elif in_subtree and entry.level <= section.level:
                 break  # left the subtree
+        self.add_event("fold", f"recursive fold {section.title}: {fold_count} children {'folded' if state else 'unfolded'}")
 
     def _fold_all(self, state):
         """Set all SectionLabels to *state* (True = folded, False = open)."""
@@ -5350,8 +5353,10 @@ class Application:
         """Return monitors under *section_idx* that are hidden due to folding.
 
         A monitor is hidden when its immediate parent section (in the nesting
-        stack) is folded.  Monitors under unfolded subsections are *not*
-        included — they are already visible on screen.
+        stack) is folded.  Monitors under visible but unfolded subsections are
+        not included — they are already on screen.  This matches the rendering
+        rule in draw_hosts: sections are always navigable, only their direct
+        monitors are hidden when they fold.
         """
         section = self.entries[section_idx]
         hidden = []
@@ -5378,7 +5383,11 @@ class Application:
                 continue
             if entry.no_autofold:
                 continue
-            monitors = self._get_direct_section_monitors(idx)
+            # Use ALL descendants (not just direct children): a section should
+            # not be auto-folded when any nested host is down, even if that host
+            # lives in a subsection.  Direct children only would hide down hosts
+            # that are in subsections behind an auto-folded parent.
+            monitors = self._get_section_monitors(idx)
             active = [m for m in monitors if not m.paused]
             if not active:
                 continue
@@ -5504,8 +5513,9 @@ class Application:
                     # of the new section and no longer in scope.
                     while section_stack and section_stack[-1].level >= entry.level:
                         section_stack.pop()
-                    # Section labels are always navigable (draw_hosts always renders them)
-                    # regardless of whether a parent section is folded.
+                    # Section labels are always navigable regardless of parent fold state:
+                    # folding a parent hides its direct monitors but keeps nested section
+                    # headers visible so the user can still navigate to them.
                     if not self._filter_query or idx in self._filter_visible:
                         visible.append(idx)
                     section_stack.append(entry)
@@ -5853,7 +5863,7 @@ class Application:
                 else:
                     entry = self.entries[self.highlighted_index] if 0 <= self.highlighted_index < len(self.entries) else None
                     if isinstance(entry, SectionLabel):
-                        hist_suffix += " [↑↓/jk navigate] [(C-)SPACE hide/show] [p pause] [ESC clear]"
+                        hist_suffix += " [↑↓/jk navigate] [SPACE toggle] [C-SPACE toggle+children] [p pause] [ESC clear]"
                     else:
                         hist_suffix += " [↑↓/jk navigate] [ENTER details] [p pause host] [ESC clear]"
                         # Show connect hint if connect is not disabled for this host
@@ -6091,9 +6101,8 @@ class Application:
                 continue
 
             # Skip this monitor if its immediate parent section is folded.
-            # Only the direct parent's fold state matters — if a sub-section is
-            # explicitly unfolded, its monitors are visible even when a grandparent
-            # section is folded.
+            # Only the direct parent matters: a folded parent hides its own monitors
+            # but nested section headers remain visible (sections are always navigable).
             if section_stack and section_stack[-1].folded:
                 entry_index += 1
                 continue

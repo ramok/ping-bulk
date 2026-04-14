@@ -244,7 +244,7 @@ class TestHierarchicalFolding:
     def test_fold_level1_hides_direct_hosts_not_subsections(self, pb):
         """Folding Top A hides its direct host 10.0.0.1, but Sub A1 and its
         hosts remain navigable because only the immediate parent fold state
-        matters — consistent with how draw_hosts renders section headers.
+        matters — sections are always visible so the user can navigate to them.
         """
         app = self._make_app(pb)
         labels = self._labels(app, pb)
