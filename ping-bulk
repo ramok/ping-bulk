@@ -9037,12 +9037,25 @@ class Application:
             raw_cmd_str = ""
         raw_error_str = error if error is not None else ""
 
+        # Collect host events FIRST — needed to compute ideal overlay width.
+        host_events = []
+        log_name = monitor.get_display_name(dns_mode='off')
+        for event in self.events:
+            parts = event.text.split('   ', 1)
+            if len(parts) == 2:
+                if f" {log_name} " in event.text or event.text.startswith(f"{parts[0]}   {log_name}"):
+                    host_events.append(event.text)
+
         # Calculate dynamic width
         ideal_w = 60
         ideal_w = max(ideal_w, len(f"  Host: {display_name}") + 2)
         ideal_w = max(ideal_w, len(f"  Cmd:  {raw_cmd_str}") + 2)
         if error:
             ideal_w = max(ideal_w, len(f"  Error:  {raw_error_str}") + 2)
+        # Expand to fit the widest event line (indented by 4) without wrapping.
+        if host_events:
+            max_ev_w = max(len(f"    {ev}") for ev in host_events[-50:])
+            ideal_w = max(ideal_w, max_ev_w)
 
         # Constrain to terminal width (leave margin of 4, box borders need 2)
         max_allowed_w = max(20, width - 4)
@@ -9145,32 +9158,16 @@ class Application:
 
         lines.append("")
 
-        # Add events related to this host
-        host_events = []
-        # get_display_name(dns_mode='off') is what add_event uses for logging host names
-        log_name = monitor.get_display_name(dns_mode='off')
-
-        # Look for events containing the host name
-        for event in self.events:
-            # Events look like: "2026-03-20T14:05:32+0200   hostname   message"
-            # We split by '   ' (3 spaces) which add_event uses
-            parts = event.text.split('   ', 1)
-            if len(parts) == 2:
-                rest = parts[1]
-                # Hostname is padded with spaces, so we just check if it starts with the log_name followed by space
-                # Or just do a simple search
-                if f" {log_name} " in event.text or event.text.startswith(f"{parts[0]}   {log_name}"):
-                    host_events.append(event.text)
-
         if host_events:
             lines.append("  Recent Events:")
-            # Show up to 50 most recent events for this host
             for ev in host_events[-50:]:
-                # Wrap event lines if needed
-                ev_wrap_w = max(10, inner_w - 4)
-                wrapped_ev = textwrap.wrap(ev, width=ev_wrap_w)
-                for e_line in wrapped_ev:
-                    lines.append(f"    {e_line}")
+                indented = f"    {ev}"
+                if len(indented) <= inner_w:
+                    lines.append(indented)
+                else:
+                    ev_wrap_w = max(10, inner_w - 4)
+                    for e_line in textwrap.wrap(ev, width=ev_wrap_w):
+                        lines.append(f"    {e_line}")
             lines.append("")
 
         if not conn_disabled:
