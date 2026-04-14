@@ -25,6 +25,46 @@ from collections import deque
 from datetime import datetime
 from threading import Thread
 
+# ── Program identity ──────────────────────────────────────────────────────────
+
+def _derive_prog_name(argv=None):
+    """Derive the program name from argv[0].
+
+    When argv[0] looks like a Python interpreter (starts with 'python'),
+    a test runner ('pytest', '__main__'), or a .py file, the name is taken
+    from the *full basename* of the last ``-f`` / ``--file`` argument instead.
+    Falls back to ``'ping-bulk'`` when no ``-f`` is present.
+
+    The full basename is used (extension included), so ``-f network.pb``
+    yields ``network.pb`` — keeping the name unambiguous and unchanged.
+
+    Examples:
+      ``./ping-bulk 8.8.8.8``            → ``ping-bulk``
+      ``ping-bulk.evo-lan -f …``         → ``ping-bulk.evo-lan``
+      ``python3 ping-bulk 8.8.8.8``      → ``ping-bulk``  (argv[0] is the script)
+      ``python3 /usr/bin/ping-bulk``     → ``ping-bulk``
+      ``python3 -f network.pb``          → ``network.pb``
+      pytest / test import              → ``ping-bulk``   (fallback)
+    """
+    argv = argv if argv is not None else sys.argv
+    argv0 = os.path.basename(argv[0])
+    # Treat as "interpreter" when argv[0] looks like Python, a test runner,
+    # or '-c' (python -c "code" sets argv[0] to '-c')
+    if (argv0.startswith('python') or argv0 in ('pytest', '__main__', '-c')
+            or argv0.endswith('.py')):
+        for i in range(len(argv) - 1, 0, -1):
+            if argv[i] in ('-f', '--file') and i + 1 < len(argv):
+                return os.path.basename(argv[i + 1])
+            if argv[i].startswith('--file='):
+                return os.path.basename(argv[i][7:])
+        return 'ping-bulk'
+    return argv0
+
+
+# Single source of truth for the program name used in all user-visible strings,
+# config paths, syslog identity, and error messages.
+_PROG_NAME = _derive_prog_name()
+
 # ── Event log levels ─────────────────────────────────────────────────────────
 
 LEVEL_QUIET  = 0   # host status changes only (up / down / recover)
@@ -728,6 +768,9 @@ _FULL_HELP = [
     "  %{H:,} = custom separator for multi-value variables",
     "  \\\\; separates multiple commands: :bind-key x :set stats down \\\\; :set dns hostname",
 ]
+# Keep the help header in sync with the actual program name
+if _PROG_NAME != 'ping-bulk':
+    _FULL_HELP[0] = _FULL_HELP[0].replace('ping-bulk', _PROG_NAME, 1)
 
 _EXAMPLE_HELP = """\
 #!/bin/sh
@@ -1317,25 +1360,39 @@ def _evaluate_if_condition(condition_str):
 
 
 def _config_path():
-    """Return the XDG-compliant config file path for ping-bulk.
+    """Return the XDG-compliant config file path.
 
     Respects ``$XDG_CONFIG_HOME`` when set; falls back to ``~/.config``.
-    The returned path is ``<base>/ping-bulk/config``.
+    The preferred path is ``<base>/{_PROG_NAME}/config``.  When the script
+    is run under a different name and the derived path does not yet exist,
+    falls back to ``<base>/ping-bulk/config`` so existing configs are
+    inherited automatically on first run.
     """
     xdg = os.environ.get('XDG_CONFIG_HOME', '')
     base = xdg if xdg else os.path.join(os.path.expanduser('~'), '.config')
-    return os.path.join(base, 'ping-bulk', 'config')
+    preferred = os.path.join(base, _PROG_NAME, 'config')
+    if _PROG_NAME != 'ping-bulk' and not os.path.exists(preferred):
+        fallback = os.path.join(base, 'ping-bulk', 'config')
+        if os.path.exists(fallback):
+            return fallback
+    return preferred
 
 
 def _history_path():
-    """Return the XDG-compliant command history file path for ping-bulk.
+    """Return the XDG-compliant command history file path.
 
     Respects ``$XDG_STATE_HOME`` when set; falls back to ``~/.local/state``.
-    The returned path is ``<base>/ping-bulk/history``.
+    The preferred path is ``<base>/{_PROG_NAME}/history``.  Falls back to
+    the ``ping-bulk`` path when the derived one does not yet exist.
     """
     xdg = os.environ.get('XDG_STATE_HOME', '')
     base = xdg if xdg else os.path.join(os.path.expanduser('~'), '.local', 'state')
-    return os.path.join(base, 'ping-bulk', 'history')
+    preferred = os.path.join(base, _PROG_NAME, 'history')
+    if _PROG_NAME != 'ping-bulk' and not os.path.exists(preferred):
+        fallback = os.path.join(base, 'ping-bulk', 'history')
+        if os.path.exists(fallback):
+            return fallback
+    return preferred
 
 
 def _format_updown_time(seconds):
@@ -3287,8 +3344,8 @@ _CMD_MAP: dict = {name: cmd for cmd in CMD_REGISTRY for name in cmd.names}
 # Covers tmux, screen, and X/Wayland terminal emulators (implemented).
 # Kiosk mode uses tmux only.
 
-_KIOSK_TMUX_CONF = '/etc/ping-bulk/kiosk.tmux.conf'
-_KIOSK_SSH_IDENTITY = '/etc/ping-bulk/id_ed25519'
+_KIOSK_TMUX_CONF = f'/etc/{_PROG_NAME}/kiosk.tmux.conf'
+_KIOSK_SSH_IDENTITY = f'/etc/{_PROG_NAME}/id_ed25519'
 
 
 class TerminalBackend(ABC):
@@ -3881,7 +3938,7 @@ class Application:
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w') as f:
-                f.write("# ping-bulk configuration\n")
+                f.write(f"# {_PROG_NAME} configuration\n")
                 f.write(f":set dns {DNS_MODES[self.dns_mode]}\n")
                 if self.stats_custom is not None:
                     custom_str = ','.join(h.lower() for h in self.stats_custom)
@@ -3945,7 +4002,7 @@ class Application:
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w') as f:
-                f.write("# ping-bulk configuration\n")
+                f.write(f"# {_PROG_NAME} configuration\n")
                 f.write("# Generated on first run — edit as needed.\n")
                 f.write("#\n")
                 f.write(f"# :set dns off            # choices: {' | '.join(DNS_MODES)}\n")
@@ -6396,7 +6453,7 @@ class Application:
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
         elif p['type'] == 'mux_new_pane':
-            line = "Open ping-bulk in new pane? [Y/n]: "
+            line = f"Open {_PROG_NAME} in new pane? [Y/n]: "
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
         elif p['type'] == 'script_changed':
@@ -6629,7 +6686,7 @@ class Application:
                         f.write(event.text + "\n")
             else:
                 with open(filename, 'w') as f:
-                    f.write(f"# ping-bulk event log — saved {timestamp}\n")
+                    f.write(f"# {_PROG_NAME} event log — saved {timestamp}\n")
                     for event in self.events:
                         f.write(event.text + "\n")
         except OSError as e:
@@ -7586,7 +7643,7 @@ class Application:
             msg = f"kiosk_audit: user={user} action={action}"
             if detail:
                 msg += f" detail={detail!r}"
-            _syslog.openlog('ping-bulk', _syslog.LOG_PID, _syslog.LOG_DAEMON)
+            _syslog.openlog(_PROG_NAME, _syslog.LOG_PID, _syslog.LOG_DAEMON)
             _syslog.syslog(_syslog.LOG_NOTICE, msg)
         except Exception:
             pass  # syslog not available (non-Linux, permission denied, …)
@@ -7597,12 +7654,12 @@ class Application:
         Returns True when the canonical (realpath) form of *path* falls under
         an allowed prefix.  Allowed prefixes are:
 
-          /tmp/                         — world-writable scratch space
-          ~/.local/state/ping-bulk/     — conventional state directory
-          /etc/ping-bulk/               — admin-controlled config directory
-          directory of self.hosts_file  — same place the hosts file lives
-                                          (so operators can keep extra sources
-                                          alongside the main file)
+          /tmp/                           — world-writable scratch space
+          ~/.local/state/{_PROG_NAME}/   — conventional state directory
+          /etc/{_PROG_NAME}/             — admin-controlled config directory
+          directory of self.hosts_file   — same place the hosts file lives
+                                           (so operators can keep extra sources
+                                           alongside the main file)
 
         If *path* does not exist yet, the directory part is checked instead.
         When the check fails, an event is logged (using *context* as the
@@ -7610,8 +7667,8 @@ class Application:
         """
         allowed_prefixes = [
             '/tmp/',
-            os.path.expanduser('~/.local/state/ping-bulk/'),
-            '/etc/ping-bulk/',
+            os.path.expanduser(f'~/.local/state/{_PROG_NAME}/'),
+            f'/etc/{_PROG_NAME}/',
         ]
         if self.hosts_file:
             hosts_dir = os.path.dirname(os.path.realpath(self.hosts_file))
@@ -9458,14 +9515,14 @@ def _parse_args():
     """
     import argparse
     parser = argparse.ArgumentParser(
-        prog='ping-bulk',
+        prog=_PROG_NAME,
         description='Monitor multiple hosts with continuous ping.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
+        epilog=f"""\
 examples:
-  ping-bulk 8.8.8.8 1.1.1.1
-  ping-bulk -f hosts.txt
-  ping-bulk -l events.log 8.8.8.8 192.168.1.{1..10}
+  {_PROG_NAME} 8.8.8.8 1.1.1.1
+  {_PROG_NAME} -f hosts.txt
+  {_PROG_NAME} -l events.log 8.8.8.8 192.168.1.{{1..10}}
 
 hosts file format:
   # comment line (ignored)
@@ -9475,7 +9532,7 @@ hosts file format:
   10.0.0.1 ## label     — inline label; ## / ### / #### treated as comment
   :title Title          — same as ##; :title2 = ###; :title3 = ####
   10.0.0.1                  — host or IP to ping
-  10.0.0.{1..5}             — brace range expansion (5 hosts)
+  10.0.0.{{1..5}}             — brace range expansion (5 hosts)
   :resolv <ip> <hostname>   — static DNS override
   :remote-ping [ssh-opts] <relay> <target> — ping via SSH (run on relay host)
   :with remote-ping [ssh-opts] <relay>     — open block (plain lines → :remote-ping commands)
@@ -9531,7 +9588,7 @@ def main(stdscr, args):
         try:
             entries.extend(parse_hosts_file(fpath))
         except OSError as e:
-            print(f"ping-bulk: cannot open '{fpath}': {e}", file=sys.stderr)
+            print(f"{_PROG_NAME}: cannot open '{fpath}': {e}", file=sys.stderr)
             return
 
     seen_cli_hosts = set()
@@ -9552,7 +9609,7 @@ def main(stdscr, args):
                         entries.append(('host', h))
 
     if not entries:
-        print("ping-bulk: no hosts to monitor", file=sys.stderr)
+        print(f"{_PROG_NAME}: no hosts to monitor", file=sys.stderr)
         return
 
     app = Application(entries, log_file=args.log_file)
