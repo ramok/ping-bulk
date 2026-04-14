@@ -4588,6 +4588,7 @@ class Application:
                 except ValueError:
                     self.highlighted_index = visible[0]
 
+
     def _cmd_details(self, args=''):
         """Open details overlay for highlighted host."""
         if (self.highlighted_index is not None and
