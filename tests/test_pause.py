@@ -197,7 +197,7 @@ class TestSectionSummaryPaused:
         app = self._app(pb)
         for m in app.monitors:
             m.alive = True
-        badge, _ = app._section_summary(app.monitors, 10, 0)
+        badge, _, _ = app._section_summary(app.monitors, 10, 0)
         texts = [t for t, _ in badge]
         assert '⏸' not in ''.join(texts)
 
@@ -207,7 +207,7 @@ class TestSectionSummaryPaused:
         app.monitors[1].alive = True
         app.monitors[2].pause()
         app.monitors[2].alive = True   # alive state preserved after pause
-        badge, _ = app._section_summary(app.monitors, 10, 0)
+        badge, _, _ = app._section_summary(app.monitors, 10, 0)
         texts = [t for t, _ in badge]
         joined = ''.join(texts)
         assert '⏸' in joined
@@ -219,7 +219,7 @@ class TestSectionSummaryPaused:
         for m in app.monitors:
             m.alive = True
         app.monitors[0].pause()
-        badge, _ = app._section_summary(app.monitors, 10, 0)
+        badge, _, _ = app._section_summary(app.monitors, 10, 0)
         texts = [t for t, _ in badge]
         joined = ''.join(texts)
         # Only 2 active-alive monitors should count as ↑
@@ -230,7 +230,7 @@ class TestSectionSummaryPaused:
         app = self._app(pb)
         for m in app.monitors:
             m.pause()
-        badge, _ = app._section_summary(app.monitors, 10, 0)
+        badge, _, _ = app._section_summary(app.monitors, 10, 0)
         texts = [t for t, _ in badge]
         joined = ''.join(texts)
         assert '3⏸' in joined
@@ -240,6 +240,6 @@ class TestSectionSummaryPaused:
     def test_paused_badge_uses_cyan_color(self, pb):
         app = self._app(pb)
         app.monitors[0].pause()
-        badge, _ = app._section_summary(app.monitors, 10, 0)
+        badge, _, _ = app._section_summary(app.monitors, 10, 0)
         paused_colors = [c for t, c in badge if '⏸' in t]
         assert paused_colors == [6]   # color_pair(6) = cyan

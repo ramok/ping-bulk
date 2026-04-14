@@ -5346,6 +5346,28 @@ class Application:
             monitors.append(entry)
         return monitors
 
+    def _get_hidden_section_monitors(self, section_idx):
+        """Return monitors under *section_idx* that are hidden due to folding.
+
+        A monitor is hidden when its immediate parent section (in the nesting
+        stack) is folded.  Monitors under unfolded subsections are *not*
+        included — they are already visible on screen.
+        """
+        section = self.entries[section_idx]
+        hidden = []
+        stack = [section]
+        for entry in self.entries[section_idx + 1:]:
+            if isinstance(entry, SectionLabel):
+                if entry.level <= section.level:
+                    break
+                while len(stack) > 1 and stack[-1].level >= entry.level:
+                    stack.pop()
+                stack.append(entry)
+            else:
+                if stack[-1].folded:
+                    hidden.append(entry)
+        return hidden
+
     def _autofold_tick(self):
         """Check all sections for autofold/autounfold conditions."""
         if not self.autofold:
@@ -5398,11 +5420,16 @@ class Application:
             return '.'
         return ' '
 
-    def _section_summary(self, monitors, length, offset, sync=False, end_time=None):
-        """Compute ``(badge_parts, history_str)`` for a list of monitors.
+    def _section_summary(self, monitors, length, offset, sync=False, end_time=None,
+                         history_monitors=None):
+        """Compute ``(badge_parts, history_str, slot_ok_ratios)`` for monitors.
 
-        badge_parts — list of ``(text, color_pair_id)`` segments.
-        history_str — worst-of-all-monitors per time slot, always in 'success' mode.
+        badge_parts     — list of ``(text, color_pair_id)`` segments built from
+                          *monitors* (all descendants).
+        history_str     — worst-of per time slot, built from *history_monitors*
+                          when given, otherwise from *monitors*.
+        slot_ok_ratios  — per-slot fraction of monitors with ``'.'`` (0.0–1.0);
+                          used by the caller to choose yellow vs red for ``'X'``.
         sync/end_time are forwarded to get_history_string for wall-clock alignment.
         """
         # Badge — list of (text, color_pair_id) so each segment is coloured individually.
@@ -5427,21 +5454,29 @@ class Application:
         if not badge_parts:
             badge_parts = [('-', 0)]
 
-        # History — worst char per slot across all monitors
-        if not monitors:
+        # History — worst char per slot; use history_monitors if provided
+        hist_src = history_monitors if history_monitors is not None else monitors
+        if not hist_src:
             history = ' ' * length
+            slot_ok_ratios = [1.0] * length
         else:
             per_monitor = [
                 m.get_history_string(length=length, offset=offset, mode='success',
                                      cell_width=1, sync=sync, end_time=end_time)
-                for m in monitors
+                for m in hist_src
             ]
             history = ''.join(
                 self._worst_history_char([row[i] for row in per_monitor])
                 for i in range(length)
             )
+            slot_ok_ratios = []
+            for i in range(length):
+                chars = [row[i] for row in per_monitor]
+                with_data = [c for c in chars if c != ' ']
+                ok = sum(1 for c in with_data if c == '.')
+                slot_ok_ratios.append(ok / len(with_data) if with_data else 1.0)
 
-        return badge_parts, history
+        return badge_parts, history, slot_ok_ratios
 
     def _get_visible_entry_indices(self):
         """Return a list of self.entries indices that are currently visible.
@@ -5976,21 +6011,29 @@ class Application:
                     section_stack.pop()
                 section_stack.append(item)
 
-                # Compute badge parts and (if folded) history for all descendant monitors
+                # Compute badge parts and (if folded) history for descendant monitors
                 sec_monitors = self._get_section_monitors(actual_entry_index)
-                badge_parts, sec_history = self._section_summary(
+                hidden_monitors = self._get_hidden_section_monitors(actual_entry_index) if item.folded else None
+                badge_parts, sec_history, slot_ok_ratios = self._section_summary(
                     sec_monitors, display_count, self.history_offset,
-                    sync=sync, end_time=render_time
+                    sync=sync, end_time=render_time,
+                    history_monitors=hidden_monitors,
                 )
                 has_error = any(m.error is not None for m in sec_monitors)
+                n_hidden = len(hidden_monitors) if hidden_monitors else 0
 
                 # Show fold indicator: [+] if folded, [-] if expanded
                 fold_indicator = "[+]" if item.folded else "[-]"
                 sec_indent = ' ' * ((item.level - 1) * 2)
                 prefix = f"{sec_indent}── {fold_indicator} "
-                # Truncate title so badge and history have room
-                title_max = stat_col - len(prefix) - 1
-                title_part = item.title[:max(0, title_max)]
+                
+                # Compute hidden-host count suffix when folded
+                count_suffix = f" ({n_hidden})" if item.folded and n_hidden else ""
+                
+                # Truncate title to fit: reserve space for prefix + title + suffix
+                available = stat_col - len(prefix) - len(count_suffix) - 1
+                title_text = item.title[:max(0, available)]
+                title_part = title_text + count_suffix
                 section_text = (prefix + title_part).ljust(stat_col - 1)[:stat_col - 1]
 
                 section_attr = curses.A_BOLD | row_attr
@@ -6019,11 +6062,15 @@ class Application:
                 # History bar — only when folded
                 if item.folded and hist_col_effective < safe_width:
                     col = hist_col_effective
-                    for char in sec_history:
+                    for ci, char in enumerate(sec_history):
                         if col >= safe_width:
                             break
                         if char == 'X':
-                            attr = curses.color_pair(2) | row_attr
+                            # Yellow when majority of hidden hosts are OK for this slot
+                            if ci < len(slot_ok_ratios) and slot_ok_ratios[ci] > 0.5:
+                                attr = curses.color_pair(3) | row_attr
+                            else:
+                                attr = curses.color_pair(2) | row_attr
                         elif char == '?':
                             attr = curses.color_pair(2) | curses.A_BOLD | row_attr
                         elif char == '.':
@@ -6343,7 +6390,8 @@ class Application:
                 max_name_len = max(max_name_len,
                                    indent + len(e.get_display_name(dns_mode_str)))
         max_section_len = max(
-            ((e.level - 1) * 2 + 7 + len(e.title)
+            # Account for prefix "──_[+]_" (7) + title + potential suffix " (NNN)" (~6)
+            ((e.level - 1) * 2 + 7 + len(e.title) + 6
              for e in self.entries if isinstance(e, SectionLabel)),
             default=0
         )
