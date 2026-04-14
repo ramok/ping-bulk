@@ -1266,11 +1266,12 @@ class TestHintFlag:
         assert binding.hint == ''
 
     def test_default_action_hints_present(self, app, pb):
-        """Default bindings for q, C, ? carry hint text."""
+        """Default bindings for q and ? carry hint text; C is shown in Events header."""
         hints = [b.hint for _, b in app._key_trie if b.hint]
         assert any('[q]uit' in h for h in hints), "q binding missing [q]uit hint"
-        assert any('[C]lear' in h for h in hints), "C binding missing hint"
         assert any('[?]' in h for h in hints), "? binding missing hint"
+        # C (clear log) moved to Events header — no trie hint expected
+        assert not any('[C]lear' in h for h in hints), "C should not have trie hint"
 
     def test_user_hint_collected_for_menu(self, app, pb):
         """User-defined --hint binding shows up when iterating trie for menu."""

@@ -4735,7 +4735,8 @@ class Application:
         _b('P', ':pause', desc='pause/resume all monitoring')
         _b('p', ':pause-selected', desc='pause/resume selected host')
         # Actions
-        _b('C', ':clear --confirm', hint='[C]lear log', desc='clear event log')
+        _b('A', ':set autofold', desc='toggle autofold on/off')
+        _b('C', ':clear --confirm', desc='clear event log')
         _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'),
            desc='open SSH connection to selected host')
         _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
@@ -5592,6 +5593,7 @@ class Application:
             (f"[H]istory:{HISTORY_MODES[self.history_mode]}", False),
             (f"[S]ync:{'on' if self.sync_history else 'off'}", self.sync_history),
             (pause_label, paused_count > 0),
+            (f"[A]utofold:{'on' if self.autofold else 'off'}", self.autofold),
         ]
         # Add hint items from trie bindings (all modes, deduplicated by id)
         seen_hints = set()
@@ -6461,6 +6463,7 @@ class Application:
 
         if self.log_file:
             header_suffix += f" → {self.log_file}"
+        header_suffix += " [C]lear"
 
         # Render title in white/bold; [key desc] tokens have key in white, desc default.
         self._draw_column_header(stdscr, start_row, 0, header_title, header_suffix, width)
@@ -8116,18 +8119,22 @@ class Application:
             self.add_event("log-level", f"log level set to: {val}")
 
     def _cmd_autofold(self, args=''):
-        """Enable or disable autofold."""
+        """Toggle or set autofold (on/off).  No args = toggle."""
         val = args.strip().lower()
-        if not val:
-            self.add_event("cmd", f"autofold: {'on' if self.autofold else 'off'}")
-            return
         if val == 'on':
             self.autofold = True
         elif val == 'off':
             self.autofold = False
             self._autofold_ts.clear()
+        elif not val:
+            self.autofold = not self.autofold
+            if not self.autofold:
+                self._autofold_ts.clear()
         else:
             self.add_event("cmd", f"autofold: unknown value '{val}'; choices: on off")
+            return
+        state = 'on' if self.autofold else 'off'
+        self.add_event("autofold", f"autofold {state}")
 
     def _cmd_autofold_delay(self, args=''):
         """Set the autofold recovery delay in seconds."""
