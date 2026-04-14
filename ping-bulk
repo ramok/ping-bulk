@@ -5712,8 +5712,12 @@ class Application:
                         token.append(text[i])
                         i += 1
                 content = ''.join(token)
+                pipe_pos = content.find('|')
                 space_pos = content.find(' ')
-                if space_pos == -1:
+                if pipe_pos != -1 and (space_pos == -1 or pipe_pos < space_pos):
+                    # [key|rest] — key is bold, rest follows without a leading space
+                    key_part, desc_part = content[:pipe_pos], content[pipe_pos + 1:]
+                elif space_pos == -1:
                     key_part, desc_part = content, ''
                 else:
                     key_part, desc_part = content[:space_pos], content[space_pos:]
@@ -5793,6 +5797,27 @@ class Application:
             n_tot = len(self.monitors)
             label = (f"  🔍  FILTER  {self._filter_query}"
                      f"  [{n_vis}/{n_tot}]  [f] edit  [Esc] clear")
+            yield label, curses.A_REVERSE | curses.A_BOLD
+        if (self.highlighted_index is not None
+                and 0 <= self.highlighted_index < len(self.entries)
+                and not self.help_open and not self.details_open
+                and self.cmd is None and self.prompt is None):
+            entry = self.entries[self.highlighted_index]
+            if isinstance(entry, SectionLabel):
+                locked = self._section_autofold_locked(self.highlighted_index)
+                if locked:
+                    label = f"  ▶  {entry.title}  (autofold lock)  [p pause]  [ESC clear]"
+                else:
+                    label = f"  ▶  {entry.title}  [(C-)SPACE fold]  [p pause]  [ESC clear]"
+            else:
+                name = entry.host if isinstance(entry, Monitor) else str(entry)
+                label = f"  ▶  {name}  [Enter details]  [p pause]  [ESC clear]"
+                if isinstance(entry, Monitor):
+                    disabled, _ = self._match_prog_options(
+                        'ssh', entry.host,
+                        getattr(entry, 'resolved_hostname', None) or '')
+                    if not disabled:
+                        label += "  [c connect]"
             yield label, curses.A_REVERSE | curses.A_BOLD
 
     def draw_hosts(self, stdscr, start_row, max_rows, width, height, show_header=True):
@@ -5886,21 +5911,7 @@ class Application:
             if not self.help_open and not self.details_open and self.cmd is None and self.prompt is None:
                 if self.highlighted_index is None:
                     hist_suffix += " [↑↓/jk select host]"
-                else:
-                    entry = self.entries[self.highlighted_index] if 0 <= self.highlighted_index < len(self.entries) else None
-                    if isinstance(entry, SectionLabel):
-                        locked = self._section_autofold_locked(self.highlighted_index)
-                        fold_hint = "" if locked else " [(C-)SPACE fold]"
-                        hist_suffix += f" [↑↓/jk navigate]{fold_hint} [p pause] [ESC clear]"
-                    else:
-                        hist_suffix += " [↑↓/jk navigate] [ENTER details] [p pause host] [ESC clear]"
-                        # Show connect hint if connect is not disabled for this host
-                        if isinstance(entry, Monitor):
-                            disabled, _ = self._match_prog_options(
-                                'ssh', entry.host,
-                                getattr(entry, 'resolved_hostname', None) or '')
-                            if not disabled:
-                                hist_suffix += " [c connect]"
+                # Selection hints are shown in the banner row (see _mode_banners).
                 if any(isinstance(e, SectionLabel) for e in self.entries):
                     # \[ and \] are escaped bracket literals; / splits into two bold keys
                     hist_suffix += r"  [\[/\] (un)fold-all]"
@@ -6480,9 +6491,9 @@ class Application:
             visible = event_list[-page_size:]
             visible_start = max(0, total - page_size)
             header_title = 'Events'
-            header_suffix = ' [SPACE to set "seen" mark]'
+            header_suffix = ' [SPACE seen]'
             if overflows:
-                header_suffix += " [PgUp to scroll]"
+                header_suffix += " [PgUp/PgDn scroll]"
         else:
             end = total - self.log_offset
             start = max(0, end - page_size)
@@ -6491,11 +6502,11 @@ class Application:
             line_start = start + 1
             line_end = end
             header_title = 'Events'
-            header_suffix = f" lines {line_start}-{line_end}/{total} [PgDn to resume]"
+            header_suffix = f" lines {line_start}-{line_end}/{total} [PgUp/PgDn scroll] [Esc resume]"
 
         if self.log_file:
             header_suffix += f" → {self.log_file}"
-        header_suffix += " [C]lear"
+        header_suffix += " [C|lear]"
 
         # Render title in white/bold; [key desc] tokens have key in white, desc default.
         self._draw_column_header(stdscr, start_row, 0, header_title, header_suffix, width)

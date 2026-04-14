@@ -66,7 +66,7 @@ github.com
 
         # Navigate to services section
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # Send zC to fold recursively
         self.sess.send_literal("zC")
@@ -86,7 +86,7 @@ github.com
         """zA (toggle-recursive) should toggle parent and all descendants."""
         # Navigate to services
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # First zA: fold services + extra
         self.sess.send_literal("zA")
@@ -115,7 +115,7 @@ github.com
         """
         # Navigate to services
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # Fold non-recursively
         self.sess.send_literal("zc")
@@ -130,7 +130,7 @@ github.com
         """zC on a section should not affect sibling sections."""
         # Navigate to services
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # Fold services recursively
         self.sess.send_literal("zC")
@@ -144,7 +144,7 @@ github.com
         """Event log should report how many children were affected."""
         # Navigate to services
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # Fold recursively (services has 1 child section: extra)
         self.sess.send_literal("zC")
@@ -164,7 +164,7 @@ github.com
 
         # Navigate to services
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # Unfold recursively with zO
         self.sess.send_literal("zO")
@@ -180,7 +180,7 @@ github.com
         """za (toggle non-recursive) should only affect the selected section."""
         # Navigate to services
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # Toggle with 'za' (non-recursive)
         self.sess.send_literal("za")
@@ -228,7 +228,7 @@ host1
         """Space should toggle only the selected section."""
         # Navigate to A
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # Press Space
         self.sess.send_keys("Space")

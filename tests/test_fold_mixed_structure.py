@@ -58,7 +58,7 @@ nas-old
 
         # Navigate to services section
         self.sess.send_keys("j")
-        self.sess.wait_for("navigate")
+        self.sess.wait_for("(C-)SPACE fold")
 
         # Fold services with Space (non-recursive)
         self.sess.send_keys("Space")
