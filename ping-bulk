@@ -5383,11 +5383,13 @@ class Application:
                 continue
             if entry.no_autofold:
                 continue
-            # Use ALL descendants (not just direct children): a section should
-            # not be auto-folded when any nested host is down, even if that host
-            # lives in a subsection.  Direct children only would hide down hosts
-            # that are in subsections behind an auto-folded parent.
-            monitors = self._get_section_monitors(idx)
+            # Each section is evaluated by its DIRECT monitors only.
+            # Subsections are evaluated independently — folding a parent only
+            # hides its own direct monitors; subsection headers stay navigable.
+            # Using all descendants would cause the parent to remain permanently
+            # unfolded whenever any nested host is down, which also blocks
+            # manual folding (autofold would immediately re-open the section).
+            monitors = self._get_direct_section_monitors(idx)
             active = [m for m in monitors if not m.paused]
             if not active:
                 continue

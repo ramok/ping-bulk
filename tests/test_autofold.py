@@ -206,6 +206,97 @@ class TestAutofoldTick:
         # Should not raise
         app._autofold_tick()
 
+    def test_parent_folds_independently_from_subsection(self, pb, tmp_path):
+        """Parent section autofolds based on its direct monitors only.
+
+        When a parent has all-alive direct monitors but a subsection has a
+        down host, the parent SHOULD autofold (hiding its direct monitors).
+        The subsection is evaluated independently and stays unfolded.
+        """
+        from unittest.mock import patch
+
+        cfg = tmp_path / "ping-bulk" / "config"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('')
+
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application([], log_file=None)
+
+        # services (direct: lab✓, docker✓), extra (direct: admin✓, nas-old✗)
+        services = pb.SectionLabel("services", level=1, folded_default=False)
+        lab = pb.PingMonitor("lab")
+        docker = pb.PingMonitor("docker")
+        extra = pb.SectionLabel("extra", level=2, folded_default=False)
+        admin = pb.PingMonitor("admin")
+        nas_old = pb.PingMonitor("nas-old")
+
+        app.entries = [services, lab, docker, extra, admin, nas_old]
+        app.monitors = [lab, docker, admin, nas_old]
+
+        lab.alive = True
+        docker.alive = True
+        admin.alive = True
+        nas_old.alive = False
+
+        app.autofold = True
+        app.autofold_delay = 0.0
+        services.folded = False
+        extra.folded = False
+
+        # Prime the timer so the delay has elapsed
+        app._autofold_ts[id(services)] = 0.0
+
+        app._autofold_tick()
+
+        # services: direct monitors all alive → autofolded ✓
+        assert services.folded, "services should be autofolded (direct monitors all alive)"
+        # extra: nas-old is down → stays unfolded ✓
+        assert not extra.folded, "extra should stay unfolded (nas-old is down)"
+
+        for m in app.monitors:
+            m.stop()
+
+    def test_parent_not_unfolded_by_subsection_down_host(self, pb, tmp_path):
+        """A manually-folded parent is NOT force-unfolded by a down host in a subsection.
+
+        Autofold evaluates each section by its direct monitors only.  A down
+        host in a subsection triggers unfold of THAT subsection, not the parent.
+        """
+        from unittest.mock import patch
+
+        cfg = tmp_path / "ping-bulk" / "config"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('')
+
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application([], log_file=None)
+
+        services = pb.SectionLabel("services", level=1, folded_default=False)
+        lab = pb.PingMonitor("lab")
+        extra = pb.SectionLabel("extra", level=2, folded_default=False)
+        nas_old = pb.PingMonitor("nas-old")
+
+        app.entries = [services, lab, extra, nas_old]
+        app.monitors = [lab, nas_old]
+
+        lab.alive = True
+        nas_old.alive = False
+
+        app.autofold = True
+        app.autofold_delay = 5.0
+        services.folded = True  # manually folded
+        extra.folded = True
+
+        app._autofold_tick()
+
+        # services has only lab (alive) as direct monitor → autofold does NOT unfold it
+        assert services.folded, "services should stay folded (direct monitor lab is alive)"
+        # extra has nas-old (down) → autounfolded
+        assert not extra.folded, "extra should be unfolded (nas-old is down)"
+
+        for m in app.monitors:
+            m.stop()
+
 
 # ===========================================================================
 # Unit tests — _fold_healthy / _fold_unhealthy
