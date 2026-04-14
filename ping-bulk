@@ -6031,7 +6031,7 @@ class Application:
                 # (when all are hidden, the badge count already tells the story)
                 n_total = len(sec_monitors)
                 show_count = item.folded and n_hidden > 0 and n_hidden < n_total
-                count_suffix = f" ({n_hidden} hidden)" if show_count else ""
+                count_suffix = f" ({n_hidden} folded)" if show_count else ""
                 
                 # Truncate title to fit: reserve space for prefix + title + suffix
                 available = stat_col - len(prefix) - len(count_suffix) - 1
@@ -6393,7 +6393,7 @@ class Application:
                 max_name_len = max(max_name_len,
                                    indent + len(e.get_display_name(dns_mode_str)))
         max_section_len = max(
-            # Account for prefix "──_[+]_" (7) + title + potential suffix " (NNN hidden)" (~13)
+            # Account for prefix "──_[+]_" (7) + title + potential suffix " (NNN folded)" (~13)
             ((e.level - 1) * 2 + 7 + len(e.title) + 13
              for e in self.entries if isinstance(e, SectionLabel)),
             default=0
