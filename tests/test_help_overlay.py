@@ -44,16 +44,23 @@ _tab0_fragments = _mod._join_help_fragments(
     _mod._HELP_LEGEND, _mod._HELP_HOTKEYS, _mod._HELP_SEARCH, _mod._HELP_FOLDING,
     _mod._HELP_CMDS_INTERACTIVE, _mod._HELP_SSH,
 )
-N = 2 + len(_tab0_fragments)  # +2 for tab bar header line and initial -DIVIDER-
+# _HELP_PINNED lines (tab bar + nav hint + -DIVIDER-) are always pinned at the top.
+_PINNED = _mod.Application._HELP_PINNED
+N = _PINNED + len(_tab0_fragments)  # tab bar + nav hint + -DIVIDER- + content
 NO_SCROLL_HEIGHT = N + 2
 
 
 def _indicator(total, height, scroll):
-    """Return the 'first-last/total' portion of the scroll indicator string."""
-    visible = height - 2
+    """Return the 'first-last/total' portion of the scroll indicator string.
+
+    *total* is the total number of lines in _build_tab_lines() (including
+    pinned rows).  The indicator shows only the scrollable portion.
+    """
+    scrollable = total - _PINNED
+    visible = height - 2 - _PINNED
     first = scroll + 1
     last = scroll + visible
-    return f'{first}-{last}/{total}'
+    return f'{first}-{last}/{scrollable}'
 
 # Substring always present in the tab bar at scroll=0.
 OVERLAY_MARKER = 'Interactive'

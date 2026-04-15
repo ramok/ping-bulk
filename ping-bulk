@@ -8688,12 +8688,13 @@ class Application:
         # Scroll overlay so cursor line is visible
         cursor_line = self._settings_param_line(self.settings_cursor)
         if cursor_line is not None:
-            # Estimate visible lines (we don't have terminal height here; use 20 as fallback)
+            # cursor_line is in the full lines list; scroll is relative to scrollable portion.
+            adj_cursor = cursor_line - self._HELP_PINNED
             visible = max(5, getattr(self, '_help_visible_count', 20))
-            if cursor_line < self.help_scroll:
-                self.help_scroll = cursor_line
-            elif cursor_line >= self.help_scroll + visible:
-                self.help_scroll = cursor_line - visible + 1
+            if adj_cursor < self.help_scroll:
+                self.help_scroll = adj_cursor
+            elif adj_cursor >= self.help_scroll + visible:
+                self.help_scroll = adj_cursor - visible + 1
 
     def _settings_param_line(self, param_idx):
         """Return the line index in the settings overlay for the given param index."""
@@ -8954,7 +8955,7 @@ class Application:
     def _draw_overlay_box(self, stdscr, height, width, lines, scroll_offset, inner_w, *,
                           handle_dividers=False, search_bar=None,
                           match_set=None, current_match=None, search_query='',
-                          h_scroll=0, selected_line=None):
+                          h_scroll=0, selected_line=None, pinned_count=0):
         """Draw a centered bordered overlay popup; return (v_scroll, h_scroll).
 
         Draws a ┌─┐ / │ │ / └─┘ box centered on the terminal.  Content lines
@@ -8983,12 +8984,13 @@ class Application:
         box_w = inner_w + 2
         box_h_available = min(len(lines) + 2, height)
         visible_count   = max(0, box_h_available - 2)
-        max_scroll      = max(0, len(lines) - visible_count)
+        adj_visible     = max(0, visible_count - pinned_count)
+        max_scroll      = max(0, len(lines) - pinned_count - adj_visible)
         scroll_offset   = max(0, min(scroll_offset, max_scroll))
 
-        # Compute maximum rendered content width across all non-divider lines for h-scroll cap.
+        # Compute maximum rendered content width across scrollable (non-pinned) lines.
         max_line_w = max(
-            (Application._hint_text_width(line) for line in lines if line != '-DIVIDER-'),
+            (Application._hint_text_width(line) for line in lines[pinned_count:] if line != '-DIVIDER-'),
             default=0,
         )
         max_h_scroll = max(0, max_line_w - inner_w)
@@ -9004,8 +9006,8 @@ class Application:
             parts = []
             if max_scroll > 0:
                 line_first = scroll_offset + 1
-                line_last  = scroll_offset + visible_count
-                parts.append(f'↑↓ {line_first}-{line_last}/{len(lines)}')
+                line_last  = scroll_offset + adj_visible
+                parts.append(f'↑↓ {line_first}-{line_last}/{len(lines) - pinned_count}')
             if max_h_scroll > 0:
                 parts.append(f'←→ {h_scroll + 1}-{h_scroll + inner_w}/{max_line_w}')
             if parts:
@@ -9020,13 +9022,37 @@ class Application:
             except curses.error:
                 pass
 
-        # Content rows
-        visible_lines = lines[scroll_offset:scroll_offset + visible_count]
-        for i, line in enumerate(visible_lines):
-            r = row0 + 1 + i
+        # Pinned rows — always visible at the top, not affected by scroll.
+        for j, line in enumerate(lines[:pinned_count]):
+            r = row0 + 1 + j
             if r >= height:
                 break
-            abs_line_idx = scroll_offset + i
+            if handle_dividers and line == '-DIVIDER-':
+                try:
+                    stdscr.addstr(r, col0,
+                                  ('├' + '─' * inner_w + '┤')[:width - col0],
+                                  border_attr)
+                except curses.error:
+                    pass
+            else:
+                try:
+                    stdscr.addstr(r, col0, '│', border_attr)
+                    text = line[:inner_w].ljust(inner_w)[:inner_w]
+                    self._draw_hint_text(stdscr, r, col0 + 1, text,
+                                         col0 + 1 + inner_w + 1)
+                    if col0 + 1 + inner_w < width:
+                        stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
+                except curses.error:
+                    pass
+
+        # Scrollable content rows
+        visible_lines = lines[pinned_count + scroll_offset:
+                              pinned_count + scroll_offset + adj_visible]
+        for i, line in enumerate(visible_lines):
+            r = row0 + 1 + pinned_count + i
+            if r >= height:
+                break
+            abs_line_idx = pinned_count + scroll_offset + i
             if handle_dividers and line == "-DIVIDER-":
                 try:
                     stdscr.addstr(r, col0,
@@ -9105,37 +9131,44 @@ class Application:
                 parts.append(f'[{i + 1} {name}]')
         return '  ' + '  '.join(parts)
 
+    # Number of lines always pinned at the top of the help overlay (tab bar + nav hint + divider).
+    _HELP_PINNED = 3
+
     def _build_tab_lines(self):
         """Return content lines for the current help tab.
 
-        Replaces the old _build_help_lines() method.  Each tab starts with the
-        tab bar line followed by -DIVIDER- and then the tab-specific content.
+        The first _HELP_PINNED lines are always shown at the top regardless of
+        scroll position: [tab bar, nav hint, -DIVIDER-].  The remaining lines
+        are the tab-specific scrollable content.
         """
         header = self._build_tab_header_line()
+        nav = '  [Tab] next tab   [S-Tab] prev tab   [1]-[6] jump to tab'
 
         if self.help_tab == 5:  # Settings
             lines = self._build_settings_lines()
-            # Shift _settings_line_map keys by 2 (header + '-DIVIDER-' prepended).
-            self._settings_line_map = {k + 2: v for k, v in self._settings_line_map.items()}
-            return [header, '-DIVIDER-'] + lines
+            # Shift _settings_line_map keys by _HELP_PINNED (header + nav + '-DIVIDER-').
+            self._settings_line_map = {
+                k + self._HELP_PINNED: v for k, v in self._settings_line_map.items()
+            }
+            return [header, nav, '-DIVIDER-'] + lines
 
         if self.help_tab == 4:  # Bindings
             lines = self._build_all_bindings_lines()
-            return [header, '-DIVIDER-'] + lines
+            return [header, nav, '-DIVIDER-'] + lines
 
         if self.help_tab == 2:  # Example
             example_lines = _EXAMPLE_HELP.rstrip('\n').splitlines()
-            return [header, '-DIVIDER-'] + example_lines
+            return [header, nav, '-DIVIDER-'] + example_lines
 
         if self.help_tab == 3:  # Commands
             lines = _join_help_fragments(_HELP_CMDS_INTERACTIVE, _HELP_CMDS_HOSTSFILE)
-            return [header, '-DIVIDER-'] + lines
+            return [header, nav, '-DIVIDER-'] + lines
 
         if self.help_tab == 1:  # Hosts file
             lines = _join_help_fragments(
                 _HELP_SYNTAX, _HELP_EXPANSION, _HELP_BINDINGS, _HELP_CMDS_HOSTSFILE,
             )
-            return [header, '-DIVIDER-'] + lines
+            return [header, nav, '-DIVIDER-'] + lines
 
         # Tab 0: Interactive
         lines = _join_help_fragments(
@@ -9158,7 +9191,7 @@ class Application:
                     for notation, desc in entries:
                         lines.append(f'    {notation:<10} {desc}')
 
-        return [header, '-DIVIDER-'] + lines
+        return [header, nav, '-DIVIDER-'] + lines
 
     def _update_help_search(self):
         """Recompute help_search_matches from help_search and scroll to first match."""
@@ -9168,9 +9201,10 @@ class Application:
             self.help_search_match_idx = 0
             return
         lines = self._build_tab_lines()
+        pinned = self._HELP_PINNED
         self.help_search_matches = [
             i for i, line in enumerate(lines)
-            if line != '-DIVIDER-' and q in line.lower()
+            if i >= pinned and line != '-DIVIDER-' and q in line.lower()
         ]
         self.help_search_match_idx = 0
         if self.help_search_matches:
@@ -9203,7 +9237,8 @@ class Application:
         if not self.help_search_matches:
             return
         target = self.help_search_matches[self.help_search_match_idx]
-        self.help_scroll = max(0, target - 3)
+        # target is an index in the full lines list; scroll is relative to scrollable portion.
+        self.help_scroll = max(0, (target - self._HELP_PINNED) - 3)
 
     def _draw_whichkey_overlay(self, stdscr, height, width):
         """Draw a small which-key popup listing continuations for _key_seq.
@@ -9308,6 +9343,7 @@ class Application:
 
         # In settings mode, compute the cursor line to pass to the overlay renderer
         selected_line = None
+        pinned = self._HELP_PINNED
         if self.help_tab == 5:
             selected_line = self._settings_param_line(self.settings_cursor)
             # Deferred scroll-to-cursor after _open_settings_overlay set cursor
@@ -9315,11 +9351,12 @@ class Application:
                 self._settings_scroll_to_cursor = False
                 if selected_line is not None:
                     box_h_est = min(len(lines) + 2, height)
-                    vis = max(1, box_h_est - 2)
-                    if selected_line < self.help_scroll:
-                        self.help_scroll = selected_line
-                    elif selected_line >= self.help_scroll + vis:
-                        self.help_scroll = selected_line - vis + 1
+                    adj_vis = max(1, box_h_est - 2 - pinned)
+                    adj_sel = selected_line - pinned
+                    if adj_sel < self.help_scroll:
+                        self.help_scroll = adj_sel
+                    elif adj_sel >= self.help_scroll + adj_vis:
+                        self.help_scroll = adj_sel - adj_vis + 1
 
         ideal_w = max(
             (Application._hint_text_width(line) for line in lines if line != "-DIVIDER-"),
@@ -9335,10 +9372,11 @@ class Application:
             search_query=self.help_search,
             h_scroll=self.help_h_scroll,
             selected_line=selected_line,
+            pinned_count=pinned,
         )
         # Store visible count for scroll-to-cursor in _cmd_settings_cursor
         box_h = min(len(lines) + 2, height)
-        self._help_visible_count = max(0, box_h - 2)
+        self._help_visible_count = max(0, box_h - 2 - pinned)
 
     def _build_settings_lines(self, content_width=72):
         """Build lines for the settings overlay tab as a 4-column table.

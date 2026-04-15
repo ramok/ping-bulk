@@ -87,7 +87,7 @@ _tab0_fragments = _mod._join_help_fragments(
     _mod._HELP_LEGEND, _mod._HELP_HOTKEYS, _mod._HELP_SEARCH, _mod._HELP_FOLDING,
     _mod._HELP_CMDS_INTERACTIVE, _mod._HELP_SSH,
 )
-_tab0_N = 2 + len(_tab0_fragments)  # +2 for tab bar header line and initial -DIVIDER-
+_tab0_N = _mod.Application._HELP_PINNED + len(_tab0_fragments)  # pinned header rows + content
 NO_SCROLL_HEIGHT = _tab0_N + 2
 
 from tmux_helper import TmuxSession  # noqa: E402
