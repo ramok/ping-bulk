@@ -193,6 +193,17 @@ _STAT_HEADER = {
 # Ping history character modes cycled with [h]
 HISTORY_MODES = ['success', 'rtt', 'scaled']
 
+# Color annotations for _draw_hint_text: [key:colorname desc]
+# Maps color name → (color_pair_id, extra_attr)
+_HINT_KEY_COLORS = {
+    'green':    (1, 0),
+    'red':      (2, 0),
+    'yellow':   (3, 0),
+    'magenta':  (5, 0),
+    'cyan':     (6, 0),
+    'brightred': (2, curses.A_BOLD),
+}
+
 # DNS display modes cycled with [d]/[D]
 # off      — show the address/name exactly as given on the command line
 # hostname — resolve every entry to its hostname (reverse DNS for IPs)
@@ -640,56 +651,86 @@ def _format_context(context):
 _FULL_HELP = [
     "  ping-bulk — keyboard reference   [?/q/Esc] close  [/] search  [n/N] next/prev  [A] all bindings",
     "-DIVIDER-",
+    "  Ping history  ([H] cycle: success / rtt / scaled)",
+    "  Symbols:  [X:red = timeout]          [?:brightred = process error]     \\[' ' = no data in sync mode]",
+    "  RTT time: [green:green fast (<50 ms)]  [yellow:yellow slow (≥50 ms)]  [magenta:magenta ≥100 ms]",
+    "  Ping history modes:",
+    "     success   [.:green = reply] ",
+    "     rtt       integer ms per ping:  [3:green = 3 ms]     [57:yellow = 57 ms]",
+    "     scaled    0–9 in 10 ms steps:   [0:green = 0–40 ms]  [5:yellow = 50–90 ms]  [>:magenta = ≥100 ms]",
+    "-DIVIDER-",
     "  Hotkeys",
-    "  [q]/[Q]               (:quit)  quit",
-    "  [D]                     (:dns)   cycle DNS display mode",
-    "  [s]                     (:stats) cycle stats column",
-    "  [o]/[O]               (:sort / :sort reverse)  cycle sort order forward / backward",
-    "  [H]                     (:ping-view)  cycle ping-history display mode",
-    "  [S]                     (:sync-history)  toggle sync-history (wall-clock alignment)",
-    "  [p]                     (:pause-selected)  pause/unpause selected host or section",
-    "  [P]                     (:pause)  toggle global pause (all monitors)",
-    "  [↑]/[↓] ([k]/[j])  (:select up/down)  navigate host list",
-    "  [g][g]                  (:select first)  jump to first host",
-    "  [G]                     (:select last)   jump to last host",
-    "  [Enter]                 (:details)  show detailed stats for highlighted host",
-    "  [Space]                 (:seen)  insert 'seen' marker (or :fold toggle on section)",
-    "  [C]                     (:clear)  clear event log",
-    "  [Esc]                   (:select none)  clear host selection + return to live history",
-    "  [:]                     open command line",
-    "  [?]                     (:help)  show this help  ([A] = show all bindings)",
+    "  [q]/[Q]               (:quit)                            quit",
+    "  [D]                   (:dns)                             cycle DNS display mode",
+    "  [s]                   (:stats)                           cycle stats column",
+    "  [o]/[O]               (:sort / :sort reverse)            cycle sort order forward / backward",
+    "  [H]                   (:ping-view)                       cycle ping-history display mode",
+    "  [S]                   (:sync-history)                    toggle sync-history (wall-clock alignment)",
+    "  [p]                   (:pause-selected)                  pause/unpause selected host or section",
+    "  [P]                   (:pause)                           toggle global pause (all monitors)",
+    "  [↑]/[↓] ([k]/[j])     (:select up/down)                  navigate host list",
+    "  [g][g]                (:select first)                    jump to first host",
+    "  [G]                   (:select last)                     jump to last host",
+    "  [Enter]               (:details)                         show detailed stats for highlighted host",
+    "  [Space]               (:seen)                            insert 'seen' marker (or :fold toggle on section)",
+    "  [C]                   (:clear)                           clear event log",
+    "  [Esc]                 (:select none)                     clear host selection + return to live history",
+    "  [?]                   (:help)                            show this help  ([A] = show all bindings)",
     "  [←]/[→]               (:scroll ping-history half/half-)  scroll history ← older / → live",
     "  [Ctrl+←]/[Ctrl+→]     (:scroll ping-history full/full-)  scroll history ← older (page) / → live (page)",
-    "  [Esc] (in history)     (:scroll ping-history reset)  return to live view",
-    "  [↑]/[↓]               (:scroll event-history page/page-)  scroll event log up / down",
-    "  [PgUp]/[PgDn]         (:scroll event-history page/page-)  scroll event log by page",
-    "  [Ctrl+B]/[Ctrl+F]     (:scroll event-history page/page-)  vim-style event log scroll",
+    "  [Esc] (in history)    (:scroll ping-history reset)       return to live view",
+    "  [↑]/[↓]               (:scroll event-history page/page-) scroll event log up / down",
+    "  [PgUp]/[PgDn]         (:scroll event-history page/page-) scroll event log by page",
+    "  [Ctrl+B]/[Ctrl+F]     (:scroll event-history page/page-) vim-style event log scroll",
+    "  [:]                                                      open command line",
     "-DIVIDER-",
     "  Search",
-    "  [/]   open search  (host selected → search hostnames/IPs; no selection → search event log)",
-    "  [n]/[N]  next / previous match (wraps)",
-    "  [Enter]  confirm + jump to first match   [Esc]  cancel search",
-    "  Section folding  (highlight a section header, then press)",
+    "  [/]     open search  (host selected → search hostnames/IPs; no selection → search event log)",
+    "  [n]/[N] next / previous match (wraps)",
+    "  [Enter] confirm + jump to first match",
+    "  [Esc]   cancel search",
     "-DIVIDER-",
-    "  Section folding",
-    "  [za]/[Space]    (:fold toggle)        toggle fold of highlighted section",
+    "  Folding",
+    "  [[\\]/zR]]        (:fold open-all)          open (unfold) ALL sections",
+    "  [[\\[/zM]]        (:fold close-all)         close (fold) ALL sections",
+    "  [z\\[]            (:fold close-healthy)     fold sections where all hosts are up",
+    "  [z\\]]            (:fold close-unhealthy)   fold sections where any host is down",
+    "",
+    "  Section folding  (highlight a section header, then press)",
+    "  [za]/[Space]    (:fold toggle)            toggle fold of highlighted section",
     "  [zA]/[Ctrl+Spc] (:fold toggle-recursive)  toggle fold recursively",
-    "  [zo]            (:fold open)          open (unfold) highlighted section",
-    "  [zO]            (:fold open-recursive)  open section and all sub-sections",
-    "  [zc]            (:fold close)         close (fold) highlighted section",
-    "  [zC]            (:fold close-recursive)  close section and all sub-sections",
-    "  [zR]/[\\]]      (:fold open-all)      open (unfold) ALL sections",
-    "  [zM]/[\\[]      (:fold close-all)     close (fold) ALL sections",
-    "  [zr]            (:fold open-level)    open one fold level (deepest closed)",
-    "  [zm]            (:fold close-level)   close one fold level (shallowest open)",
-    "  [z\\[]          (:fold close-healthy)   fold sections where all hosts are up",
-    "  [z\\]]          (:fold close-unhealthy) fold sections where any host is down",
+    "  [zo]            (:fold open)              open (unfold) highlighted section",
+    "  [zO]            (:fold open-recursive)    open section and all sub-sections",
+    "  [zc]            (:fold close)             close (fold) highlighted section",
+    "  [zC]            (:fold close-recursive)   close section and all sub-sections",
+    "  [zr]            (:fold open-level)        open one fold level (deepest closed)",
+    "  [zm]            (:fold close-level)       close one fold level (shallowest open)",
+    "",
     "  (type '[z]' → [z] appears bottom-right → press second key)",
     "-DIVIDER-",
     "  Commands",
-    "  :q  :quit                 quit",
-    "  :ping <host>              add a new host to monitor",
+    "  :ping <host>\\[:port]       add a new host to monitor  (port → TCP connect check)",
+    "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
+    "  :remote-ping \\[ssh-opts] <relay> <target>  remote ping (runs on relay via SSH)",
     "  :source <file>            load hosts/commands from file",
+    "",
+    "",
+    "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
+    "                            ip-pat may use brace expansion; \\N in host = brace group N",
+    "                            :remote-ping user@hostname resolves hostname, preserves username",
+    "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
+    "",
+    "  :with remote-ping \\[ssh-opts] <relay>      open block; host lines → :remote-ping commands",
+    "  :with prog-options <prog>                   open :prog-options block; inner lines are <glob> [opts]",
+    "  :end                                        close :with, :for, or :if block (hosts file only)",
+    "  :q  :quit                 quit",
+    "",
+    "  :let <name> \\[value]        define a variable; $name / ${name} substituted in hosts file and loops",
+
+    "  :let name{1..N} val-$1    indexed variables (brace expansion on name, eager $N in value)",
+    "  $name or ${name}          substitute value; empty string if undefined (${name} for disambiguation)",
+    "  ${name_$1}                two-level: expand $N first, then look up the resulting name",
+    "",
     f"  :set {'|'.join(p.name for p in SET_PARAMS)} \\[value]",
     "                            set display modes; omit value to cycle/show",
     "                            log-size / history-size: numeric value only",
@@ -700,11 +741,6 @@ _FULL_HELP = [
 
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
-    "  :let <name> \\[value]        define a variable; $name / ${name} substituted in hosts file and loops",
-
-    "  :let name{1..N} val-$1    indexed variables (brace expansion on name, eager $N in value)",
-    "  $name or ${name}          substitute value; empty string if undefined (${name} for disambiguation)",
-    "  ${name_$1}                two-level: expand $N first, then look up the resulting name",
     "  :log \\[file|off]           show active log file, set/save log to file, or disable logging",
 
     "  :fold-all                 fold (collapse) all sections",
@@ -712,17 +748,11 @@ _FULL_HELP = [
     "  :fold close-healthy       fold sections where all hosts are currently up    (z[)",
     "  :fold close-unhealthy     fold sections where any host is currently down    (z])",
     "  :saveconfig               save current settings to config file",
-    "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
-    "                            ip-pat may use brace expansion; \\N in host = brace group N",
-    "                            :remote-ping user@hostname resolves hostname, preserves username",
-    "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
-    "  :remote-ping \\[ssh-opts] <relay> <target>  remote ping (runs on relay via SSH)",
-    "  :with remote-ping \\[ssh-opts] <relay>      open block; host lines → :remote-ping commands",
-    "  :with prog-options <prog>                   open :prog-options block; inner lines are <glob> [opts]",
-    "  :end                                        close :with, :for, or :if block (hosts file only)",
-    "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
-    "  :help  or  ?              show this help",
+    "  :help                     show this help",
     "-DIVIDER-",
+    "  <host>                    ICMP ping check in hosts file (e.g. example.com or 1.1.1.1)",
+    "  <host>:<port>             TCP port check in hosts file  (e.g. example.com:80 or example.com:https)",
+    "",
     "  Section headers  (hosts file)",
     "  ## Title        level-1 header  (also :title Title)",
     "  ### Title       level-2 header  (also :title2 Title) — indented 2 spaces",
@@ -5672,17 +5702,74 @@ class Application:
                 col += len(sep)
 
     @staticmethod
+    def _hint_text_width(text):
+        """Return the rendered column width of *text* as drawn by _draw_hint_text.
+
+        Mirrors the parser in _draw_hint_text without touching curses, so callers
+        can compute the visual width of a line for layout / sizing purposes.
+        Color annotations (``key:colorname``) are stripped — they contribute no
+        visible columns.  The ``|`` no-space separator and ``\\[`` escapes are
+        handled identically to the renderer.
+        """
+        width = 0
+        i = 0
+        while i < len(text):
+            ch = text[i]
+            if ch == '\\' and i + 1 < len(text) and text[i + 1] == '[':
+                width += 1   # literal '['
+                i += 2
+            elif ch == '[':
+                width += 1   # opening '['
+                i += 1
+                token = []
+                while i < len(text) and text[i] != ']':
+                    if text[i] == '\\' and i + 1 < len(text) and text[i + 1] in '[]':
+                        token.append(text[i + 1])
+                        i += 2
+                    else:
+                        token.append(text[i])
+                        i += 1
+                content = ''.join(token)
+                pipe_pos = content.find('|')
+                space_pos = content.find(' ')
+                if pipe_pos != -1 and (space_pos == -1 or pipe_pos < space_pos):
+                    key_part, desc_part = content[:pipe_pos], content[pipe_pos + 1:]
+                elif space_pos == -1:
+                    key_part, desc_part = content, ''
+                else:
+                    key_part, desc_part = content[:space_pos], content[space_pos:]
+                # Strip optional colour annotation (e.g. ".:green" → ".")
+                colon = key_part.rfind(':')
+                if colon > 0 and key_part[colon + 1:] in _HINT_KEY_COLORS:
+                    key_part = key_part[:colon]
+                # Count '/' separators as single chars between sub-keys
+                sub_keys = key_part.split('/')
+                if len(sub_keys) > 1 and all(sub_keys):
+                    width += len(key_part)   # chars + '/' separators already counted
+                else:
+                    width += len(key_part)
+                width += len(desc_part)
+                if i < len(text):   # closing ']'
+                    width += 1
+                    i += 1
+            else:
+                width += 1
+                i += 1
+        return width
+
+    @staticmethod
     def _draw_hint_text(stdscr, row, col, text, width):
         """Render *text* onto *stdscr* at (*row*, *col*) with hotkey colouring.
 
         Tokens of the form ``[key desc]`` are parsed:
           - The outer ``[`` and ``]`` are drawn in the default colour.
-          - The *key* part (everything before the first space inside the token)
-            is drawn in white/bold (``color_pair(4) | A_BOLD``).
-          - The *desc* part (from the first space to ``]``) is drawn in the
-            default colour.
-          - ``\\[`` and ``\\]`` inside a token represent literal bracket
-            characters that are part of the key (e.g. ``\\[`` → ``[``).
+          - The *key* part (everything before the first space or ``|``) is drawn
+            in white/bold (``color_pair(4) | A_BOLD``) by default.
+          - An optional colour annotation ``key:colorname`` overrides the key
+            colour; recognised names: green red yellow magenta cyan brightred.
+            Example: ``[.:green = reply]`` draws ``.`` in green.
+          - The *desc* part (after the separator) is drawn in the default colour.
+          - ``\\[`` and ``\\]`` inside a token represent literal bracket chars.
         Plain text outside tokens is drawn in the default colour.
 
         Returns the column position after the last character drawn.
@@ -5721,6 +5808,19 @@ class Application:
                     key_part, desc_part = content, ''
                 else:
                     key_part, desc_part = content[:space_pos], content[space_pos:]
+                # Optional colour annotation: [key:colorname desc]
+                # Resolve before '/' splitting so each sub-key shares the same colour.
+                colon = key_part.rfind(':')
+                if colon > 0:
+                    _cname = key_part[colon + 1:]
+                    _cpair, _cextra = _HINT_KEY_COLORS.get(_cname, (None, 0))
+                    if _cpair is not None:
+                        key_part = key_part[:colon]
+                        key_attr = curses.color_pair(_cpair) | _cextra
+                    else:
+                        key_attr = curses.color_pair(4) | curses.A_BOLD
+                else:
+                    key_attr = curses.color_pair(4) | curses.A_BOLD
                 # Support "key1/key2" notation: split on '/' so each sub-key is
                 # bold but the separator is normal.  Guard: if splitting yields any
                 # empty part (e.g. key_part IS '/'), treat the whole thing as one key.
@@ -5733,12 +5833,12 @@ class Application:
                                 col += 1
                         for tc in sk:
                             if col < width - 1:
-                                stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                                stdscr.addstr(row, col, tc, key_attr)
                                 col += 1
                 else:
                     for tc in key_part:
                         if col < width - 1:
-                            stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                            stdscr.addstr(row, col, tc, key_attr)
                             col += 1
                 for tc in desc_part:
                     if col < width - 1:
@@ -6003,8 +6103,19 @@ class Application:
                 # Initial fill phase: grow from 0 to ping_length
                 display_count = max_ping_count
             else:
-                # Sweep phase: snap to half, grow back to ping_length-1, repeat
-                display_count = half + ((max_ping_count - ping_length) % half)
+                # Sweep phase: snap to half, grow back to ping_length-1, repeat.
+                # Only animate when all monitors have uniform history (no visible
+                # failures) — if any host has X/?  the variation already shows
+                # activity, so we keep the full bar to preserve context.
+                _all_healthy = not any(
+                    any(v is None or v == 'ERR'
+                        for v in list(m.history)[-ping_length:])
+                    for m in self.monitors
+                )
+                if _all_healthy:
+                    display_count = half + ((max_ping_count - ping_length) % half)
+                else:
+                    display_count = ping_length
 
         # Section stack for hierarchical fold tracking (shallowest first)
         section_stack = []
@@ -8717,9 +8828,9 @@ class Application:
         max_scroll      = max(0, len(lines) - visible_count)
         scroll_offset   = max(0, min(scroll_offset, max_scroll))
 
-        # Compute maximum content width across all non-divider lines for h-scroll cap.
+        # Compute maximum rendered content width across all non-divider lines for h-scroll cap.
         max_line_w = max(
-            (len(line) for line in lines if line != '-DIVIDER-'),
+            (Application._hint_text_width(line) for line in lines if line != '-DIVIDER-'),
             default=0,
         )
         max_h_scroll = max(0, max_line_w - inner_w)
@@ -9017,7 +9128,10 @@ class Application:
                     elif selected_line >= self.help_scroll + vis:
                         self.help_scroll = selected_line - vis + 1
 
-        ideal_w = max(len(line) for line in lines if line != "-DIVIDER-")
+        ideal_w = max(
+            (Application._hint_text_width(line) for line in lines if line != "-DIVIDER-"),
+            default=20,
+        )
         inner_w = min(ideal_w, max(20, width - 4))
         self.help_scroll, self.help_h_scroll = self._draw_overlay_box(
             stdscr, height, width, lines, self.help_scroll, inner_w,
