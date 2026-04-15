@@ -196,13 +196,16 @@ HISTORY_MODES = ['success', 'rtt', 'scaled']
 # Color annotations for _draw_hint_text: [key:colorname desc]
 # Maps color name → (color_pair_id, extra_attr)
 _HINT_KEY_COLORS = {
-    'green':    (1, 0),
-    'red':      (2, 0),
-    'yellow':   (3, 0),
-    'magenta':  (5, 0),
-    'cyan':     (6, 0),
+    'green':     (1, 0),
+    'red':       (2, 0),
+    'yellow':    (3, 0),
+    'magenta':   (5, 0),
+    'cyan':      (6, 0),
     'brightred': (2, curses.A_BOLD),
+    'tabactive': (0, curses.A_REVERSE),  # full-token highlight
 }
+# Colors where entire token (brackets + key + desc) shares the same attr
+_HINT_KEY_FULL_TOKENS = frozenset({'tabactive'})
 
 # DNS display modes cycled with [d]/[D]
 # off      — show the address/name exactly as given on the command line
@@ -552,6 +555,7 @@ _KEY_NAME_MAP = {
     'home': curses.KEY_HOME, 'end': curses.KEY_END,
     'c-left': curses.KEY_SLEFT, 'c-right': curses.KEY_SRIGHT,
     'c-space': 0, 'c-[': 27,
+    's-tab': curses.KEY_BTAB,
 }
 
 # Reverse: curses key code → display name (for _format_key_notation)
@@ -567,6 +571,7 @@ _KEY_CODE_NAMES = {
     curses.KEY_PPAGE: '<PageUp>', curses.KEY_NPAGE: '<PageDown>',
     curses.KEY_HOME: '<Home>', curses.KEY_END: '<End>',
     0: '<C-Space>',
+    curses.KEY_BTAB: '<S-Tab>',
 }
 
 
@@ -801,6 +806,250 @@ _FULL_HELP = [
 # Keep the help header in sync with the actual program name
 if _PROG_NAME != 'ping-bulk':
     _FULL_HELP[0] = _FULL_HELP[0].replace('ping-bulk', _PROG_NAME, 1)
+
+
+def _join_help_fragments(*groups):
+    """Join fragment lists with -DIVIDER- separators."""
+    result = []
+    for g in groups:
+        if result:
+            result.append('-DIVIDER-')
+        result.extend(g)
+    return result
+
+
+_HELP_LEGEND = [
+    "  Ping history  ([H] cycle: success / rtt / scaled)",
+    "  Symbols:  [X:red = timeout]          [?:brightred = process error]     \\[' ' = no data in sync mode]",
+    "  RTT time: [green:green fast (<50 ms)]  [yellow:yellow slow (≥50 ms)]  [magenta:magenta ≥100 ms]",
+    "  Ping history modes:",
+    "     success   [.:green = reply] ",
+    "     rtt       integer ms per ping:  [3:green = 3 ms]     [57:yellow = 57 ms]",
+    "     scaled    0–9 in 10 ms steps:   [0:green = 0–40 ms]  [5:yellow = 50–90 ms]  [>:magenta = ≥100 ms]",
+]
+
+_HELP_HOTKEYS = [
+    "  Hotkeys",
+    "  [q]/[Q]               (:quit)                            quit",
+    "  [D]                   (:dns)                             cycle DNS display mode",
+    "  [s]                   (:stats)                           cycle stats column",
+    "  [o]/[O]               (:sort / :sort reverse)            cycle sort order forward / backward",
+    "  [H]                   (:ping-view)                       cycle ping-history display mode",
+    "  [S]                   (:sync-history)                    toggle sync-history (wall-clock alignment)",
+    "  [p]                   (:pause-selected)                  pause/unpause selected host or section",
+    "  [P]                   (:pause)                           toggle global pause (all monitors)",
+    "  [↑]/[↓] ([k]/[j])     (:select up/down)                  navigate host list",
+    "  [g][g]                (:select first)                    jump to first host",
+    "  [G]                   (:select last)                     jump to last host",
+    "  [Enter]               (:details)                         show detailed stats for highlighted host",
+    "  [Space]               (:seen)                            insert 'seen' marker (or :fold toggle on section)",
+    "  [C]                   (:clear)                           clear event log",
+    "  [Esc]                 (:select none)                     clear host selection + return to live history",
+    "  [?]                   (:help)                            show this help",
+    "  [←]/[→]               (:scroll ping-history half/half-)  scroll history ← older / → live",
+    "  [Ctrl+←]/[Ctrl+→]     (:scroll ping-history full/full-)  scroll history ← older (page) / → live (page)",
+    "  [Esc] (in history)    (:scroll ping-history reset)       return to live view",
+    "  [↑]/[↓]               (:scroll event-history page/page-) scroll event log up / down",
+    "  [PgUp]/[PgDn]         (:scroll event-history page/page-) scroll event log by page",
+    "  [Ctrl+B]/[Ctrl+F]     (:scroll event-history page/page-) vim-style event log scroll",
+    "  [:]                                                      open command line",
+]
+
+_HELP_SEARCH = [
+    "  Search",
+    "  [/]     open search  (host selected → search hostnames/IPs; no selection → search event log)",
+    "  [n]/[N] next / previous match (wraps)",
+    "  [Enter] confirm + jump to first match",
+    "  [Esc]   cancel search",
+]
+
+_HELP_FOLDING = [
+    "  Folding",
+    "  [[\\]/zR]]        (:fold open-all)          open (unfold) ALL sections",
+    "  [[\\[/zM]]        (:fold close-all)         close (fold) ALL sections",
+    "  [z\\[]            (:fold close-healthy)     fold sections where all hosts are up",
+    "  [z\\]]            (:fold close-unhealthy)   fold sections where any host is down",
+    "",
+    "  Section folding  (highlight a section header, then press)",
+    "  [za]/[Space]    (:fold toggle)            toggle fold of highlighted section",
+    "  [zA]/[Ctrl+Spc] (:fold toggle-recursive)  toggle fold recursively",
+    "  [zo]            (:fold open)              open (unfold) highlighted section",
+    "  [zO]            (:fold open-recursive)    open section and all sub-sections",
+    "  [zc]            (:fold close)             close (fold) highlighted section",
+    "  [zC]            (:fold close-recursive)   close section and all sub-sections",
+    "  [zr]            (:fold open-level)        open one fold level (deepest closed)",
+    "  [zm]            (:fold close-level)       close one fold level (shallowest open)",
+    "",
+    "  (type '[z]' → [z] appears bottom-right → press second key)",
+]
+
+_HELP_CMDS_INTERACTIVE = [
+    "  Interactive commands",
+    f"  :set {'|'.join(p.name for p in SET_PARAMS)} \\[value]",
+    "                            set display modes; omit value to cycle/show",
+    "                            log-size / history-size: numeric value only",
+    "  :set stats last,avg,stdev  custom multi-column stats (comma-separated)",
+    "                            names: last down loss% avg min max stdev rx tx xx",
+    "  :set stats ,               clear custom stats, reset to off",
+    "  :pause \\[on|off]            toggle/set global pause (stop all pings)",
+    "  :seen                     insert 'seen' marker in event log",
+    "  :clear                    clear event log",
+    "  :log \\[file|off]           show active log file, set/save log to file, or disable logging",
+    "  :fold-all                 fold (collapse) all sections",
+    "  :unfold-all               unfold (expand) all sections",
+    "  :fold close-healthy       fold sections where all hosts are currently up    (z[)",
+    "  :fold close-unhealthy     fold sections where any host is currently down    (z])",
+    "  :saveconfig               save current settings to config file",
+    "  :help                     show this help",
+    "  :q  :quit                 quit",
+    "",
+    "  :edit                     open hosts file in external editor; reloads on save",
+    "  :filter \\[pattern]         filter hosts by glob pattern (bare string auto-wrapped as *pattern*)",
+    "  :filter --clear           remove active filter",
+    "  :search                   open host search  (same as [/])",
+    "  :search-next \\[prev]       jump to next / previous search match",
+    "  :autofold \\[on|off]        toggle autofold mode",
+    "  :ping-view \\[mode]          cycle or set ping-history display mode  (also [H])",
+]
+
+_HELP_CMDS_HOSTSFILE = [
+    "  Hosts file directives",
+    "  :ping <host>\\[:port]       add a new host to monitor  (port → TCP connect check)",
+    "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
+    "  :remote-ping \\[ssh-opts] <relay> <target>  remote ping (runs on relay via SSH)",
+    "  :source <file>            load hosts/commands from file",
+    "",
+    "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
+    "                            ip-pat may use brace expansion; \\N in host = brace group N",
+    "                            :remote-ping user@hostname resolves hostname, preserves username",
+    "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
+    "",
+    "  :with remote-ping \\[ssh-opts] <relay>      open block; host lines → :remote-ping commands",
+    "  :with prog-options <prog>                   open :prog-options block; inner lines are <glob> [opts]",
+    "  :end  (:done)                               close :with, :for, or :if block",
+    "",
+    "  :let <name> \\[value]        define a variable; $name / ${name} substituted in hosts file and loops",
+    "  :let name{1..N} val-$1    indexed variables (brace expansion on name, eager $N in value)",
+    "  $name or ${name}          substitute value; empty string if undefined (${name} for disambiguation)",
+    "  ${name_$1}                two-level: expand $N first, then look up the resulting name",
+    "",
+    "  :for pattern              loop over every expansion of pattern; $N / \\N = back-references",
+    "  :for r,n in pattern       named back-references: $r / \\1 = first group, $n / \\2 = second",
+    "  :end  (:done)             close :for block",
+    "",
+    "  :if COND -> BODY          inline conditional — body on same line, no :end needed",
+    "  :if COND                  open conditional block",
+    "  :elif COND                else-if branch",
+    "  :else                     else branch",
+    "  :end                      close :if block",
+    "  Condition syntax: VALUE in val1,val2,...  |  VALUE not in val1,val2,...",
+]
+
+_HELP_SSH = [
+    "  SSH connect  (requires tmux or screen)",
+    "  [c]            connect to highlighted host via SSH in a new pane/window",
+    "                 pre-fills :mux ssh <host> \\[opts from :prog-options ssh]",
+    "  :mux \\[-v|-h|-w] \\[cmd]  run cmd in split pane; no cmd = relaunch self in mux",
+    "  :tmux / :screen        same as :mux; name hints at preferred backend",
+    "  :term / :terminal      same as :mux but forces X/Wayland terminal window",
+    "  :set mux-split v|h|window          default split direction",
+    "  :set terminal auto|xterm             X terminal emulator for :term",
+]
+
+_HELP_SYNTAX = [
+    "  Hosts file syntax",
+    "  <host>                    ICMP ping check  (e.g. example.com or 1.1.1.1)",
+    "  <host>:<port>             TCP port check   (e.g. example.com:80 or example.com:https)",
+    "",
+    "  Section headers",
+    "  ## Title        level-1 header  (also :title Title)",
+    "  ### Title       level-2 header  (also :title2 Title) — indented 2 spaces",
+    "  #### Title      level-3 header  (also :title3 Title) — indented 4 spaces",
+    "  ##- Title       starts folded (also :title- / :title2- / :title3-)",
+    "  ##! Title       exempt from autofold (also :title! / :title2! / :title3!)",
+    "  ##-! Title      starts folded + exempt from autofold (modifiers combine)",
+    "  host ## label   inline label after hostname (## / ### / #### …)",
+    "  ?host           optional host — added only when a :resolv mapping exists",
+    "                  (useful in :for loops when some iterations lack a device)",
+    "  # comment       inline shell-style comment on any line incl. :resolv, :set",
+]
+
+_HELP_EXPANSION = [
+    "  Host / range expansion  (hosts file and :remote-ping target argument)",
+    "  10.0.0.{1,2,5}          brace list  → 10.0.0.1, 10.0.0.2, 10.0.0.5",
+    "  10.0.0.{1..4}           brace range → 10.0.0.1 … 10.0.0.4",
+    "  10.0.0.{1-4}            brace range → 10.0.0.1 … 10.0.0.4  (zsh style)",
+    "  10.{1..2}.0.{1,5}       multi-group → cartesian product (4 addresses)",
+    "  10.0.0.{10,11..12,14}   mixed       → 10.0.0.10, .11, .12, .14",
+    "  web{1..3}.example.com   brace range → web1.example.com … web3.example.com",
+    "  web{a,b,c}.example.com  brace list  → weba, webb, webc .example.com",
+    "  10.0.{1..2}.{10,2{1,2}} nested      → cartesian product (8 addresses)",
+]
+
+_HELP_BINDINGS = [
+    "  Key bindings",
+    "  :bind-key <key> <cmd>     bind key to command  (auto-execute)",
+    "  :bind-key <key> <cmd>...  bind key, fill command line for editing",
+    "  :bind-key <key>           query: show what is bound to <key>",
+    "  :bind-key                 list all user bindings",
+    "  :unbind-key <key>         remove a key binding",
+    "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
+    "  keys: a-z A-Z 0-9   <CR> <Esc> <Space> <C-x>  <Up>/<Down>/<Left>/<Right>",
+    "        <PageUp> <PageDown>  za zc zo …  (arbitrary multi-key sequences)",
+    "  %h = host  %i = IP  %r = connectable target  %d = SSH dest  %j = jump hosts",
+    "  %H = section hosts  %p = port  %s = section  %% = literal %",
+    "  %{H:,} = custom separator for multi-value variables",
+    "  \\\\; separates multiple commands: :bind-key x :set stats down \\\\; :set dns hostname",
+]
+
+
+def _strip_hint_markup(text):
+    """Strip _draw_hint_text markup for plain-text output (used by --help-full).
+
+    Converts: \\[ → [    [key:color desc] → [key desc]   [key|rest] → [keyrest]
+    """
+    result = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '\\' and i + 1 < len(text) and text[i + 1] == '[':
+            result.append('[')
+            i += 2
+        elif ch == '[':
+            result.append('[')
+            i += 1
+            token = []
+            while i < len(text) and text[i] != ']':
+                if text[i] == '\\' and i + 1 < len(text) and text[i + 1] in '[]':
+                    token.append(text[i + 1])
+                    i += 2
+                else:
+                    token.append(text[i])
+                    i += 1
+            content = ''.join(token)
+            pipe_pos = content.find('|')
+            space_pos = content.find(' ')
+            if pipe_pos != -1 and (space_pos == -1 or pipe_pos < space_pos):
+                key_part = content[:pipe_pos]
+                rest = content[pipe_pos + 1:]
+            elif space_pos == -1:
+                key_part = content
+                rest = ''
+            else:
+                key_part = content[:space_pos]
+                rest = content[space_pos:]
+            colon = key_part.rfind(':')
+            if colon > 0 and key_part[colon + 1:] in _HINT_KEY_COLORS:
+                key_part = key_part[:colon]
+            result.append(key_part + rest)
+            if i < len(text):
+                result.append(']')
+                i += 1
+        else:
+            result.append(ch)
+            i += 1
+    return ''.join(result)
+
 
 _EXAMPLE_HELP = """\
 #!/bin/sh
@@ -3322,6 +3571,9 @@ CMD_REGISTRY = [
     CmdDef(['help-toggle-settings'], '_cmd_help_toggle_settings', None,
            '',                    'toggle settings view in help overlay',
            completable=False),
+    CmdDef(['help-tab'],             '_cmd_help_tab', None,
+           '<0-5|next|prev>',        'switch help overlay tab',
+           completable=False),
     CmdDef(['settings-cursor'],      '_cmd_settings_cursor', None,
            '<up|down>',           'move cursor in settings overlay',
            completable=False),
@@ -3801,9 +4053,9 @@ class Application:
         self.cmd_history = []     # list of previously entered commands (oldest first)
         self._load_cmd_history()
         self.help_open = False    # True while the help overlay is visible
-        self.help_scroll = 0      # first visible line index in the help overlay
-        self.help_show_all = False      # True = show auto-generated full binding list
-        self.help_show_settings = False # True = show settings tab
+        self.help_tab = 0                # 0=Interactive 1=Hosts 2=Example 3=Commands 4=Bindings 5=Settings
+        self._tab_scroll = [0] * 6       # per-tab vertical scroll offsets
+        self._tab_h_scroll = [0] * 6     # per-tab horizontal scroll offsets
         self.help_search = ''            # current search query within help overlay
         self.help_search_active = False  # True while user is typing the search
         self.help_search_matches = []    # line indices in rendered lines that match
@@ -3818,7 +4070,6 @@ class Application:
         self.details_monitor = None  # PingMonitor instance whose details are shown
         self.details_scroll = 0   # vertical scroll offset for host details overlay
         self.details_h_scroll = 0 # horizontal scroll offset for host details overlay
-        self.help_h_scroll = 0    # horizontal scroll offset for help overlay
         # Search state
         self._search_query = ''      # '' = no active search
         self._search_mode  = 'hosts' # 'hosts' | 'log'
@@ -3883,6 +4134,44 @@ class Application:
                 self.add_event("hosts", f"warning: {value}")
             elif kind == 'error':
                 self.add_event("hosts", f"expansion error: {value}")
+
+    @property
+    def help_scroll(self):
+        return self._tab_scroll[self.help_tab]
+
+    @help_scroll.setter
+    def help_scroll(self, v):
+        self._tab_scroll[self.help_tab] = v
+
+    @property
+    def help_h_scroll(self):
+        return self._tab_h_scroll[self.help_tab]
+
+    @help_h_scroll.setter
+    def help_h_scroll(self, v):
+        self._tab_h_scroll[self.help_tab] = v
+
+    @property
+    def help_show_all(self):
+        return self.help_tab == 4
+
+    @help_show_all.setter
+    def help_show_all(self, v):
+        if v:
+            self.help_tab = 4
+        elif self.help_tab == 4:
+            self.help_tab = 0
+
+    @property
+    def help_show_settings(self):
+        return self.help_tab == 5
+
+    @help_show_settings.setter
+    def help_show_settings(self, v):
+        if v:
+            self.help_tab = 5
+        elif self.help_tab == 5:
+            self.help_tab = 0
 
     def add_event(self, category, message, level=None):
         """Add an event to the in-memory log and, if a log file is configured,
@@ -4855,8 +5144,14 @@ class Application:
         _mb('help', '?',       ':close',                   desc='close help overlay')
         _mb('help', '<Esc>',   ':close',                   desc='close help overlay')
         _mb('help', '<CR>',    ':close',                   desc='close help overlay')
-        _mb('help', 'A',       ':help-toggle-all',         desc='toggle all-bindings view')
-        _mb('help', 'S',       ':help-toggle-settings',    desc='toggle settings view')
+        _mb('help', '<Tab>',   ':help-tab next',            desc='next tab')
+        _mb('help', '<S-Tab>', ':help-tab prev',            desc='previous tab')
+        _mb('help', '1',       ':help-tab 0',               desc='Interactive tab')
+        _mb('help', '2',       ':help-tab 1',               desc='Hosts file tab')
+        _mb('help', '3',       ':help-tab 2',               desc='Example tab')
+        _mb('help', '4',       ':help-tab 3',               desc='Commands tab')
+        _mb('help', '5',       ':help-tab 4',               desc='Bindings tab')
+        _mb('help', '6',       ':help-tab 5',               desc='Settings tab')
         _mb('help', '<Up>',    ':scroll-overlay up',       desc='scroll up')
         _mb('help', '<Down>',  ':scroll-overlay down',     desc='scroll down')
         _mb('help', '<PgUp>',  ':scroll-overlay page-',    desc='scroll up one page')
@@ -5067,9 +5362,9 @@ class Application:
         return value
 
     def _cmd_bindkey_show_all(self):
-        """Open the help overlay in all-bindings ([A]) mode."""
+        """Open the help overlay on the Bindings tab."""
         self._cmd_help()
-        self.help_show_all = True
+        self.help_tab = 4
 
     def _cmd_bindkey(self, args=''):
         """Bind, unbind, or list key bindings.  Also dispatched by :unbind-key.
@@ -5786,6 +6081,7 @@ class Application:
                 col += 1
                 i += 2
             elif ch == '[':
+                open_bracket_col = col
                 stdscr.addstr(row, col, ch)
                 col += 1
                 i += 1
@@ -5818,9 +6114,14 @@ class Application:
                         key_part = key_part[:colon]
                         key_attr = curses.color_pair(_cpair) | _cextra
                     else:
+                        _cname = None
                         key_attr = curses.color_pair(4) | curses.A_BOLD
                 else:
+                    _cname = None
                     key_attr = curses.color_pair(4) | curses.A_BOLD
+                _full_token = _cname in _HINT_KEY_FULL_TOKENS if _cname else False
+                if _full_token:
+                    stdscr.addstr(row, open_bracket_col, '[', key_attr)
                 # Support "key1/key2" notation: split on '/' so each sub-key is
                 # bold but the separator is normal.  Guard: if splitting yields any
                 # empty part (e.g. key_part IS '/'), treat the whole thing as one key.
@@ -5842,11 +6143,11 @@ class Application:
                             col += 1
                 for tc in desc_part:
                     if col < width - 1:
-                        stdscr.addstr(row, col, tc)
+                        stdscr.addstr(row, col, tc, key_attr if _full_token else 0)
                         col += 1
                 if i < len(text):  # closing ']'
                     if col < width - 1:
-                        stdscr.addstr(row, col, ']')
+                        stdscr.addstr(row, col, ']', key_attr if _full_token else 0)
                         col += 1
                     i += 1
             else:
@@ -8104,8 +8405,7 @@ class Application:
     def _open_settings_overlay(self, param_name=''):
         """Open the help overlay in settings tab, optionally focused on a param."""
         self.help_open = True
-        self.help_show_settings = True
-        self.help_show_all = False
+        self.help_tab = 5
         self.help_search_active = False
         self.help_scroll = 0
         self.help_h_scroll = 0
@@ -8496,30 +8796,43 @@ class Application:
         each time the overlay is opened.
         """
         self.help_open = True
-        self.help_scroll = 0
-        self.help_h_scroll = 0
-        self.help_show_all = False
+        self.help_tab = 0
+        self._tab_scroll = [0] * 6
+        self._tab_h_scroll = [0] * 6
         self.help_search_active = False
         self._current_mode = 'help'
 
+    def _cmd_help_tab(self, args=''):
+        """Switch to a help tab: 'next', 'prev', or tab index 0-5."""
+        a = args.strip()
+        if a == 'next':
+            old_tab = self.help_tab
+            self.help_tab = (self.help_tab + 1) % 6
+        elif a == 'prev':
+            old_tab = self.help_tab
+            self.help_tab = (self.help_tab - 1) % 6
+        else:
+            try:
+                old_tab = self.help_tab
+                self.help_tab = int(a) % 6
+            except ValueError:
+                return
+        if self.help_tab != old_tab:
+            self.help_search = ''
+            self.help_search_matches = []
+            self.help_search_match_idx = 0
+
     def _cmd_help_toggle_all(self, args=''):
-        """Toggle between curated help and full auto-generated binding list."""
-        self.help_show_all = not self.help_show_all
-        if self.help_show_all:
-            self.help_show_settings = False
-        self.help_scroll = 0
+        """Switch to or away from the Bindings tab."""
+        self._cmd_help_tab('prev' if self.help_tab == 4 else '4')
 
     def _cmd_help_toggle_settings(self, args=''):
-        """Toggle the settings view in the help overlay."""
-        self.help_show_settings = not self.help_show_settings
-        if self.help_show_settings:
-            self.help_show_all = False
-        self.help_scroll = 0
-        self.settings_cursor = 0
+        """Switch to or away from the Settings tab."""
+        self._cmd_help_tab('prev' if self.help_tab == 5 else '5')
 
     def _cmd_settings_cursor(self, args=''):
         """Move cursor up or down in the settings overlay."""
-        if not (self.help_open and self.help_show_settings):
+        if not (self.help_open and self.help_tab == 5):
             return
         direction = args.strip()
         n = len(SET_PARAMS)
@@ -8546,7 +8859,7 @@ class Application:
 
     def _cmd_settings_apply(self, args=''):
         """Cycle the current setting value forward (Space/→) or backward (←) in settings overlay."""
-        if not (self.help_open and self.help_show_settings):
+        if not (self.help_open and self.help_tab == 5):
             return
         param = SET_PARAMS[self.settings_cursor]
         direction = -1 if args == 'prev' else 1
@@ -8559,7 +8872,7 @@ class Application:
 
     def _cmd_settings_edit(self, args=''):
         """Close settings overlay and open command line pre-filled with :set <name> <value>."""
-        if not (self.help_open and self.help_show_settings):
+        if not (self.help_open and self.help_tab == 5):
             return
         param = SET_PARAMS[self.settings_cursor]
         cur = param.get_current(self)
@@ -8935,6 +9248,73 @@ class Application:
 
         return scroll_offset, h_scroll
 
+    _TAB_NAMES = ('Interactive', 'Hosts file', 'Example', 'Commands', 'Bindings', 'Settings')
+
+    def _build_tab_header_line(self):
+        """Build the tab bar line for the top of the help overlay."""
+        parts = []
+        for i, name in enumerate(self._TAB_NAMES):
+            if i == self.help_tab:
+                parts.append(f'[{i + 1}:tabactive {name}]')
+            else:
+                parts.append(f'[{i + 1} {name}]')
+        return '  ' + '  '.join(parts)
+
+    def _build_tab_lines(self):
+        """Return content lines for the current help tab.
+
+        Replaces the old _build_help_lines() method.  Each tab starts with the
+        tab bar line followed by -DIVIDER- and then the tab-specific content.
+        """
+        header = self._build_tab_header_line()
+
+        if self.help_tab == 5:  # Settings
+            lines = self._build_settings_lines()
+            # Shift _settings_line_map keys by 2 (header + '-DIVIDER-' prepended).
+            self._settings_line_map = {k + 2: v for k, v in self._settings_line_map.items()}
+            return [header, '-DIVIDER-'] + lines
+
+        if self.help_tab == 4:  # Bindings
+            lines = self._build_all_bindings_lines()
+            return [header, '-DIVIDER-'] + lines
+
+        if self.help_tab == 2:  # Example
+            example_lines = _EXAMPLE_HELP.rstrip('\n').splitlines()
+            return [header, '-DIVIDER-'] + example_lines
+
+        if self.help_tab == 3:  # Commands
+            lines = _join_help_fragments(_HELP_CMDS_INTERACTIVE, _HELP_CMDS_HOSTSFILE)
+            return [header, '-DIVIDER-'] + lines
+
+        if self.help_tab == 1:  # Hosts file
+            lines = _join_help_fragments(
+                _HELP_SYNTAX, _HELP_EXPANSION, _HELP_BINDINGS, _HELP_CMDS_HOSTSFILE,
+            )
+            return [header, '-DIVIDER-'] + lines
+
+        # Tab 0: Interactive
+        lines = _join_help_fragments(
+            _HELP_LEGEND, _HELP_HOTKEYS, _HELP_SEARCH, _HELP_FOLDING,
+            _HELP_CMDS_INTERACTIVE, _HELP_SSH,
+        )
+        # Append custom user bindings (with --desc) at the end
+        by_mode = {}
+        for _keys, b in self._key_trie:
+            if b.origin == 'user' and b.desc:
+                by_mode.setdefault(b.mode or 'normal', []).append(
+                    (b.key_notation, b.desc))
+        if by_mode:
+            lines.append('-DIVIDER-')
+            lines.append('─ Custom bindings ─')
+            for mode in sorted(by_mode):
+                entries = by_mode[mode]
+                if entries:
+                    lines.append(f'  {mode} mode')
+                    for notation, desc in entries:
+                        lines.append(f'    {notation:<10} {desc}')
+
+        return [header, '-DIVIDER-'] + lines
+
     def _build_help_lines(self):
         """Return the content lines list for the help overlay.
 
@@ -8974,7 +9354,7 @@ class Application:
             self.help_search_matches = []
             self.help_search_match_idx = 0
             return
-        lines = self._build_help_lines()
+        lines = self._build_tab_lines()
         self.help_search_matches = [
             i for i, line in enumerate(lines)
             if line != '-DIVIDER-' and q in line.lower()
@@ -8982,7 +9362,7 @@ class Application:
         self.help_search_match_idx = 0
         if self.help_search_matches:
             self._help_search_scroll_to_current()
-            if self.help_show_settings:
+            if self.help_tab == 5:
                 self._sync_settings_cursor_to_match()
 
     def _help_search_jump(self, direction):
@@ -8992,7 +9372,7 @@ class Application:
         n = len(self.help_search_matches)
         self.help_search_match_idx = (self.help_search_match_idx + direction) % n
         self._help_search_scroll_to_current()
-        if self.help_show_settings:
+        if self.help_tab == 5:
             self._sync_settings_cursor_to_match()
 
     def _sync_settings_cursor_to_match(self):
@@ -9091,12 +9471,12 @@ class Application:
     def _draw_help_overlay(self, stdscr, height, width):
         """Draw the help overlay as a centered bordered popup with scroll support.
 
-        Normal view: curated _FULL_HELP + user-annotated custom bindings.
-        All-bindings view (help_show_all=True): auto-generated from full key trie.
-        Press [A] inside the overlay to toggle.  Press [/] to search.
+        Six tabs (Interactive/Hosts/Example/Commands/Bindings/Settings) built by
+        _build_tab_lines().  Tab navigation via [Tab]/[S-Tab] or number keys.
+        Press [/] to search within the current tab.
         """
         self._settings_content_width = max(20, width - 4)
-        lines = self._build_help_lines()
+        lines = self._build_tab_lines()
 
         # Search state for display
         current_match = None
@@ -9115,7 +9495,7 @@ class Application:
 
         # In settings mode, compute the cursor line to pass to the overlay renderer
         selected_line = None
-        if self.help_show_settings:
+        if self.help_tab == 5:
             selected_line = self._settings_param_line(self.settings_cursor)
             # Deferred scroll-to-cursor after _open_settings_overlay set cursor
             if getattr(self, '_settings_scroll_to_cursor', False):
@@ -9171,8 +9551,6 @@ class Application:
 
         line_map = {}
         lines = [
-            "  Settings  [?] help  [A] bindings  [S] settings",
-            "-DIVIDER-",
             "  [↑/↓] navigate  [Space] cycle value  [Enter] edit  [/] search",
             "-DIVIDER-",
             f"  {'Setting':<{C1}}{sep}{'Current':<{C2}}{sep}{'Values':<{C3}}{sep}Description",
@@ -9200,10 +9578,7 @@ class Application:
                 by_mode.setdefault(m, []).append((b.key_notation, b.commands,
                                                   b.context, b.origin))
 
-        lines = [
-            "  All key bindings  [A] back to help",
-            "-DIVIDER-",
-        ]
+        lines = []
         all_modes = sorted(by_mode, key=lambda m: (m != 'normal', m))
         for mode in all_modes:
             lines.append(f"  {mode} mode")
@@ -9632,13 +10007,13 @@ class Application:
                             self._help_search_jump(+1)
                         elif self.help_search and key == ord('N'):
                             self._help_search_jump(-1)
-                        elif self.help_show_settings and key in (curses.KEY_UP, ord('k')):
+                        elif self.help_tab == 5 and key in (curses.KEY_UP, ord('k')):
                             self._cmd_settings_cursor('up')
-                        elif self.help_show_settings and key in (curses.KEY_DOWN, ord('j')):
+                        elif self.help_tab == 5 and key in (curses.KEY_DOWN, ord('j')):
                             self._cmd_settings_cursor('down')
-                        elif self.help_show_settings and key == ord(' '):
+                        elif self.help_tab == 5 and key == ord(' '):
                             self._cmd_settings_apply()
-                        elif self.help_show_settings and key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+                        elif self.help_tab == 5 and key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                             self._cmd_settings_edit()
                         elif not self._dispatch_overlay_nav_key(key):
                             self._dispatch_mode_key('help', key)
@@ -9790,7 +10165,16 @@ press '?' inside the app for the full keyboard reference.\
     args = parser.parse_args()
 
     if args.help_full:
-        print(*['  ' + '-'*20 if x == "-DIVIDER-" else x for x in _FULL_HELP[1:]], sep='\n')
+        all_lines = _join_help_fragments(
+            _HELP_LEGEND, _HELP_HOTKEYS, _HELP_SEARCH, _HELP_FOLDING,
+            _HELP_CMDS_INTERACTIVE, _HELP_SSH,
+            _HELP_SYNTAX, _HELP_EXPANSION, _HELP_BINDINGS, _HELP_CMDS_HOSTSFILE,
+        )
+        for line in all_lines:
+            if line == '-DIVIDER-':
+                print('  ' + '-' * 20)
+            else:
+                print(_strip_hint_markup(line))
         sys.exit(0)
 
     if args.help_example:

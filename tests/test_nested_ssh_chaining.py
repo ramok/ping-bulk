@@ -426,7 +426,9 @@ def _make_app(pb, entries):
     app.cmd            = None
     app.cmd_history    = []
     app.help_open      = False
-    app.help_scroll    = 0
+    app.help_tab       = 0
+    app._tab_scroll    = [0] * 6
+    app._tab_h_scroll  = [0] * 6
     app.details_open   = False
     app.details_monitor = None
     app.details_scroll = 0

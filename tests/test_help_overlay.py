@@ -5,7 +5,7 @@ on the rendered pane content.
 
 Geometry recap
 --------------
-N = len(_FULL_HELP); inner_w is dynamic.
+N = number of lines in tab-0 content (built by _build_tab_lines for tab 0);
 NO_SCROLL_HEIGHT = N + 2  (smallest terminal height where all lines fit).
 
   height          | visible_count | max_scroll | indicator at scroll=0
@@ -39,8 +39,12 @@ _spec = importlib.util.spec_from_loader('ping_bulk', _loader)
 _mod = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_mod)
 
-# N: total number of help lines; NO_SCROLL_HEIGHT: smallest height that fits all.
-N = len(_mod._FULL_HELP)
+# N: total number of help lines for tab 0; NO_SCROLL_HEIGHT: smallest height that fits all.
+_tab0_fragments = _mod._join_help_fragments(
+    _mod._HELP_LEGEND, _mod._HELP_HOTKEYS, _mod._HELP_SEARCH, _mod._HELP_FOLDING,
+    _mod._HELP_CMDS_INTERACTIVE, _mod._HELP_SSH,
+)
+N = 2 + len(_tab0_fragments)  # +2 for tab bar header line and initial -DIVIDER-
 NO_SCROLL_HEIGHT = N + 2
 
 
@@ -51,8 +55,8 @@ def _indicator(total, height, scroll):
     last = scroll + visible
     return f'{first}-{last}/{total}'
 
-# Substring always present in the first help line, visible at scroll=0.
-OVERLAY_MARKER = '[?/q/Esc] close'
+# Substring always present in the tab bar at scroll=0.
+OVERLAY_MARKER = 'Interactive'
 
 # Prefix of the scroll indicator embedded in the top border.
 SCROLL_PREFIX = '↑↓'
@@ -105,7 +109,7 @@ class TestOpenClose:
 # ===========================================================================
 
 class TestScrollIndicatorAt40Rows:
-    """At 120×40 the overlay cannot show all 51 lines → scroll indicator present."""
+    """At 120×40 the overlay cannot show all lines → scroll indicator present."""
 
     def test_indicator_present_at_open(self, tmux_app_40):
         tmux_app_40.send_keys('?')
@@ -124,7 +128,7 @@ class TestScrollIndicatorAt40Rows:
         tmux_app_40.wait_for(_indicator(N, 40, 1))
 
     def test_npage_clamps_to_max_scroll(self, tmux_app_40):
-        """NPage adds 10; max_scroll=13 so no clamp at scroll=10."""
+        """NPage adds 10."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
         tmux_app_40.send_keys('NPage')
@@ -134,7 +138,7 @@ class TestScrollIndicatorAt40Rows:
         """After NPage to scroll=10, ↑ gives scroll=9."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
-        tmux_app_40.send_keys('NPage')   # → scroll=10 (< max_scroll=13, no clamp)
+        tmux_app_40.send_keys('NPage')
         tmux_app_40.wait_for(_indicator(N, 40, 10))
         tmux_app_40.send_keys('Up')
         tmux_app_40.wait_for(_indicator(N, 40, 9))
@@ -143,32 +147,32 @@ class TestScrollIndicatorAt40Rows:
         """PPage from scroll=10 subtracts 10, clamped to 0."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
-        tmux_app_40.send_keys('NPage')   # → scroll=10
+        tmux_app_40.send_keys('NPage')
         tmux_app_40.wait_for(_indicator(N, 40, 10))
-        tmux_app_40.send_keys('PPage')   # → 10-10 = 0
+        tmux_app_40.send_keys('PPage')
         tmux_app_40.wait_for(_indicator(N, 40, 0))
 
 
 # ===========================================================================
-# TestNoIndicatorAt50Rows
+# TestNoIndicatorAtNoScrollRows
 # ===========================================================================
 
 class TestNoIndicatorAt53Rows:
-    """At 120×53 all 51 lines fit (visible_count=51, max_scroll=0) → no scroll indicator."""
+    """At 120×NO_SCROLL_HEIGHT all lines fit (visible_count=N, max_scroll=0) → no scroll indicator."""
 
     def test_no_indicator_at_open(self, tmux_app_53):
         tmux_app_53.send_keys('?')
         tmux_app_53.wait_for(OVERLAY_MARKER)
         content = tmux_app_53.capture_pane()
         assert SCROLL_PREFIX not in content, (
-            f"Expected no scroll indicator at 53 rows, but found {SCROLL_PREFIX!r}.\n"
+            f"Expected no scroll indicator at NO_SCROLL_HEIGHT rows, but found {SCROLL_PREFIX!r}.\n"
             f"Pane content:\n{content}"
         )
 
     def test_all_content_visible(self, tmux_app_53):
         """When no scrolling is needed, content from the last section is visible."""
         tmux_app_53.send_keys('?')
-        tmux_app_53.wait_for('cartesian product')
+        tmux_app_53.wait_for(':set terminal')
 
 
 # ===========================================================================
@@ -176,7 +180,7 @@ class TestNoIndicatorAt53Rows:
 # ===========================================================================
 
 class TestScrollIndicatorAt15Rows:
-    """At 120×15 only 13 lines fit → large scroll range (max_scroll=38)."""
+    """At 120×15 only 13 lines fit → large scroll range."""
 
     def test_indicator_present_at_open(self, tmux_app_15):
         tmux_app_15.send_keys('?')
@@ -188,7 +192,7 @@ class TestScrollIndicatorAt15Rows:
         tmux_app_15.wait_for(_indicator(N, 15, 0))
 
     def test_npage_not_clamped(self, tmux_app_15):
-        """NPage adds 10; scroll=10 < max_scroll=N-13 so no clamping: '↑↓ 11-23/N'."""
+        """NPage adds 10; scroll=10 < max_scroll so no clamping."""
         tmux_app_15.send_keys('?')
         tmux_app_15.wait_for(SCROLL_PREFIX)
         tmux_app_15.send_keys('NPage')
@@ -210,13 +214,12 @@ class TestResize:
         tmux_app_40.wait_for(_indicator(N, 15, 0))
 
     def test_grow_removes_indicator(self, tmux_app_40):
-        """Grow 120×40 → 120×15 → NO_SCROLL_HEIGHT: indicator disappears at full size."""
+        """Grow 120×40 → NO_SCROLL_HEIGHT: indicator disappears at full size."""
         tmux_app_40.send_keys('?')
         tmux_app_40.wait_for(SCROLL_PREFIX)
         tmux_app_40.resize(width=120, height=15)
         tmux_app_40.wait_for(_indicator(N, 15, 0))
         tmux_app_40.resize(width=120, height=NO_SCROLL_HEIGHT)
         tmux_app_40.wait_for_absence(SCROLL_PREFIX)
-        # Overlay is still open — the close marker must still be visible.
+        # Overlay is still open — the marker must still be visible.
         tmux_app_40.wait_for(OVERLAY_MARKER)
-

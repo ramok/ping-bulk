@@ -20,7 +20,7 @@ import pytest
 # Substrings used as wait targets / absence markers.
 MENU_BAR       = 'DNS:'
 QUIT_MSG       = 'Press Ctrl-C again to quit'
-HELP_MARKER    = '[?/q/Esc] close'
+HELP_MARKER    = 'Interactive'
 CLEAR_PROMPT   = 'Clear event log? [y/N]:'
 
 
