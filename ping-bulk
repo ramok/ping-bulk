@@ -260,6 +260,12 @@ class SetParam:
         return vals[(idx + direction) % len(vals)]
 
 
+# Terminal candidates for the 'terminal' :set parameter (referenced by SET_PARAMS below).
+_XTERM_CANDIDATES = [
+    ('x-terminal-emulator', '-e'),   # Debian/Ubuntu alternatives default
+    ('xterm',               '-e'),   # fallback
+]
+
 # Single source of truth for all parameters accepted by the ':set' command.
 SET_PARAMS = [
     SetParam('dns',       '_cmd_dns',      lambda: [m.lower() for m in DNS_MODES],
@@ -728,14 +734,44 @@ _HELP_FOLDING = [
     "  (type '[z]' → [z] appears bottom-right → press second key)",
 ]
 
+def _build_set_param_help_lines():
+    """Generate :set help lines from SET_PARAMS — one subsection per parameter.
+
+    Each parameter gets its own entry (command + description), separated by
+    -DIVIDER- rules so the overlay renders them as distinct sections.
+    The data is read directly from SET_PARAMS so there is no duplication.
+    """
+    result = [
+        '  :set <param> \\[value]',
+        '      Omit value to cycle to the next option or display the current value.',
+    ]
+    for p in SET_PARAMS:
+        if p.values == '_complete_stats_arg':
+            choices = [m.lower() for m in STATS_MODES]
+        elif callable(p.values):
+            choices = p.values()
+        else:
+            choices = p.values or []
+        if choices:
+            val_str = '|'.join(str(c) for c in choices)
+            result.append(f'  :set {p.name} \\[{val_str}]')
+        else:
+            result.append(f'  :set {p.name}')
+        result.append(f'      {p.help}')
+        if p.name == 'stats':
+            result.extend([
+                '      Multi-column:  :set stats last,avg,stdev',
+                '      Column names:  last  down  loss%  avg  min  max  stdev  rx  tx  xx',
+                '      Clear:         :set stats ,',
+            ])
+    return result
+
+_HELP_SET_PARAMS = _build_set_param_help_lines()
+
 _HELP_CMDS_INTERACTIVE = [
     "  Interactive commands",
-    f"  :set {'|'.join(p.name for p in SET_PARAMS)} \\[value]",
-    "                            set display modes; omit value to cycle/show",
-    "                            log-size / history-size: numeric value only",
-    "  :set stats last,avg,stdev  custom multi-column stats (comma-separated)",
-    "                            names: last down loss% avg min max stdev rx tx xx",
-    "  :set stats ,               clear custom stats, reset to off",
+    *_HELP_SET_PARAMS,
+    '-DIVIDER-',
     "  :pause \\[on|off]            toggle/set global pause (stop all pings)",
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
@@ -3647,10 +3683,7 @@ class ScreenBackend(TerminalBackend):
 
 # Known X terminal emulators: (binary, separator_before_command)
 # separator None means command is appended directly (e.g. kitty).
-_XTERM_CANDIDATES = [
-    ('x-terminal-emulator', '-e'),   # Debian/Ubuntu alternatives default
-    ('xterm',               '-e'),   # fallback
-]
+# (See _XTERM_CANDIDATES defined earlier near SET_PARAMS.)
 
 
 class XTermBackend(TerminalBackend):
