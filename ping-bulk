@@ -9038,10 +9038,13 @@ class Application:
                 try:
                     stdscr.addstr(r, col0, '│', border_attr)
                     text = line[:inner_w].ljust(inner_w)[:inner_w]
-                    self._draw_hint_text(stdscr, r, col0 + 1, text,
-                                         col0 + 1 + inner_w + 1)
-                    if col0 + 1 + inner_w < width:
-                        stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
+                    end_col = self._draw_hint_text(stdscr, r, col0 + 1, text,
+                                                   col0 + 1 + inner_w + 1)
+                    right_border = col0 + 1 + inner_w
+                    if end_col < right_border:
+                        stdscr.addstr(r, end_col, ' ' * (right_border - end_col))
+                    if right_border < width:
+                        stdscr.addstr(r, right_border, '│', border_attr)
                 except curses.error:
                     pass
 
@@ -9072,11 +9075,15 @@ class Application:
                     # Cursor row in settings overlay: highlight whole line
                     if selected_line is not None and abs_line_idx == selected_line:
                         stdscr.addstr(r, col0 + 1, text, curses.A_BOLD | curses.A_REVERSE)
+                        end_col = col0 + 1 + len(text)
                     else:
-                        self._draw_hint_text(stdscr, r, col0 + 1, text,
-                                             col0 + 1 + inner_w + 1)
-                    if col0 + 1 + inner_w < width:
-                        stdscr.addstr(r, col0 + 1 + inner_w, '│', border_attr)
+                        end_col = self._draw_hint_text(stdscr, r, col0 + 1, text,
+                                                       col0 + 1 + inner_w + 1)
+                    right_border = col0 + 1 + inner_w
+                    if end_col < right_border:
+                        stdscr.addstr(r, end_col, ' ' * (right_border - end_col))
+                    if right_border < width:
+                        stdscr.addstr(r, right_border, '│', border_attr)
                     # Highlight search match substring via chgat (overwrites attrs
                     # in-place, so markup colouring from _draw_hint_text is preserved
                     # for non-matching characters).
@@ -9129,46 +9136,46 @@ class Application:
                 parts.append(f'[{i + 1}:tabactive {name}]')
             else:
                 parts.append(f'[{i + 1} {name}]')
-        return '  ' + '  '.join(parts)
+        return '  ' + ' '.join(parts)
 
-    # Number of lines always pinned at the top of the help overlay (tab bar + nav hint + divider).
-    _HELP_PINNED = 3
+    # Number of lines always pinned at the top of the help overlay (tab bar + divider).
+    _HELP_PINNED = 2
 
     def _build_tab_lines(self):
         """Return content lines for the current help tab.
 
         The first _HELP_PINNED lines are always shown at the top regardless of
-        scroll position: [tab bar, nav hint, -DIVIDER-].  The remaining lines
+        scroll position: [tab bar+nav, -DIVIDER-].  The remaining lines
         are the tab-specific scrollable content.
         """
         header = self._build_tab_header_line()
-        nav = '  [Tab] next tab   [S-Tab] prev tab   [1]-[6] jump to tab'
+        header += ' [Tab]/[S-Tab] ↔ tab'
 
         if self.help_tab == 5:  # Settings
             lines = self._build_settings_lines()
-            # Shift _settings_line_map keys by _HELP_PINNED (header + nav + '-DIVIDER-').
+            # Shift _settings_line_map keys by _HELP_PINNED (header + '-DIVIDER-').
             self._settings_line_map = {
                 k + self._HELP_PINNED: v for k, v in self._settings_line_map.items()
             }
-            return [header, nav, '-DIVIDER-'] + lines
+            return [header, '-DIVIDER-'] + lines
 
         if self.help_tab == 4:  # Bindings
             lines = self._build_all_bindings_lines()
-            return [header, nav, '-DIVIDER-'] + lines
+            return [header, '-DIVIDER-'] + lines
 
         if self.help_tab == 2:  # Example
             example_lines = _EXAMPLE_HELP.rstrip('\n').splitlines()
-            return [header, nav, '-DIVIDER-'] + example_lines
+            return [header, '-DIVIDER-'] + example_lines
 
         if self.help_tab == 3:  # Commands
             lines = _join_help_fragments(_HELP_CMDS_INTERACTIVE, _HELP_CMDS_HOSTSFILE)
-            return [header, nav, '-DIVIDER-'] + lines
+            return [header, '-DIVIDER-'] + lines
 
         if self.help_tab == 1:  # Hosts file
             lines = _join_help_fragments(
                 _HELP_SYNTAX, _HELP_EXPANSION, _HELP_BINDINGS, _HELP_CMDS_HOSTSFILE,
             )
-            return [header, nav, '-DIVIDER-'] + lines
+            return [header, '-DIVIDER-'] + lines
 
         # Tab 0: Interactive
         lines = _join_help_fragments(
@@ -9191,7 +9198,7 @@ class Application:
                     for notation, desc in entries:
                         lines.append(f'    {notation:<10} {desc}')
 
-        return [header, nav, '-DIVIDER-'] + lines
+        return [header, '-DIVIDER-'] + lines
 
     def _update_help_search(self):
         """Recompute help_search_matches from help_search and scroll to first match."""
