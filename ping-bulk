@@ -1647,8 +1647,14 @@ class Monitor(ABC):
         """
         return self.host
 
-    def resolve_dns(self):
-        """Resolve the host to both its IP address and its hostname."""
+    def resolve_dns(self, on_resolved=None):
+        """Resolve the host to both its IP address and its hostname.
+
+        on_resolved is an optional zero-argument callable invoked after
+        resolution completes.  The Application uses this to invalidate the
+        hostname-column width cache so the column expands to fit the newly
+        resolved names.
+        """
         target = self._dns_lookup_target
         try:
             ip = socket.gethostbyname(target)
@@ -1661,6 +1667,9 @@ class Monitor(ABC):
             self.resolved_hostname = socket.gethostbyaddr(lookup_addr)[0]
         except (socket.herror, socket.gaierror, OSError):
             self.resolved_hostname = None
+
+        if on_resolved is not None:
+            on_resolved()
 
     def _record_latency(self, v):
         """Update Welford online stats with a new latency sample *v* (ms).
@@ -4400,6 +4409,24 @@ class Application:
         self._name_col_dirty = True
         self._name_col_cache.clear()
 
+    def _invalidate_name_col_cache(self):
+        """Mark the hostname-column width cache stale.
+
+        Called from the DNS-resolve callback so the column expands to fit
+        newly resolved names on the next draw frame.
+        """
+        self._name_col_dirty = True
+        self._name_col_cache.clear()
+
+    def _fold_state_changed(self):
+        """Invalidate the column-width cache after any section fold/unfold.
+
+        The cache depends on which monitors are visible (folded monitors are
+        excluded), so it must be refreshed whenever fold state changes.
+        """
+        self._name_col_dirty = True
+        self._name_col_cache.clear()
+
     def start_monitoring(self):
         """Start all ping threads"""
         self._monitoring_started = True
@@ -4504,7 +4531,11 @@ class Application:
         if DNS_MODES[self.dns_mode] in ('hostname', 'ip', 'name+ip', 'ip+name'):
             for monitor in self.monitors:
                 if monitor.resolved_ip is None:
-                    threading.Thread(target=monitor.resolve_dns, daemon=True).start()
+                    threading.Thread(
+                        target=monitor.resolve_dns,
+                        kwargs={'on_resolved': self._invalidate_name_col_cache},
+                        daemon=True,
+                    ).start()
         if self._filter_query:
             self._update_filter_visible()
 
@@ -4642,6 +4673,7 @@ class Application:
         """
         section.folded = state
         if not recursive:
+            self._fold_state_changed()
             return
         in_subtree = False
         fold_count = 0
@@ -4656,6 +4688,7 @@ class Application:
                 fold_count += 1
             elif in_subtree and entry.level <= section.level:
                 break  # left the subtree
+        self._fold_state_changed()
         self.add_event("fold", f"recursive fold {section.title}: {fold_count} children {'folded' if state else 'unfolded'}")
 
     def _fold_all(self, state):
@@ -4663,6 +4696,7 @@ class Application:
         for entry in self.entries:
             if isinstance(entry, SectionLabel):
                 entry.folded = state
+        self._fold_state_changed()
 
     def _fold_healthy(self):
         """Fold every section whose direct-child active monitors are all alive.
@@ -4670,6 +4704,7 @@ class Application:
         Sections with no active (non-paused) monitors with known status are
         skipped.  Sections that already folded are left as-is.
         """
+        changed = False
         for idx, entry in enumerate(self.entries):
             if not isinstance(entry, SectionLabel):
                 continue
@@ -4679,7 +4714,11 @@ class Application:
             if not known:
                 continue
             if all(m.alive is True for m in known):
-                entry.folded = True
+                if not entry.folded:
+                    entry.folded = True
+                    changed = True
+        if changed:
+            self._fold_state_changed()
 
     def _fold_unhealthy(self):
         """Fold every section that has at least one direct-child active monitor down.
@@ -4687,6 +4726,7 @@ class Application:
         Sections with no active (non-paused) monitors with known status are
         skipped.  Sections that are already folded are left as-is.
         """
+        changed = False
         for idx, entry in enumerate(self.entries):
             if not isinstance(entry, SectionLabel):
                 continue
@@ -4696,7 +4736,11 @@ class Application:
             if not known:
                 continue
             if any(m.alive is False for m in known):
-                entry.folded = True
+                if not entry.folded:
+                    entry.folded = True
+                    changed = True
+        if changed:
+            self._fold_state_changed()
 
     def _fold_level_step(self, direction):
         """Open or close sections one level at a time (global, like zr/zm).
@@ -4715,6 +4759,7 @@ class Application:
                     for s in sections:
                         if s.level == lvl:
                             s.folded = True
+                    self._fold_state_changed()
                     break
         else:
             # zr — open the deepest level that has any closed section
@@ -4723,6 +4768,7 @@ class Application:
                     for s in sections:
                         if s.level == lvl:
                             s.folded = False
+                    self._fold_state_changed()
                     break
 
     def _do_fold_action(self, action):
@@ -5671,6 +5717,7 @@ class Application:
                 self._autofold_ts.pop(sid, None)
                 if entry.folded:
                     entry.folded = False
+                    self._fold_state_changed()
             elif all_alive:
                 if not entry.folded:
                     # Start or maintain countdown
@@ -5679,6 +5726,7 @@ class Application:
                     elif now - self._autofold_ts[sid] >= self.autofold_delay:
                         entry.folded = True
                         self._autofold_ts.pop(sid, None)
+                        self._fold_state_changed()
             else:
                 # Mixed alive/None — reset countdown
                 self._autofold_ts.pop(sid, None)
@@ -6787,20 +6835,37 @@ class Application:
                     _sec_stack.pop()
                 _sec_stack.append(e)
             elif isinstance(e, Monitor):
+                # Skip monitors whose immediate parent section is folded — they
+                # are not rendered and must not inflate the column width.
+                if _sec_stack and _sec_stack[-1].folded:
+                    continue
                 indent = _sec_stack[-1].level * 2 if _sec_stack else 0
                 max_name_len = max(max_name_len,
                                    indent + len(e.get_display_name(dns_mode_str)))
+        # Include section prefix + full title so titles are never truncated in
+        # normal (unfolded) state.  Do NOT add the count suffix length here —
+        # that was the original source of column inflation.
         max_section_len = max(
-            # Account for prefix "──_[+]_" (7) + title + potential suffix " (NNN folded)" (~13)
-            ((e.level - 1) * 2 + 7 + len(e.title) + 13
+            ((e.level - 1) * 2 + 7 + len(e.title)
              for e in self.entries if isinstance(e, SectionLabel)),
             default=0
         )
-        result = max(len("Hostname"), max_name_len, max_section_len)
+        # Guarantee at least 1 char of every section title remains visible even
+        # when the longest count suffix " (autofold lock)" (16 chars) is shown.
+        _MAX_SUFFIX = 16   # len(" (autofold lock)") — the longest count suffix
+        min_for_sections = max(
+            ((e.level - 1) * 2 + 7 + _MAX_SUFFIX + 2
+             for e in self.entries if isinstance(e, SectionLabel)),
+            default=0
+        )
+        # +2 so the longest element has ~4 spaces before stats
+        # (gap = stat_col − name_len = name_col_width + 1 − name_len).
+        result = max(len("Hostname"), max_name_len, max_section_len, min_for_sections) + 2
         self._name_col_cache[dns_mode_str] = result
-        if len(self._name_col_cache) >= len(DNS_MODES):
-            # All modes computed — clear dirty flag so future calls use cache.
-            self._name_col_dirty = False
+        # Clear the dirty flag immediately — the current mode is now cached.
+        # The flag is re-set by _invalidate_name_col_cache() whenever entries
+        # change or DNS resolves (via the on_resolved callback in resolve_dns).
+        self._name_col_dirty = False
         return result
 
     def _get_filtered_events(self) -> list:
@@ -8212,7 +8277,9 @@ class Application:
                     for monitor in self.monitors:
                         if monitor.resolved_ip is None:
                             threading.Thread(
-                                target=monitor.resolve_dns, daemon=True
+                                target=monitor.resolve_dns,
+                                kwargs={'on_resolved': self._invalidate_name_col_cache},
+                                daemon=True,
                             ).start()
                 if self._filter_query:
                     self._update_filter_visible()
