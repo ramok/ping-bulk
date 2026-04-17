@@ -716,8 +716,8 @@ _HELP_SEARCH = [
 
 _HELP_FOLDING = [
     "  Folding",
-    "  [[\\]/zR]]        (:fold open-all)          open (unfold) ALL sections",
-    "  [[\\[/zM]]        (:fold close-all)         close (fold) ALL sections",
+    "  [\\]/zR]          (:fold open-all)          open (unfold) ALL sections",
+    "  [\\[/zM]          (:fold close-all)         close (fold) ALL sections",
     "  [z\\[]            (:fold close-healthy)     fold sections where all hosts are up",
     "  [z\\]]            (:fold close-unhealthy)   fold sections where any host is down",
     "",
@@ -790,7 +790,7 @@ _HELP_CMDS_INTERACTIVE = [
     "  :search                   open host search  (same as [/])",
     "  :search-next \\[prev]       jump to next / previous search match",
     "  :autofold \\[on|off]        toggle autofold mode",
-    "  :ping-view \\[mode]          cycle or set ping-history display mode  (also [H])",
+    "  :ping-view \\[mode]         cycle or set ping-history display mode  (also [H])",
 ]
 
 _HELP_CMDS_HOSTSFILE = [
@@ -830,11 +830,12 @@ _HELP_SSH = [
     "  SSH connect  (requires tmux or screen)",
     "  [c]            connect to highlighted host via SSH in a new pane/window",
     "                 pre-fills :mux ssh <host> \\[opts from :prog-options ssh]",
-    "  :mux \\[-v|-h|-w] \\[cmd]  run cmd in split pane; no cmd = relaunch self in mux",
-    "  :tmux / :screen        same as :mux; name hints at preferred backend",
-    "  :term / :terminal      same as :mux but forces X/Wayland terminal window",
-    "  :set mux-split v|h|window          default split direction",
-    "  :set terminal auto|xterm             X terminal emulator for :term",
+    "",
+    "  :mux \\[-v|-h|-w] \\[cmd]   run cmd in split pane; no cmd = relaunch self in mux",
+    "  :tmux / :screen             same as :mux; name hints at preferred backend",
+    "  :term / :terminal           same as :mux but forces X/Wayland terminal window",
+    "  :set mux-split v|h|window   default split direction",
+    "  :set terminal auto|xterm    X terminal emulator for :term",
 ]
 
 _HELP_SYNTAX = [
@@ -5815,7 +5816,6 @@ class Application:
             (f"[D]NS:{DNS_MODES[self.dns_mode]}", self.dns_mode != 0),
             (stats_label, False),
             (f"[o]rder:{self.sort_by}", False),
-            (f"[H]istory:{HISTORY_MODES[self.history_mode]}", False),
             (f"[S]ync:{'on' if self.sync_history else 'off'}", self.sync_history),
             (pause_label, paused_count > 0),
             (f"[A]utofold:{'on' if self.autofold else 'off'}", self.autofold),
@@ -5833,46 +5833,56 @@ class Application:
             if col >= width - 1:
                 break
 
-            # Render each character; highlight hotkey (inside [...]) in white.
-            # Single-char hotkeys are shown without brackets; multi-char with brackets.
-            i = 0
-            while i < len(label) and col < width - 1:
-                ch = label[i]
-                if ch == '[':
-                    i += 1
-                    token = []
-                    while i < len(label) and label[i] != ']':
-                        token.append(label[i])
-                        i += 1
-                    if i < len(label):
-                        i += 1  # skip ']'
-                    if len(token) == 1:
-                        # Single-char hotkey: no brackets
-                        if col < width - 1:
-                            stdscr.addstr(row, col, token[0], curses.color_pair(4) | curses.A_BOLD)
-                            col += 1
-                    else:
-                        # Multi-char hotkey: keep brackets, highlight content
-                        if col < width - 1:
-                            stdscr.addstr(row, col, '[')
-                            col += 1
-                        for tc in token:
-                            if col < width - 1:
-                                stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
-                                col += 1
-                        if col < width - 1:
-                            stdscr.addstr(row, col, ']')
-                            col += 1
-                else:
-                    stdscr.addstr(row, col, ch)
-                    col += 1
-                    i += 1
+            # Render each menu item using shared menu-label renderer.
+            col = self._draw_menu_label(stdscr, row, col, label, width)
 
             # Separator
             sep = " | " if idx < len(menu_items) - 1 else ""
             if col + len(sep) < width:
                 stdscr.addstr(row, col, sep)
                 col += len(sep)
+
+    @staticmethod
+    def _draw_menu_label(stdscr, row, col, label, width):
+        """Render a menu-bar-style label with inline hotkey highlighting.
+
+        ``[X]`` tokens are rendered as just ``X`` in bold white (no brackets)
+        for single-char hotkeys, or ``[XY]`` with content bold for multi-char.
+        Plain text is drawn in the default colour.
+
+        Returns the column position after the last character drawn.
+        """
+        i = 0
+        while i < len(label) and col < width - 1:
+            ch = label[i]
+            if ch == '[':
+                i += 1
+                token = []
+                while i < len(label) and label[i] != ']':
+                    token.append(label[i])
+                    i += 1
+                if i < len(label):
+                    i += 1  # skip ']'
+                if len(token) == 1:
+                    if col < width - 1:
+                        stdscr.addstr(row, col, token[0], curses.color_pair(4) | curses.A_BOLD)
+                        col += 1
+                else:
+                    if col < width - 1:
+                        stdscr.addstr(row, col, '[')
+                        col += 1
+                    for tc in token:
+                        if col < width - 1:
+                            stdscr.addstr(row, col, tc, curses.color_pair(4) | curses.A_BOLD)
+                            col += 1
+                    if col < width - 1:
+                        stdscr.addstr(row, col, ']')
+                        col += 1
+            else:
+                stdscr.addstr(row, col, ch)
+                col += 1
+                i += 1
+        return col
 
     @staticmethod
     def _hint_text_width(text):
@@ -6179,12 +6189,13 @@ class Application:
                 col25_label = mode_name if show_single else "ms"
                 stdscr.addstr(start_row, stat_col, f"{col25_label:>{stat_field_w}}", curses.A_BOLD)
 
-            # Title includes elapsed time when running; rendered in white/bold.
+            # Title is plain text; [H] gets hotkey highlighting via _draw_hint_text.
+            mode_name = HISTORY_MODES[self.history_mode]
             if self._start_time is not None:
                 elapsed = time.monotonic() - self._start_time
-                hist_title = f"Ping history: {_format_updown_time(elapsed)}"
+                hist_title = f"Ping [H]istory:{mode_name}  {_format_updown_time(elapsed)}"
             else:
-                hist_title = "Ping history"
+                hist_title = f"Ping [H]istory:{mode_name}"
             hist_suffix = ""
 
             if not self.help_open and not self.details_open and self.cmd is None and self.prompt is None:
@@ -6200,9 +6211,11 @@ class Application:
             if self._filter_query:
                 hist_suffix += "  [f edit filter]"
 
-            # Draw title in white/bold, then hints with [key desc] colouring.
-            self._draw_column_header(stdscr, start_row, hist_col_effective,
-                                     hist_title, hist_suffix, width)
+            # Draw entire header in default colour; [key] tokens in suffix get key colouring.
+            col_after = self._draw_menu_label(stdscr, start_row, hist_col_effective,
+                                              hist_title, width)
+            self._draw_hint_text(stdscr, start_row, col_after,
+                                 hist_suffix, width)
 
             if show_all and all_stats_col < width:
                 all_header = (f"{'ms':>6}  {'Up/Down':>{updown_col_w}}  "
