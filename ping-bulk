@@ -211,7 +211,7 @@ _HINT_KEY_FULL_TOKENS = frozenset({'tabactive'})
 # off      — show the address/name exactly as given on the command line
 # hostname — resolve every entry to its hostname (reverse DNS for IPs)
 # ip       — resolve every entry to its IP address
-DNS_MODES = ['off', 'hostname', 'ip']
+DNS_MODES = ['off', 'hostname', 'ip', 'name+ip', 'ip+name']
 
 class SetParam:
     """Descriptor for a single ':set' sub-command parameter.
@@ -1705,6 +1705,16 @@ class Monitor(ABC):
             return self.resolved_hostname or self.host
         if dns_mode == "ip":
             return self.resolved_ip or self.host
+        if dns_mode == "name+ip":
+            name = self.resolved_hostname or self.host
+            if self.resolved_ip:
+                return f"{name} ({self.resolved_ip})"
+            return name
+        if dns_mode == "ip+name":
+            ip = self.resolved_ip or self.host
+            if self.resolved_hostname:
+                return f"{ip} ({self.resolved_hostname})"
+            return ip
         return self.host
 
     def get_history_string(self, length=50, offset=0, mode="success", cell_width=1,
@@ -1999,6 +2009,24 @@ class PortMonitor(Monitor):
         elif dns_mode == "ip" and self.port_num:
             port_part = str(self.port_num)
 
+        if dns_mode == "name+ip":
+            name_host = self.resolved_hostname or self._ping_host
+            name_port = self.port_name or self.port
+            ip_host   = self.resolved_ip or self._ping_host
+            ip_port   = str(self.port_num) if self.port_num else self.port
+            if self.resolved_ip:
+                return f"{name_host}:{name_port} ({ip_host}:{ip_port})"
+            return f"{name_host}:{name_port}"
+
+        if dns_mode == "ip+name":
+            ip_host   = self.resolved_ip or self._ping_host
+            ip_port   = str(self.port_num) if self.port_num else self.port
+            name_host = self.resolved_hostname or self._ping_host
+            name_port = self.port_name or self.port
+            if self.resolved_hostname:
+                return f"{ip_host}:{ip_port} ({name_host}:{name_port})"
+            return f"{ip_host}:{ip_port}"
+
         return f"{host_part}:{port_part}"
 
     def ping(self):
@@ -2220,6 +2248,8 @@ class SshPingMonitor(Monitor):
           off      — original aliases/names as defined by user (via :resolv reverse lookup)
           ip       — resolved IP addresses (from :resolv mappings)
           hostname — hostnames from reverse DNS lookup
+          name+ip  — hostname chain; ping-host shown as "hostname (IP)"
+          ip+name  — IP chain; ping-host shown as "IP (hostname)"
 
         The ping-host part is adjusted according to dns_mode:
           off      — self._ping_host_label (original name as typed on command line)
@@ -2233,20 +2263,16 @@ class SshPingMonitor(Monitor):
         # Add jump host chain respecting dns_mode
         jump_hosts = self._extract_jump_hosts(self._ssh_args)
         for jump_host in jump_hosts:
-            if dns_mode == 'ip':
-                # dns_mode='ip': show resolved IP
+            if dns_mode in ('ip', 'ip+name'):
                 display_parts.append(self._strip_username(jump_host))
             else:
-                # dns_mode='off' or 'hostname': reverse lookup to get alias
                 alias = self._reverse_lookup_alias(jump_host)
                 display_parts.append(self._strip_username(alias))
 
         # Add SSH destination (the host we SSH into before running ping)
-        if dns_mode == 'ip':
-            # dns_mode='ip': show resolved value
+        if dns_mode in ('ip', 'ip+name'):
             display_parts.append(self._strip_username(self._ssh_dest))
         else:
-            # dns_mode='off' or 'hostname': reverse lookup to get alias/label
             ssh_dest_display = self._reverse_lookup_alias(self._ssh_dest_label)
             display_parts.append(self._strip_username(ssh_dest_display))
 
@@ -2254,11 +2280,17 @@ class SshPingMonitor(Monitor):
         if dns_mode == 'ip':
             ping_part = self.resolved_ip or self._ping_host
         elif dns_mode == 'hostname':
-            # resolved_hostname is set by actual reverse-DNS resolution.
-            # Fall back to _reverse_lookup_alias so :resolv labels (## label)
-            # are honoured when no reverse-DNS result is available.
             ping_part = (self.resolved_hostname
                          or self._reverse_lookup_alias(self._ping_host_label))
+        elif dns_mode == 'name+ip':
+            name = (self.resolved_hostname
+                    or self._reverse_lookup_alias(self._ping_host_label))
+            ip   = self.resolved_ip
+            ping_part = f"{name} ({ip})" if ip else name
+        elif dns_mode == 'ip+name':
+            ip   = self.resolved_ip or self._ping_host
+            name = self.resolved_hostname
+            ping_part = f"{ip} ({name})" if name else ip
         else:
             ping_part = self._ping_host_label
         display_parts.append(self._strip_username(ping_part))
@@ -4458,7 +4490,7 @@ class Application:
                         display_name = monitor.get_display_name(dns_mode='off')
                         msg = "host down"
                         if monitor._pending_uptime is not None:
-                            msg += f". Up time: {self._format_downtime(monitor._pending_uptime)}"
+                            msg += f".    Up time:   {self._format_downtime(monitor._pending_uptime)}"
                             monitor._pending_uptime = None
                         self.add_event(display_name, msg)
             time.sleep(0.5)
@@ -4469,7 +4501,7 @@ class Application:
         self._name_col_dirty = True  # display names change with dns mode
         self._name_col_cache.clear()
         # Trigger resolution threads for monitors not yet resolved when entering a resolve mode
-        if DNS_MODES[self.dns_mode] in ('hostname', 'ip'):
+        if DNS_MODES[self.dns_mode] in ('hostname', 'ip', 'name+ip', 'ip+name'):
             for monitor in self.monitors:
                 if monitor.resolved_ip is None:
                     threading.Thread(target=monitor.resolve_dns, daemon=True).start()
@@ -8176,7 +8208,7 @@ class Application:
                 self.dns_mode = modes_lower.index(args.lower())
                 self._name_col_dirty = True
                 self._name_col_cache.clear()
-                if DNS_MODES[self.dns_mode] in ('hostname', 'ip'):
+                if DNS_MODES[self.dns_mode] in ('hostname', 'ip', 'name+ip', 'ip+name'):
                     for monitor in self.monitors:
                         if monitor.resolved_ip is None:
                             threading.Thread(
