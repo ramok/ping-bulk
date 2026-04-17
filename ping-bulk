@@ -1625,6 +1625,7 @@ class Monitor(ABC):
         self.down_since = None  # monotonic timestamp of when the host went down
         self.up_since = None    # monotonic timestamp of when the host came up
         self._down_pending_ts = None  # set when host first goes DOWN; cleared when logged or recovered
+        self._pending_uptime = None   # uptime duration (sec) captured at UP→DOWN transition
         self.ping_count = 0     # total pings ever sent (never capped, unlike history deque)
         self.running = True
         self.paused = False
@@ -4441,6 +4442,8 @@ class Application:
                         monitor.up_since = now
                     else:
                         # UP → DOWN transition: start pending timer, don't log yet.
+                        monitor._pending_uptime = (now - monitor.up_since
+                                                   if monitor.up_since is not None else None)
                         monitor.down_since = None
                         monitor._down_pending_ts = now
                         monitor.up_since = None
@@ -4453,7 +4456,11 @@ class Application:
                         monitor.down_since = monitor._down_pending_ts
                         monitor._down_pending_ts = None
                         display_name = monitor.get_display_name(dns_mode='off')
-                        self.add_event(display_name, "host down")
+                        msg = "host down"
+                        if monitor._pending_uptime is not None:
+                            msg += f". Up time: {self._format_downtime(monitor._pending_uptime)}"
+                            monitor._pending_uptime = None
+                        self.add_event(display_name, msg)
             time.sleep(0.5)
 
     def cycle_dns(self, direction=1):
