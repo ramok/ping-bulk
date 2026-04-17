@@ -13,8 +13,25 @@ Usage::
     sess.kill()
 """
 
+import os
 import subprocess
 import time
+
+# ---------------------------------------------------------------------------
+# Timeout scaling
+# ---------------------------------------------------------------------------
+# On a heavily loaded host the kernel scheduler may delay tmux subprocess
+# execution far beyond the default 5 s poll window.  Setting the environment
+# variable ``PING_BULK_TIMEOUT_SCALE`` (e.g. ``export PING_BULK_TIMEOUT_SCALE=3``)
+# multiplies every ``wait_for`` / ``wait_for_absence`` timeout by that factor
+# so the same test suite can be used on slow CI machines without per-call
+# changes.  The interval between polls is also scaled so the poll loop does
+# not spin excessively.
+#
+# Example:
+#   PING_BULK_TIMEOUT_SCALE=3 pytest -n auto tests/
+#
+TIMEOUT_SCALE: float = float(os.environ.get('PING_BULK_TIMEOUT_SCALE', '1.0'))
 
 
 class TmuxSession:
@@ -114,30 +131,38 @@ class TmuxSession:
     def wait_for(self, text: str, timeout: float = 5.0, interval: float = 0.1) -> None:
         """Poll ``capture_pane`` until *text* appears or *timeout* seconds pass.
 
-        Raises :exc:`TimeoutError` if *text* is not found within *timeout*.
+        Both *timeout* and *interval* are multiplied by :data:`TIMEOUT_SCALE`
+        so the whole suite can be slowed down on loaded hosts by exporting
+        ``PING_BULK_TIMEOUT_SCALE`` without touching individual call sites.
+
+        Raises :exc:`TimeoutError` if *text* is not found within the scaled timeout.
         """
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout * TIMEOUT_SCALE
+        scaled_interval = interval * TIMEOUT_SCALE
         while time.monotonic() < deadline:
             if text in self.capture_pane():
                 return
-            time.sleep(interval)
+            time.sleep(scaled_interval)
         raise TimeoutError(
-            f"Timed out after {timeout}s waiting for {text!r} in pane {self.name!r}.\n"
+            f"Timed out after {timeout * TIMEOUT_SCALE:.1f}s waiting for {text!r} in pane {self.name!r}.\n"
             f"Last pane content:\n{self.capture_pane()}"
         )
 
     def wait_for_absence(self, text: str, timeout: float = 5.0, interval: float = 0.1) -> None:
         """Poll until *text* is **absent** from the pane or *timeout* passes.
 
-        Raises :exc:`TimeoutError` if *text* is still present after *timeout*.
+        Both *timeout* and *interval* are multiplied by :data:`TIMEOUT_SCALE`.
+
+        Raises :exc:`TimeoutError` if *text* is still present after the scaled timeout.
         """
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout * TIMEOUT_SCALE
+        scaled_interval = interval * TIMEOUT_SCALE
         while time.monotonic() < deadline:
             if text not in self.capture_pane():
                 return
-            time.sleep(interval)
+            time.sleep(scaled_interval)
         raise TimeoutError(
-            f"Timed out after {timeout}s waiting for absence of {text!r} in pane {self.name!r}.\n"
+            f"Timed out after {timeout * TIMEOUT_SCALE:.1f}s waiting for absence of {text!r} in pane {self.name!r}.\n"
             f"Last pane content:\n{self.capture_pane()}"
         )
 

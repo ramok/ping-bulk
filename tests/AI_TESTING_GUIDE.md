@@ -40,8 +40,16 @@ Provides function-scoped `tmux` session fixtures so that each test gets a fresh,
 Since the test suite interacts with an actual `tmux` session, running tests in parallel previously caused collisions due to shared session names. The fixtures in `conftest.py` have been updated to generate isolated session names using a unique 8-character UUID for each test, resolving these collisions.
 
 ### How to Execute Tests in Parallel
-1. Install `pytest-xdist`: `pip install pytest-xdist`
-2. Run the test suite: `pytest -n auto` (or specify the number of workers, e.g., `pytest -n 4`)
+1. Create the venv (one-time): `make venv`  — or manually:
+   ```bash
+   python3 -m venv tests/venv
+   tests/venv/bin/pip install -r requirements-dev.txt
+   ```
+2. Run the test suite: `make test`  — or directly:
+   ```bash
+   tests/venv/bin/pytest -n auto tests/
+   ```
+   Specify worker count explicitly with `-n 4` if needed.
 
 ### Handling Hanging Tests
 If tests fail or are interrupted abruptly, orphaned `tmux` sessions might be left running in the background. This can cause subsequent test runs to fail or consume system resources.

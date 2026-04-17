@@ -1,2 +1,5 @@
 # Personal hosts files — not part of the project
 ping-bulk.*
+
+# Test virtual environment
+tests/venv/
