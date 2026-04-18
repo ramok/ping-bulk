@@ -421,23 +421,23 @@ Key bindings
 
 **Key notation**
 
-+-------------------+-----------------------------------+
-| Notation          | Meaning                           |
-+===================+===================================+
-| ``a``, ``1``, ``/``  | Single characters              |
-| ``za``, ``gg``    | Multi-key sequences               |
-| ``<C-x>``         | Ctrl+x                           |
-| ``<C-Space>``     | Ctrl+Space                        |
-| ``<CR>``          | Enter                             |
-| ``<Esc>``         | Escape                            |
-| ``<Space>``       | Space bar                         |
-| ``<Tab>``         | Tab                               |
-| ``<BS>``          | Backspace                         |
-| ``<Up>`` ``<Down>``  | Arrow keys                     |
-| ``<Left>`` ``<Right>``  | Arrow keys                  |
-| ``<PageUp>`` ``<PgDn>``  | Page navigation             |
-| ``<Home>`` ``<End>``  | Home / End                     |
-+-------------------+-----------------------------------+
++--------------------------+-----------------------------------+
+| Notation                 | Meaning                           |
++==========================+===================================+
+| ``a``, ``1``, ``/``      | Single characters                 |
+| ``za``, ``gg``           | Multi-key sequences               |
+| ``<C-x>``                | Ctrl+x                            |
+| ``<C-Space>``            | Ctrl+Space                        |
+| ``<CR>``                 | Enter                             |
+| ``<Esc>``                | Escape                            |
+| ``<Space>``              | Space bar                         |
+| ``<Tab>``                | Tab                               |
+| ``<BS>``                 | Backspace                         |
+| ``<Up>`` ``<Down>``      | Arrow keys                        |
+| ``<Left>`` ``<Right>``   | Arrow keys                        |
+| ``<PageUp>`` ``<PgDn>``  | Page navigation                   |
+| ``<Home>`` ``<End>``     | Home / End                        |
++--------------------------+-----------------------------------+
 
 **Variable expansion** (expanded at keypress time)
 

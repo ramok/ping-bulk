@@ -1,0 +1,5 @@
+ping-bulk (0.1.0) unstable; urgency=low
+
+  * Initial packaging.
+
+ -- ping-bulk maintainers <ping-bulk@example.com>  Fri, 18 Apr 2026 22:00:00 +0200

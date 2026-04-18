@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Build man page and HTML documentation
+	rst2man  doc/ping-bulk.rst doc/ping-bulk.1
+	rst2html doc/ping-bulk.rst doc/ping-bulk.html
+
+override_dh_auto_install:
+	# Nothing — files are placed by .install files
+
+override_dh_auto_test:
+	# Tests require tmux and network; skip during build

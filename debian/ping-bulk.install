@@ -1,0 +1,2 @@
+ping-bulk usr/bin
+examples/* usr/share/doc/ping-bulk/examples

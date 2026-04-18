@@ -1,0 +1,2 @@
+kiosk/ping-bulk-kiosk@.service lib/systemd/system
+kiosk/ping-bulk-kiosk.tmux.conf etc/ping-bulk

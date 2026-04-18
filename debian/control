@@ -1,0 +1,65 @@
+Source: ping-bulk
+Section: net
+Priority: optional
+Maintainer: ping-bulk maintainers <ping-bulk@example.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ python3-docutils,
+Standards-Version: 4.6.2
+Homepage: https://github.com/YOUR_USER/ping-bulk
+Rules-Requires-Root: no
+
+Package: ping-bulk
+Architecture: all
+Depends:
+ ${misc:Depends},
+ python3 (>= 3.8),
+ iputils-ping,
+Recommends:
+ tmux,
+ openssh-client,
+Suggests:
+ mtr-tiny | mtr,
+ ping-bulk-kiosk,
+ ping-bulk-doc,
+Description: interactive multi-host ping monitor with live TUI
+ ping-bulk monitors multiple hosts simultaneously using a persistent
+ ping subprocess per host.  Results are displayed in a continuously
+ updated terminal interface with rolling history, colour-coded status,
+ statistics columns, section folding, a scrollable event log, SSH-based
+ remote monitoring, and TCP port checks.
+ .
+ The program is a single self-contained Python 3 script with no
+ third-party Python dependencies.
+
+Package: ping-bulk-kiosk
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ping-bulk (= ${binary:Version}),
+ tmux,
+ systemd,
+Recommends:
+ openssh-client,
+ vlock | physlock,
+Suggests:
+ ping-bulk-doc,
+Description: kiosk mode for ping-bulk on physical consoles
+ Provides systemd service unit and hardened tmux configuration to run
+ ping-bulk as the sole application on a physical console (e.g. /dev/tty1).
+ .
+ Users can monitor hosts and SSH into them, but cannot escape to an
+ unrestricted shell.  Includes SSH key isolation, restricted editor,
+ syslog audit trail, and blocked escape routes.
+
+Package: ping-bulk-doc
+Architecture: all
+Section: doc
+Depends:
+ ${misc:Depends},
+Suggests:
+ ping-bulk,
+ man-db,
+Description: documentation for ping-bulk
+ Manual page and HTML documentation for ping-bulk, the interactive
+ multi-host ping monitor.
