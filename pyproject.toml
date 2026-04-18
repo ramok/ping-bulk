@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ping-bulk"
+version = "0.1.0"
+description = "Interactive multi-host ping monitor with SSH, port monitoring, and live TUI"
+readme = "README.md"
+requires-python = ">=3.8"
+# No Python dependencies — only needs the system 'ping' binary.
+
+[tool.setuptools]
+# Install the ping-bulk script directly into bin/.
+script-files = ["ping-bulk"]
+# No Python packages to discover.
+packages = []

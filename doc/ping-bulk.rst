@@ -31,6 +31,26 @@ The program requires no third-party Python packages.  Only the Python
 supports ``-O`` and ``-D``) are needed.
 
 
+INSTALLATION
+============
+
+**Requirements:** Python 3.8+, a system ``ping`` binary with ``-O`` and
+``-D`` support (iputils-ping ≥ 20121221), a colour-capable terminal.
+
+Via pip::
+
+    # From a local clone
+    pip install .
+
+    # Directly from a Git repository
+    pip install git+https://github.com/YOUR_USER/ping-bulk.git
+
+Single-file copy (no pip required)::
+
+    cp ping-bulk ~/.local/bin/
+    chmod +x ~/.local/bin/ping-bulk
+
+
 OPTIONS
 =======
 
@@ -70,6 +90,17 @@ OPTIONS
 
 ``-q``
     Decrease the log level by one step (can be repeated: ``-qq``, ``-qqq``).
+
+``--kiosk``
+    Start in kiosk mode.  Designed for unattended physical consoles
+    (e.g. ``/dev/tty1``).  When not already inside tmux, the process
+    relaunches itself in a hardened tmux session using
+    ``/etc/ping-bulk/kiosk.tmux.conf``.  Quit is disabled (systemd
+    ``Restart=always`` handles lifecycle), SSH keys are isolated from
+    ``~/.ssh/``, arbitrary commands are blocked, the editor is
+    restricted (``rnano``/``rvim``), and every command dispatch is
+    logged to syslog.  See ``kiosk/README.md`` for full setup
+    instructions and the security model.
 
 ``HOST ...``
     One or more host names, IP addresses, or host:port combinations to monitor.

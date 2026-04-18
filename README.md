@@ -4,43 +4,66 @@ Monitor multiple hosts simultaneously with continuous ping, displayed in a
 live terminal interface.
 
 ```
-Hostname          ms   Ping history [success]
-google.com      15.3   ..............................
-8.8.8.8          1.2   ..............................
-1.1.1.1          0.8   ..............................
-192.168.1.1      2.1   ...........XXXXXXXX...........
-10.0.0.1         0.4   ..............................
+Hostname            Up/Down    ms   Avg  StDev Ping History:success  40s
+  router (10.10.0.1)     40s   0.3   0.3    0.0 .........................................
+  gw (24.40.136.201)     40s   0.3   0.3    0.0 .........................................
+  inet (8.8.8.8)         39s     -     -      - XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+  web (1.1.1.1)           0s  19.1  18.4    0.8 .XXXXXXX.XXXX........................
 
 Events
-2026-03-20T14:05:32+0200   192.168.1.1 host down
-2026-03-20T14:06:10+0200   192.168.1.1 host recover. Down time: 38 sec
+2026-03-20T14:05:32+0200   inet host down.    Up time:   5 min 12 sec
+2026-03-20T14:06:10+0200   inet host recover. Down time: 38 sec
 ```
 
 ## Features
 
 - **Parallel monitoring** — each host runs in its own background thread
   with a persistent `ping` subprocess.
+- **TCP port monitoring** — monitor connectivity to TCP ports
+  (e.g. `example.com:443`) alongside ICMP ping.
 - **Rolling history strip** — one character (or numeric cell) per ping,
-  color-coded green/yellow/red.
-- **Interactive host navigation** — arrow keys (↑/↓) to highlight hosts,
-  Enter to view detailed stats.
-- **Section folding** — collapsible section headers (Space key toggles fold state).
-- **Host details window** — comprehensive stats overlay for selected host
-  (latency, uptime, packet loss).
-- **Multiple stats columns** — Last RTT, Down/Up time, Average, Min, Max,
+  color-coded green/yellow/red.  Three display modes: success/fail,
+  round-trip time, and scaled latency.
+- **Interactive host navigation** — arrow keys / vim keys (↑↓/jk) to
+  highlight hosts, Enter to view detailed stats.
+- **Section folding** — collapsible section headers with autofold, recursive
+  fold/unfold, fold-by-level, fold-healthy/unhealthy.
+- **Host details overlay** — comprehensive stats for the selected host.
+- **Multiple stats columns** — Last RTT, Up/Down time, Average, Min, Max,
   Loss%, StDev, RX/TX/XX counts, or all at once.
-- **DNS display modes** — show hostnames, IPs, or original names.
+- **DNS display modes** — off, hostname, IP, name+ip, ip+name.
 - **Flexible sorting** — by name, status, or latency.
-- **SSH monitoring** — run `ping` on a remote machine via `ssh -o BatchMode=yes`
-  and show results alongside local hosts.
-- **Static DNS overrides** — map IPs to names without relying on DNS.
+- **Remote monitoring** — run `ping` on a remote host via
+  `:remote-ping` / `:remote-ping-begin`/`:remote-ping-end` (SSH).
+- **Mux sessions** — open `mtr`, `ssh`, or any command in a tmux split
+  pane directly from the host list (`:mux`).
+- **Custom program options** — `:prog-options` / `:prog-options-begin`
+  lets you pass extra flags to `ping`, `mtr`, etc. per host pattern.
+- **Static DNS overrides** — `:resolv` maps IPs to display names.
 - **Brace expansion** — `10.0.0.{1..50}` expands to 50 hosts in one line.
-- **Loop blocks** — `:for`/`:done` repeats body lines for every expansion of
-  a pattern, substituting back-references (`$0`–`$9` or `$name`) per iteration.
-- **Event log** — timestamped up/down/recover events, scrollable on screen
-  and optionally streamed to a file.
+- **Loop blocks** — `:for`/`:done` repeats body lines with back-references
+  (`$0`–`$9` or `$name`) per iteration.
+- **Conditionals** — `:if`/`:elif`/`:else`/`:fi` with variable expansion.
+- **Variables** — `:let` defines variables; `%r`, `%d`, `%j`, `%R` template
+  variables available in `:prog-options` and `:mux`.
+- **Key binding system** — fully rebindable keys via `:bind-key` /
+  `:unbind-key`, with per-mode bindings (normal, help, details, command).
+- **Search** — `/` search in host list or event log with `n`/`N` navigation.
+- **Configurable log levels** — quiet/normal/info/debug via `:set log-level`,
+  `-v`/`-q` flags.  Event coloring by severity.
+- **Event log** — timestamped up/down/recover events with up-time and
+  down-time durations, scrollable on screen and optionally streamed to a file.
+- **Live editing** — `:edit` opens the hosts file in `$EDITOR`; changes
+  reload automatically.
 - **Persistent config** — display preferences saved to
   `~/.config/ping-bulk/config`.
+- **Hosts file scripting** — shebang support (`#!/usr/bin/env -S ping-bulk -f`),
+  making hosts files directly executable.
+- **Kiosk mode** — `--kiosk` runs ping-bulk as the sole application on a
+  physical console (e.g. `/dev/tty1`) via systemd.  SSH-only access through
+  a hardened tmux session, restricted editor, syslog audit trail, and
+  blocked escape routes.  See [`kiosk/README.md`](kiosk/README.md) for
+  setup instructions.
 
 ## Design goals
 
@@ -50,17 +73,28 @@ third-party dependencies — only the Python standard library and the system
 
 ## Installation
 
-```sh
-# Copy the script somewhere on your PATH
-cp ping-bulk ~/.local/bin/
-chmod +x ~/.local/bin/ping-bulk
-```
-
 **Requirements:**
 
 - Python 3.8+
 - Linux `ping` with `-O` and `-D` flag support (iputils-ping ≥ 20121221)
 - A terminal with colour support
+
+### Via pip (recommended)
+
+```sh
+# From a local clone
+pip install .
+
+# Directly from GitHub
+pip install git+https://github.com/YOUR_USER/ping-bulk.git
+```
+
+### Single-file copy
+
+```sh
+cp ping-bulk ~/.local/bin/
+chmod +x ~/.local/bin/ping-bulk
+```
 
 ## Quick start
 
@@ -99,6 +133,7 @@ optional arguments:
                         StDev | RX | TX | XX | All
   --sort MODE           sort order at startup: none | name | status | latency
   --ping-view MODE      ping history display mode at startup: success | rtt | scaled
+  --kiosk               kiosk mode — hardened session for unattended consoles
 ```
 
 Command-line options override settings from the config file
@@ -125,12 +160,12 @@ comments, and command directives:
 
 ## Remote site — single host via SSH
 :resolv 10.99.0.100  remote-server
-:ssh user@remote-server 10.20.0.1
+:remote-ping user@remote-server 10.20.0.1
 
 ## Remote site — many hosts via SSH (one SSH connection per host)
-:ssh-begin user@remote-server
+:remote-ping-begin user@remote-server
 10.10.0.{1..8}
-:ssh-end
+:remote-ping-end
 
 :log /var/log/ping-bulk.log
 ```
