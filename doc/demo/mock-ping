@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""mock-ping — deterministic fake ping for ping-bulk demo recordings.
+
+Mimics the iputils-ping output format (-O -D flags) so ping-bulk can
+parse it normally.  Behaviour is controlled by environment variables:
+
+  MOCK_PING_LATENCY_BASE   Base latency in ms for this host (default: 1.0)
+  MOCK_PING_LATENCY_JITTER Jitter in ms (default: 0.2)
+  MOCK_PING_SEED           RNG seed for reproducible output (default: 42)
+  MOCK_PING_FAIL_AFTER     Seconds until host goes down (default: never)
+  MOCK_PING_FAIL_DURATION  Seconds the host stays down (default: 5)
+  MOCK_PING_FAIL_HOST      Only fail when pinging this host/IP (default: any)
+  MOCK_PING_INTERVAL       Ping interval in seconds (default: 1.0)
+
+The host name / IP is taken from the last command-line argument
+(same as real ping), so ping-bulk's command substitution works normally.
+"""
+
+import os
+import random
+import sys
+import time
+
+# ── Configuration from environment ──────────────────────────────────────────
+BASE      = float(os.environ.get('MOCK_PING_LATENCY_BASE',    '1.0'))
+JITTER    = float(os.environ.get('MOCK_PING_LATENCY_JITTER',  '0.2'))
+SEED      = int  (os.environ.get('MOCK_PING_SEED',            '42'))
+FAIL_AFTER    = float(os.environ.get('MOCK_PING_FAIL_AFTER',    'inf'))
+FAIL_DURATION = float(os.environ.get('MOCK_PING_FAIL_DURATION', '5.0'))
+FAIL_HOST     = os.environ.get('MOCK_PING_FAIL_HOST', '')   # '' = any host
+INTERVAL      = float(os.environ.get('MOCK_PING_INTERVAL',      '1.0'))
+
+# Pull the target host from the last non-flag argument (mirrors ping behaviour)
+target = 'unknown'
+for arg in reversed(sys.argv[1:]):
+    if not arg.startswith('-'):
+        target = arg
+        break
+
+rng = random.Random(SEED)
+seq = 0
+start = time.monotonic()
+
+# Print PING header like iputils
+print(f"PING {target} ({target}) 56(84) bytes of data.", flush=True)
+
+down_start = None   # monotonic time when failure began
+
+try:
+    while True:
+        now = time.monotonic()
+        elapsed = now - start
+
+        # ── Determine up/down state ──────────────────────────────────────
+        if down_start is not None:
+            # Currently down — check if recovery time has passed
+            if now - down_start >= FAIL_DURATION:
+                down_start = None   # recovered
+
+        if elapsed >= FAIL_AFTER and down_start is None and elapsed < FAIL_AFTER + FAIL_DURATION:
+            # Transition: first ping that should fail
+            # Honour MOCK_PING_FAIL_HOST: only fail the designated target
+            if not FAIL_HOST or target == FAIL_HOST:
+                down_start = now
+
+        alive = down_start is None
+
+        # ── Emit the ping line ───────────────────────────────────────────
+        ts = time.time()
+        if alive:
+            latency = BASE + rng.uniform(-JITTER, JITTER)
+            latency = max(0.01, latency)
+            print(
+                f"[{ts:.6f}] 64 bytes from {target}: icmp_seq={seq} ttl=64 time={latency:.2f} ms",
+                flush=True,
+            )
+        else:
+            # -O flag: print "no answer yet" for dropped pings
+            print(f"[{ts:.6f}] no answer yet for icmp_seq={seq}", flush=True)
+
+        seq += 1
+        time.sleep(INTERVAL)
+
+except KeyboardInterrupt:
+    pass
+
+# Summary (ping-bulk doesn't use this but real ping prints it)
+print(f"\n--- {target} ping statistics ---", flush=True)

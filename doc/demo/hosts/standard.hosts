@@ -1,0 +1,23 @@
+## Internet
+
+:resolv 8.8.8.8        gw-canary
+:resolv 8.8.4.4        gw-canary-2
+:resolv 1.1.1.1        inet-cf
+:resolv 9.9.9.9        inet-quad9
+
+8.8.8.8
+8.8.4.4
+1.1.1.1
+9.9.9.9
+
+## Office LAN
+:resolv 10.0.0.1       router
+:resolv 10.0.0.2       switch
+:resolv 10.0.0.3       nas
+:resolv 10.0.0.254     gw-isp
+
+10.0.0.1
+10.0.0.2
+10.0.0.3
+10.0.0.254
+

@@ -3,3 +3,7 @@
 
 # Test virtual environment
 tests/venv/
+
+# Demo recording output
+doc/demo/output/
+doc/demo/venv/

@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""mock-mtr — simulated mtr TUI output for demo recording.
+Runs for ~6 seconds displaying a fake traceroute table, then exits.
+"""
+import sys
+import os
+import time
+import shutil
+
+target = next((a for a in sys.argv[1:] if not a.startswith('-')), '8.8.8.8')
+
+HOPS = [
+    (1, '10.0.0.1',          'router'),
+    (2, '10.0.0.254',        'gw-isp'),
+    (3, '192.168.100.1',     '???'),
+    (4, target,              target),
+]
+
+LATS = [1.2, 3.4, 8.7, 12.3]
+
+
+def draw(pkt):
+    cols, _ = shutil.get_terminal_size(fallback=(80, 24))
+    lines = []
+    lines.append(f'\033[1m My traceroute  [v0.95]   ({target})\033[m')
+    lines.append(f' Start: {time.strftime("%Y-%m-%d %H:%M:%S")}   Keys: h Help  q Quit')
+    lines.append('')
+    lines.append(' \033[1mHostname                                Loss%  Snt  Last  Avg  Best  Wrst\033[m')
+    for (n, ip, name), lat in zip(HOPS, LATS):
+        label = f'{name} ({ip})' if name != ip else ip
+        lines.append(
+            f' {n:2}. {label:<38}  0.0%  {pkt:4d}'
+            f'  {lat:4.1f}  {lat:4.1f}  {lat - 0.2:4.1f}  {lat + 0.5:4.1f}')
+    lines.append('')
+    lines.append('\033[2m q quit\033[m')
+    sys.stdout.write('\033[2J\033[H')
+    sys.stdout.write('\n'.join(lines))
+    sys.stdout.flush()
+
+
+start = time.monotonic()
+try:
+    pkt = 1
+    while time.monotonic() - start < 6.0:
+        draw(pkt)
+        time.sleep(1.0)
+        pkt += 1
+except (KeyboardInterrupt, BrokenPipeError):
+    pass

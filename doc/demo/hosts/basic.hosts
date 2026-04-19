@@ -1,0 +1,9 @@
+## LAN
+
+:set dns name+ip
+
+10.0.0.1   ## router
+10.0.0.254 ## gw-isp
+8.8.8.8    ## gw-canary
+1.1.1.1    ## inet
+example.com:80

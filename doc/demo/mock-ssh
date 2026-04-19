@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""mock-ssh — smart SSH mock for demo recording.
+
+Two modes:
+  Ping relay:  ssh HOST ping -O -D TARGET  → exec mock-ping for TARGET
+  Demo SSH:    ssh HOST                    → show fake "Connection refused"
+"""
+import sys
+import os
+import time
+
+args = sys.argv[1:]
+
+# Detect ping relay: ssh [opts] HOST ping -O -D TARGET
+if 'ping' in args and '-O' in args and '-D' in args:
+    d_idx = args.index('-D')
+    target = args[d_idx + 1] if d_idx + 1 < len(args) else args[-1]
+    # Resolve mock-ping via the real path of this script (symlink-transparent)
+    script_dir = os.path.dirname(os.path.realpath(sys.argv[0]))
+    mock_ping = os.path.join(script_dir, 'mock-ping')
+    os.execv(mock_ping, [mock_ping, target])
+    # execv replaces the process — never reaches here
+
+# Demo SSH mode: show a short-lived connection attempt, then refuse
+target = next(
+    (a.split('@')[-1] for a in args if not a.startswith('-')),
+    'unknown',
+)
+print(f'\033[33mSSH\033[m  Connecting to \033[1m{target}\033[m port 22 ...')
+sys.stdout.flush()
+time.sleep(3.0)
+print(f'ssh: connect to host {target} port 22: Connection refused')
+sys.stdout.flush()
+time.sleep(1.0)

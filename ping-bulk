@@ -3627,6 +3627,12 @@ class TmuxBackend(TerminalBackend):
     def split(self, direction: str, command: list, focus: bool = True) -> None:
         flag = '-v' if direction == 'v' else '-h'
         cmd = ['tmux', 'split-window', flag]
+        # Pin the target to the pane running ping-bulk so the split is always
+        # attached to the correct pane, regardless of which pane tmux considers
+        # "current" at call time (can differ when called via subprocess pipes).
+        tmux_pane = os.environ.get('TMUX_PANE')
+        if tmux_pane:
+            cmd += ['-t', tmux_pane]
         if not focus:
             cmd.append('-d')
         r = _subrun(cmd + ['--'] + command,

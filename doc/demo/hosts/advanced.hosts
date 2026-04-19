@@ -1,0 +1,38 @@
+## LAN
+:autofold healthy
+
+:bind-key --desc "MTR trace" --hint "[t]race" t :mux mtr %r
+
+:resolv 10.0.0.1       router
+:resolv 10.0.0.2       switch-core
+:resolv 10.0.0.3       switch-floor2
+:resolv 10.0.0.4       nas-backup
+:resolv 10.0.0.254     gw-isp
+
+10.0.0.{1..4}
+10.0.0.254
+
+## Internet
+
+:resolv 8.8.8.8         gw-canary
+:resolv 8.8.4.4         gw-canary-2
+:resolv 1.1.1.1         inet-cf
+:resolv 9.9.9.9         inet-quad9
+:resolv 149.112.112.112 inet-quad9-2
+
+8.8.8.8
+8.8.4.4
+1.1.1.1
+9.9.9.9
+149.112.112.112
+
+## Services
+
+:resolv 10.0.0.10      web-server
+:resolv 10.0.0.11      mail-server
+
+10.0.0.1{0,1}
+10.0.0.10:http{,s}  ## web-server:$1
+10.0.0.11:25        ## mail-server:smtp
+
+:remote-ping admin@10.0.0.1 10.0.0.200
