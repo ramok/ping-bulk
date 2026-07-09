@@ -31,6 +31,10 @@ Events
 - **Host details overlay** — comprehensive stats for the selected host.
 - **Multiple stats columns** — Last RTT, Up/Down time, Average, Min, Max,
   Loss%, StDev, RX/TX/XX counts, or all at once.
+- **Remote clock monitoring** — `:set stats drift` shows each host's clock
+  offset and `:set stats rtime` shows its clock time, read straight from the
+  ICMP reply via `ping -T tsandaddr` — no SSH, no agent on the host, and it
+  sees through NAT.  See [Remote clock monitoring](#remote-clock-monitoring).
 - **DNS display modes** — off, hostname, IP, name+ip, ip+name.
 - **Flexible sorting** — by name, status, or latency.
 - **Remote monitoring** — run `ping` on a remote host via
@@ -228,6 +232,55 @@ reference.
  | `←` / `→`           | Scroll history (step)           |
  | `Ctrl+←` / `Ctrl+→` | Scroll history (page)           |
  | `PgUp` / `PgDn` | Scroll event log                |
+
+## Remote clock monitoring
+
+Two stat columns expose each host's own clock — handy for catching dead NTP,
+missing RTCs, wrong timezones, or VM time skew across a fleet:
+
+- `:set stats drift` — the signed **offset** from this machine's clock
+  (`-0.7s`, `+11h06m`).
+- `:set stats rtime` — the host's **clock time** of day in UTC (`10:32:14`),
+  ticking live.
+
+They share one probe and can be combined (`:set stats rtime,drift`).
+
+```
+Hostname         ms     RTime      Drift   Ping History:success
+10.123.2.2      45.7   10:32:14    -0.7s   ..........   (green: within a second)
+10.122.0.62     42.0   21:38:20   +11h06m  ..........   (magenta: way off)
+8.8.8.8         15.0    no-rt      no-rt   ..........   (dim: no timestamp support)
+```
+
+Colours match the `ms` column: green under 1 s of offset, yellow up to a
+minute, magenta beyond. Open a host's details overlay for the remote clock, the
+local clock, and the signed offset side by side.
+
+**How it works.** The offset is read directly from the ICMP reply using the IP
+timestamp option (`ping -T tsandaddr`) — each hop stamps the packet with its own
+clock and address, and ping-bulk picks out the target's stamp (which works even
+when NAT rewrites the host's address). No SSH login and no agent are needed on
+the monitored host; for `:remote-ping` hosts the same probe runs from the relay.
+Design notes and the NAT walk-through are in
+[`doc/remote-clock.md`](doc/remote-clock.md).
+
+The probe is separate from the liveness ping and is armed the first time a host
+comes up:
+
+- If the host answers, its offset is polled every `:set clock-interval` seconds
+  (default 30).
+- If the host pings but never returns a timestamp — the option is stripped
+  along the path (common on the public internet), or its `ping` lacks `-T`
+  (e.g. busybox) — it is marked `no-rt` and **not probed again** until it next
+  recovers, so no packets are wasted.
+
+**Limitations.** Works on LAN / overlay networks only (IP-option packets are
+usually dropped across the internet). The ICMP timestamp is milliseconds since
+**UTC midnight**, so there is no date or timezone: the remote time is shown in
+UTC, and a clock wrong by whole days but right within the day is not
+detectable; offsets are folded to ±12 h. Auto-discovery reaches a host up to 4
+hops away (an IPv4 protocol limit) — deeper hosts show `no-rt`. See
+[`doc/remote-clock.md`](doc/remote-clock.md) for the full rationale.
 
 ## Documentation
 

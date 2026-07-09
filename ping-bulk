@@ -174,6 +174,8 @@ STAT_NAMES = {
     'rx':    'RX',
     'tx':    'TX',
     'xx':    'XX',
+    'drift': 'Drift',   # remote clock offset (signed)
+    'rtime': 'RTime',   # remote clock time-of-day (UTC)
 }
 
 # Header labels shown in multi-column mode; 'down' gets a wider 'Up/Down' header.
@@ -188,6 +190,8 @@ _STAT_HEADER = {
     'RX':    'RX',
     'TX':    'TX',
     'XX':    'XX',
+    'Drift': 'Drift',
+    'RTime': 'RTime',
 }
 
 # Ping history character modes cycled with [h]
@@ -315,6 +319,10 @@ SET_PARAMS = [
              ['5', '15', '30', '60', '120'],
              'seconds to wait before auto-folding a recovered section (default 30)',
              getter=lambda app: str(int(app.autofold_delay))),
+    SetParam('clock-interval', '_cmd_clock_interval',
+             ['5', '10', '30', '60', '120'],
+             'seconds between remote-clock (drift/rtime) probes for hosts that answer -T (default 30)',
+             getter=lambda app: str(int(app.clock_interval))),
 ]
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
@@ -761,8 +769,11 @@ def _build_set_param_help_lines():
         if p.name == 'stats':
             result.extend([
                 '      Multi-column:  :set stats last,avg,stdev',
-                '      Column names:  last  down  loss%  avg  min  max  stdev  rx  tx  xx',
+                '      Column names:  last down loss% avg min max stdev rx tx xx drift rtime',
                 '      Clear:         :set stats ,',
+                '      drift/rtime:   remote clock via ping -T tsandaddr (UTC, no date/TZ) —',
+                '                     drift = signed offset, rtime = remote clock HH:MM:SS;',
+                '                     green <1s / yellow <1m / magenta ≥1m; no-rt = unsupported',
             ])
     return result
 
@@ -1583,6 +1594,108 @@ def _format_updown_time(seconds):
     return f"{days}d {hours_rem}h"
 
 
+def _format_offset(ms):
+    """Format a signed clock offset in milliseconds as a compact string.
+
+    Always carries an explicit sign.  Output examples and widths:
+      |offset| < 60 s   → "+12.5s"        (one decimal second, ≤ 6 chars)
+      |offset| < 60 m   → "+5m03s"        (≤ 7 chars)
+      |offset| < 24 h   → "+11h07m"       (≤ 7 chars)
+      otherwise         → "+2d03h"        (≤ 6+ chars)
+    """
+    sign = '-' if ms < 0 else '+'
+    total_s = abs(ms) / 1000.0
+    if total_s < 60:
+        return f"{sign}{total_s:.1f}s"
+    secs = int(round(total_s))
+    if secs < 3600:
+        return f"{sign}{secs // 60}m{secs % 60:02d}s"
+    if secs < 86400:
+        mins = secs // 60
+        return f"{sign}{mins // 60}h{mins % 60:02d}m"
+    hours = secs // 3600
+    return f"{sign}{hours // 24}d{hours % 24:02d}h"
+
+
+def _format_utc_hms(ms):
+    """Format milliseconds-since-UTC-midnight as an 'HH:MM:SS' clock string."""
+    s = int(ms // 1000) % 86400
+    return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+def _parse_tsandaddr(output):
+    """Parse the first 'ping -T tsandaddr' timestamp block into (addr, ms) hops.
+
+    iputils prints one address+timestamp per hop in path order, the first as
+    'absolute' and the rest as deltas from the previous value::
+
+        TS: \t10.0.0.1\t40867797 absolute
+        \t10.0.0.2\t39984470
+        Unrecorded hops: 3
+
+    Returns a list of (address, cum_ms) in path order, where cum_ms is the
+    absolute timestamp (ms since UTC midnight) at that hop.  Returns [] when no
+    timestamp block is present — the option was stripped along the path, or the
+    ping has no -T support (e.g. busybox) on the local or remote side.
+    """
+    hops = []
+    in_block = False
+    prev = 0
+    first = True
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line.startswith('TS:'):
+            in_block = True
+            line = line[len('TS:'):].strip()
+            # fall through to parse an inline first entry, if present
+        elif not in_block:
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and _is_ip(parts[0]):
+            try:
+                val = int(parts[1])
+            except ValueError:
+                break
+            cum = val if first else prev + val
+            hops.append((parts[0], cum))
+            prev = cum
+            first = False
+        elif not first:
+            break   # end of the block (blank line, 'Unrecorded hops', stats …)
+    return hops
+
+
+def _select_target_ts(hops):
+    """Pick the target host's timestamp (ms) from parsed tsandaddr *hops*.
+
+    The IP timestamp option is stamped by every hop in path order — outbound
+    hops, the destination, then the return hops — so the destination is the
+    last *new* address before the path folds back on itself.  We therefore take
+    the hop just before the first repeated address; when no address repeats
+    (the 4-entry option filled on the way out), the deepest recorded hop is the
+    target.  This attributes the stamp to the real host even behind NAT, where
+    the host answers under its own inside address rather than the routed one.
+
+    Returns the target timestamp in ms, or None when only our own egress
+    stamped (fewer than two distinct addresses → the host did not answer the
+    option) or the value is out of range (a non-standard high-bit timestamp).
+    """
+    if not hops:
+        return None
+    seen = set()
+    target = None
+    for addr, cum in hops:
+        if addr in seen:
+            break
+        seen.add(addr)
+        target = cum          # last new-address hop seen so far
+    if len(seen) < 2 or target is None:
+        return None
+    if not (0 <= target < 86_400_000):
+        return None
+    return target
+
+
 def _history_char(val, mode):
     """Convert a raw history value (float ms, None, or 'ERR') to a single display character.
 
@@ -1636,6 +1749,19 @@ class Monitor(ABC):
         self.error_logged = False  # True once the error has been added to the event log
         self._proc = None          # active Popen handle for the persistent ping subprocess
         self.resolv_static = False # True when a :resolv static mapping overrides DNS
+        # ── Remote-clock probe state ('ping -T tsandaddr') ────────────────────
+        # Populated by Application._run_clock_probe when the 'Drift' stat is
+        # active.  clock_state transitions:
+        #   'idle'           — not yet probed, or re-armed after a down→up event
+        #   'ok'             — host answers ICMP timestamps; polled periodically
+        #   'no-remote-time' — host pings but never returned a usable timestamp
+        #                      (option stripped, or busybox/ping without -T);
+        #                      probing stops until the next down→up transition
+        self.clock_state = 'idle'
+        self.clock_offset_ms = None    # remote clock − local clock, folded to ±12h (ms)
+        self._clock_ts = None          # time.monotonic() of last successful probe
+        self._clock_next_ts = 0.0      # monotonic time when the next probe may run
+        self._clock_probing = False    # guard: a probe thread is currently running
 
     @property
     def _dns_lookup_target(self) -> str:
@@ -4011,6 +4137,10 @@ class Application:
         # Autofold: auto fold/unfold sections based on host liveness
         self.autofold = False             # disabled by default
         self.autofold_delay = 30.0        # seconds before re-folding a recovered section
+        # Remote-clock probe: poll interval (seconds) for hosts that answer -T.
+        # Default 30 s — clock skew drifts slowly, and for remote-ping hosts
+        # each probe is a fresh SSH connection, so a short interval is costly.
+        self.clock_interval = 30.0
         self._autofold_ts: dict = {}      # id(SectionLabel) -> timestamp when all hosts went alive
         self.running = True
         self.threads = []
@@ -4446,6 +4576,103 @@ class Application:
         checker = threading.Thread(target=self.check_state_changes, daemon=True)
         checker.start()
 
+    def _clock_enabled(self):
+        """True when a remote-clock stat ('Drift' or 'RTime') is displayed."""
+        return bool(self.stats_custom) and any(
+            c in self.stats_custom for c in ('Drift', 'RTime'))
+
+    @staticmethod
+    def _local_utc_ms():
+        """Local wall-clock as milliseconds since UTC midnight (matches ICMP TS)."""
+        return int((time.time() % 86400) * 1000)
+
+    def _clock_probe_target_ip(self, monitor):
+        """Return the IP to send the clock probe to, or None.
+
+        This is the routed destination (a hostname is resolved to an IP first,
+        reusing an already-resolved IP when available).  It need not match the
+        address the host stamps under — behind NAT they differ, and
+        _select_target_ts() recovers the real stamp from the tsandaddr hops.
+        """
+        target = monitor._ping_host if isinstance(monitor, SshPingMonitor) else monitor.host
+        if monitor.resolved_ip:
+            return monitor.resolved_ip
+        if _is_ip(target):
+            return target
+        try:
+            return socket.gethostbyname(target)
+        except (socket.gaierror, OSError):
+            return None
+
+    @staticmethod
+    def _clock_probe_cmd(monitor, ip):
+        """Build the argv for a one-shot 'ping -T tsandaddr' probe against *ip*.
+
+        tsandaddr records an address+timestamp for each hop, which lets us
+        attribute a stamp to the real target even behind NAT (where the host
+        answers under a different inside address than the one we route to).
+        For SshPingMonitor the ping runs on the relay via SSH, reusing the
+        monitor's resolved SSH args (already carrying kiosk isolation flags
+        when applicable), so it reads the target's clock from the relay side.
+        """
+        ping_args = ['ping', '-n', '-c', '1', '-W', '2', '-T', 'tsandaddr', ip]
+        if isinstance(monitor, SshPingMonitor):
+            return ['ssh', '-o', 'BatchMode=yes'] + monitor._ssh_args + ping_args
+        return ping_args
+
+    def _clock_probe_once(self, monitor):
+        """Run one 'ping -T tsandaddr' probe and return the offset in ms.
+
+        The offset is the remote clock minus the local clock, folded to ±12 h so
+        a small offset near midnight does not read as ~24 h.  Returns None when
+        the host returns no usable timestamp — option stripped along the path, a
+        ping without '-T' support (e.g. busybox) on the local or remote side,
+        or the target sits deeper than the option's recordable hop budget.
+        """
+        ip = self._clock_probe_target_ip(monitor)
+        if ip is None:
+            return None
+        cmd = self._clock_probe_cmd(monitor, ip)
+        try:
+            proc = subprocess.run(
+                cmd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=self.clock_interval + 5,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        local_ms = self._local_utc_ms()
+        remote_ms = _select_target_ts(_parse_tsandaddr(proc.stdout))
+        if remote_ms is None:
+            return None
+        return ((remote_ms - local_ms + 43_200_000) % 86_400_000) - 43_200_000
+
+    def _run_clock_probe(self, monitor):
+        """Thread target: run one clock probe for *monitor* and update its state.
+
+        The first probe after arming decides support: a failure marks the host
+        'no-remote-time' and stops further probing until the next down→up
+        re-arm.  A host that has answered ('ok') keeps its last reading on a
+        transient failure and simply retries on the next interval.
+        """
+        try:
+            result = self._clock_probe_once(monitor)
+        except Exception:
+            result = None
+        now = time.monotonic()
+        with monitor.lock:
+            if result is not None:
+                monitor.clock_offset_ms = result
+                monitor._clock_ts = now
+                monitor.clock_state = 'ok'
+                monitor._clock_next_ts = now + self.clock_interval
+            elif monitor.clock_state == 'idle':
+                monitor.clock_state = 'no-remote-time'
+            else:
+                # Transient failure on a host that previously answered — retry.
+                monitor._clock_next_ts = now + self.clock_interval
+        monitor._clock_probing = False
+
     @staticmethod
     def _format_downtime(seconds):
         """Format a duration in seconds into a human-readable string"""
@@ -4469,6 +4696,7 @@ class Application:
 
         while self.running:
             now = time.monotonic()
+            clock_enabled = self._clock_enabled()
             for monitor in self.monitors:
                 # Log a fatal process error exactly once, as soon as it is detected.
                 if monitor.error is not None and not monitor.error_logged:
@@ -4505,6 +4733,11 @@ class Application:
                         # recovered before the threshold — silent flicker, no log entry.
                         monitor._down_pending_ts = None
                         monitor.up_since = now
+                        # Re-arm the remote-clock probe: a host previously marked
+                        # no-remote-time gets another chance after recovery.
+                        if monitor.clock_state == 'no-remote-time':
+                            monitor.clock_state = 'idle'
+                            monitor._clock_next_ts = now
                     else:
                         # UP → DOWN transition: start pending timer, don't log yet.
                         monitor._pending_uptime = (now - monitor.up_since
@@ -4526,6 +4759,20 @@ class Application:
                             msg += f".    Up time:   {self._format_downtime(monitor._pending_uptime)}"
                             monitor._pending_uptime = None
                         self.add_event(display_name, msg)
+
+                # Remote-clock probe dispatch: when the Drift stat is shown,
+                # probe up hosts that still answer -T (or haven't been tried),
+                # spacing polls by clock_interval.  Runs in a short-lived thread
+                # so the 0.5 s state loop never blocks on network I/O.
+                if (clock_enabled
+                        and monitor.alive is True
+                        and monitor.error is None
+                        and monitor.clock_state != 'no-remote-time'
+                        and not monitor._clock_probing
+                        and now >= monitor._clock_next_ts):
+                    monitor._clock_probing = True
+                    threading.Thread(target=self._run_clock_probe,
+                                     args=(monitor,), daemon=True).start()
             time.sleep(0.5)
 
     def cycle_dns(self, direction=1):
@@ -6698,6 +6945,20 @@ class Application:
                                         else curses.color_pair(3)) | row_attr
                             else:
                                 attr = curses.color_pair(2) | row_attr
+                        elif cname in ('Drift', 'RTime'):
+                            # Colour by |offset| in the same green→yellow→magenta
+                            # style as the ms latency column; dim when no data.
+                            with monitor.lock:
+                                d_state = monitor.clock_state
+                                d_off = monitor.clock_offset_ms
+                            if d_state == 'no-remote-time' or d_off is None:
+                                attr = curses.A_DIM | row_attr
+                            elif abs(d_off) < 1000:
+                                attr = curses.color_pair(1) | row_attr   # green  <1s
+                            elif abs(d_off) < 60000:
+                                attr = curses.color_pair(3) | row_attr   # yellow 1s–60s
+                            else:
+                                attr = curses.color_pair(5) | row_attr   # magenta ≥60s
                         else:
                             attr = row_attr
                         try:
@@ -6756,6 +7017,27 @@ class Application:
             s, _ = Application._compute_updown(monitor)
             compact = s.replace(' ', '')
             return f"{compact:>6}"[:6]
+        elif mode == 'Drift':
+            with monitor.lock:
+                state = monitor.clock_state
+                offset = monitor.clock_offset_ms
+            if state == 'no-remote-time':
+                return " no-rt"
+            if offset is None:
+                return "     -"
+            return _format_offset(offset)
+        elif mode == 'RTime':
+            # Remote clock time-of-day (UTC), estimated live as local + offset so
+            # the displayed clock ticks smoothly between probes.
+            with monitor.lock:
+                state = monitor.clock_state
+                offset = monitor.clock_offset_ms
+            if state == 'no-remote-time':
+                return "  no-rt"
+            if offset is None:
+                return "       -"
+            local_ms = int((time.time() % 86400) * 1000)
+            return _format_utc_hms((local_ms + offset) % 86_400_000)
         return "     -"
 
     @staticmethod
@@ -8609,6 +8891,22 @@ class Application:
             return
         self.autofold_delay = secs
 
+    def _cmd_clock_interval(self, args=''):
+        """Set the remote-clock (drift) probe interval in seconds."""
+        val = args.strip()
+        if not val:
+            self.add_event("cmd", f"clock-interval: {self.clock_interval:.0f}")
+            return
+        try:
+            secs = float(val)
+            if secs <= 0:
+                raise ValueError
+        except ValueError:
+            self.add_event("cmd", f"clock-interval: invalid value '{val}'; "
+                           "expected a positive number of seconds")
+            return
+        self.clock_interval = secs
+
     def _cmd_saveconfig(self, args=''):
         """Save current settings to config file."""
         if self._save_config():
@@ -9774,6 +10072,30 @@ class Application:
             lines.append(f"    StdDev:  -")
 
         lines.append("")
+
+        # Remote clock (from ICMP timestamp) — shown only once the host has been
+        # probed for the Drift stat.  Always UTC: the ICMP timestamp is
+        # milliseconds since UTC midnight, with no date or timezone.
+        with monitor.lock:
+            c_state = monitor.clock_state
+            c_off = monitor.clock_offset_ms
+            c_ts = monitor._clock_ts
+        if c_state == 'no-remote-time' or c_off is not None:
+            lines.append("  Clock (from ICMP timestamp, UTC):")
+            if c_off is not None:
+                direction = ('remote ahead' if c_off > 0
+                             else 'remote behind' if c_off < 0 else 'in sync')
+                local_ms = self._local_utc_ms()
+                remote_ms = (local_ms + c_off) % 86_400_000
+                lines.append(f"    Remote UTC:  {_format_utc_hms(remote_ms)}   (no date/TZ)")
+                lines.append(f"    Local  UTC:  {_format_utc_hms(local_ms)}")
+                lines.append(f"    Offset:      {_format_offset(c_off)}   ({direction})")
+                if c_ts is not None:
+                    age = int(time.monotonic() - c_ts)
+                    lines.append(f"    Last probe:  {age}s ago")
+            else:
+                lines.append("    not available (no -T support or ICMP timestamp blocked)")
+            lines.append("")
 
         if host_events:
             lines.append("  Recent Events:")
