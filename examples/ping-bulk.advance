@@ -10,7 +10,48 @@
 # Run directly:  chmod +x network.hosts && ./network.hosts
 # Or:            ping-bulk -f network.hosts
 
-# ── Static DNS overrides ───────────────────────────────────────────────────
+# -- :prog-options ---------------------------------------------------------
+# Map hostname globs to SSH flags injected automatically by :mux.
+# Rules are evaluated in order; last match wins.
+#
+# Inline syntax:
+#   :prog-options <prog> <glob> <opts>    -- add/replace rule
+#   :prog-options <prog> <glob> --disable -- disable prog for matching hosts
+#   :prog-options <prog> <glob>           -- remove rule for that pattern
+#   :prog-options <prog>                  -- list rules for that program
+#   :prog-options                         -- list all rules
+#
+# Block syntax (handy when many rules share one program):
+#   :with prog-options <prog>
+#     <glob> <opts>
+#     ...
+#   :end
+#
+# Options are auto-injected when :mux <prog> is run from a key binding.
+
+# The rules below define the SSH login user per device type: pressing [c]
+# (SSH connect) on a host whose name matches a glob injects the listed
+# flags into the ssh command line.  E.g. connecting to 'sw1-router' runs
+# 'ssh -l admin sw1-router' -- so each device type gets the right username
+# without typing it every time.  The ProxyJump rule routes SSH to internal
+# hosts through a bastion, and --disable removes the SSH action entirely
+# for hosts where a shell makes no sense (public DNS, restricted boxes).
+:prog-options ssh *-router     -l admin    # Mikrotik routers
+:prog-options ssh *-comm-mod   -l root     # comm modules
+:prog-options ssh *-jetson     -l jetson   # Jetson boards
+:prog-options ssh *-nuc        -l dev      # NUC devices
+:prog-options ssh *-ps*        -l dev      # power supplies
+:prog-options ssh *.internal.example.com -o ProxyJump=bastion
+
+# Disable SSH connect for public services -- no SSH makes sense here
+:prog-options ssh 1.1.1.1      --disable
+:prog-options ssh 8.8.8.8      --disable
+:prog-options ssh 1.0.0.1      --disable
+
+# Disable connect entirely for a specific restricted host
+:prog-options ssh restricted.example.com --disable
+
+# -- Static DNS overrides ---------------------------------------------------
 # Map IP ranges to meaningful names.
 # Back-references (all equivalent): $N  ${N}  (N = 1 for first brace group)
 # $0 expands to the full expanded host string for each iteration.
@@ -18,20 +59,21 @@
 :resolv 10.0.1.{1..3} leaf-sw$1
 :resolv 10.0.2.{1..4} server${1}
 
-# ── Display preferences (optional) ────────────────────────────────────────
+# -- Display preferences (optional) ----------------------------------------
 :set stats down; :set ping-view scaled; :set dns hostname
 
-# ── Hierarchical sections ──────────────────────────────────────────────────
+# -- Hierarchical sections --------------------------------------------------
 # ## (or :title) creates a level-1 section header.
 # ### (or :title2) creates a level-2 section, indented 2 spaces.
 # #### (or :title3) creates level-3, and so on.
 #
-# Each section header shows a status badge: N↑/N↓/N-
-#   N↑  green  — hosts with a successful reply
-#   N↓  red    — hosts that last timed out
-#   N-  yellow — hosts not yet reached (starting up / in backoff)
+# Each section header shows a status badge: N^/Nv/N-
+# (the UI renders ^ and v as real up/down arrow glyphs)
+#   N^  green  -- hosts with a successful reply
+#   Nv  red    -- hosts that last timed out
+#   N-  yellow -- hosts not yet reached (starting up / in backoff)
 # When any host has a fatal error (e.g. SSH auth failure, bad hostname)
-# the ↓ and - counters are shown in bold, distinguishing an unrecoverable
+# the down and - counters are shown in bold, distinguishing an unrecoverable
 # error from a transient "still connecting" state.
 #
 # Sections are collapsible: press [ to fold all, ] to unfold all,
@@ -51,7 +93,7 @@
 ### Servers
 10.0.2.{1..4}
 
-# ── Optional hosts with '?' prefix ────────────────────────────────────────
+# -- Optional hosts with '?' prefix ----------------------------------------
 # A '?' prefix on a host line makes it conditional on a :resolv mapping.
 # The host is added only if its expanded name has a :resolv entry; otherwise
 # it is silently skipped.  This is most useful inside :for loops where some
@@ -81,8 +123,8 @@ google.com:https
 8.8.8.8
 1.1.1.1
 
-# ── Semicolon separator ────────────────────────────────────────────────────
-# A semicolon (;) is a line separator — equivalent to a newline.
+# -- Semicolon separator ----------------------------------------------------
+# A semicolon (;) is a line separator -- equivalent to a newline.
 # Useful for compact one-liners, keeping related entries together, or
 # defining a :let variable and using it on the same physical line.
 
@@ -93,12 +135,12 @@ google.com:https
 8.8.4.4; 1.0.0.1
 $ns1; $ns2
 
-# ── :let variables ────────────────────────────────────────────────────────
+# -- :let variables --------------------------------------------------------
 # :let defines reusable variables.  $name and ${name} are equivalent:
 # both substitute the value when defined, and are left unchanged when not.
 # ${name} is mainly useful to delimit the variable name from adjacent text.
 #
-# :let name{range} value  — indexed variables via brace expansion.
+# :let name{range} value  -- indexed variables via brace expansion.
 # $1 in the value refers to the brace group of the name expansion.
 :let domain .example.com
 :let gw{1..3} 10.10.$1.1
@@ -108,9 +150,9 @@ $gw1$domain
 $gw2$domain
 ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 
-# ── :if conditionals ──────────────────────────────────────────────────────
-# :if VALUE in val1,val2,...   — include block when VALUE matches any token
-# :if VALUE not in val1,...    — include block when VALUE matches none
+# -- :if conditionals ------------------------------------------------------
+# :if VALUE in val1,val2,...   -- include block when VALUE matches any token
+# :if VALUE not in val1,...    -- include block when VALUE matches none
 # :elif / :else / :end work as expected.  Blocks can be nested and work both
 # at the top level (with :let variables) and inside :for loops.
 # Inline form: :if COND -> BODY  (equivalent to block form without :end)
@@ -129,17 +171,17 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
     :end
 :end
 
-## Inline :if inside :for — single-host conditionals without a :end
+## Inline :if inside :for -- single-host conditionals without a :end
 :for hub in sensor-hub-{1..4}
     10.123.$1.1         ## sh$1-router
     :if $1 in 1,2 -> 10.123.$1.16 ## sh$1-activesonar
 :end
 
-# ── :let with per-loop folding ──────────────────────────────────────────────
+# -- :let with per-loop folding ----------------------------------------------
 # ${name_$N} two-level expansion: $N is resolved first (from loop back-ref),
 # then the resulting string is used as the variable name.
-# Undefined variables expand to "" — so only exceptions need a :let entry.
-:let fold3 -        # hub-3 starts folded; all others (undefined) → "" → expanded
+# Undefined variables expand to "" -- so only exceptions need a :let entry.
+:let fold3 -        # hub-3 starts folded; all others (undefined) -> "" -> expanded
 
 ## Sensor hubs (conditional fold)
 :for sensor-hub-{1..5}
@@ -148,7 +190,7 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
     sensor-hub-$1-uplink
 :end
 
-# ── Use :for loop with backreferences to assign names ──────────────────────
+# -- Use :for loop with backreferences to assign names ----------------------
 # $0 expands to the full expanded host string for each iteration.
 # Numbered ($1) or named variables ($x) refer to brace groups.
 ## Workstations
@@ -157,14 +199,14 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
     $0
 :end
 
-# ── Sections that start folded (##-) ───────────────────────────────────────
+# -- Sections that start folded (##-) ---------------------------------------
 # Append '-' directly after the hashes (or after :title/:title2) to start
 # the section collapsed.  The user can unfold it with Space / zo / ].
 ##- Historical / decommissioned
 192.0.2.1
 192.0.2.2
 
-# ── for-loop: two brace groups → two back-references ───────────────────────
+# -- for-loop: two brace groups -> two back-references -----------------------
 # $r = rack number (first group),  $n = node number (second group)
 # Generates 6 entries: 10.3.1.1, 10.3.1.2, 10.3.2.1, 10.3.2.2, 10.3.3.1, 10.3.3.2
 ## Pod servers
@@ -173,7 +215,7 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
     $0
 :end
 
-# ── Remote monitoring over SSH ─────────────────────────────────────────────
+# -- Remote monitoring over SSH ---------------------------------------------
 # Ping hosts on a remote network segment as seen from a remote server.
 # Requires passwordless SSH access (key or agent).
 # Nested sections work inside :with remote-ping blocks too.
@@ -188,53 +230,48 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :remote-ping ops@remote-b 10.20.0.1
 :remote-ping ops@remote-b 10.20.0.{2..3}
 
-# ── :prog-options ─────────────────────────────────────────────────────────
-# Map hostname globs to SSH flags injected automatically by :mux.
-# Rules are evaluated in order; last match wins.
-#
-# Inline syntax:
-#   :prog-options <prog> <glob> <opts>    — add/replace rule
-#   :prog-options <prog> <glob> --disable — disable prog for matching hosts
-#   :prog-options <prog> <glob>           — remove rule for that pattern
-#   :prog-options <prog>                  — list rules for that program
-#   :prog-options                         — list all rules
-#
-# Block syntax (handy when many rules share one program):
-#   :with prog-options <prog>
-#     <glob> <opts>
-#     ...
-#   :end
-#
-# Options are auto-injected when :mux <prog> is run from a key binding.
+### Sensors 5-7 behind a jumphost (conditional :with inside :for)
+# Inline :if can open and close a :with remote-ping block for selected
+# iterations only.  Both lines must use the same condition so the block
+# stays balanced on every iteration.
+# Sensors 1-3 are pinged directly; sensors 5-7 through the relay.
+:for sensor-{1-3,5-7}
+    #### $0
+    :if $1 in 5,6,7 -> :with remote-ping ops@relay.example.com
+    10.30.$1.1  ## sensor$1-ctrl
+    10.30.$1.2  ## sensor$1-cam
+    :if $1 in 5,6,7 -> :end
+:end
 
-:prog-options ssh *-router     -l admin    # Mikrotik routers
-:prog-options ssh *-comm-mod   -l root     # comm modules
-:prog-options ssh *-jetson     -l jetson   # Jetson boards
-:prog-options ssh *-nuc        -l dev      # NUC devices
-:prog-options ssh *-ps*        -l dev      # power supplies
-:prog-options ssh *.internal.example.com -o ProxyJump=bastion
+### Same pattern driven by a :let variable
+# One variable defines the relayed subset: it is expanded both in the
+# :for brace list ({1-3,$remote} -> {1-3,5,6,7}) and in the :if condition,
+# so the subset is written in exactly one place.
+# Note: a :let value cannot reference another variable ($x inside a value
+# is kept literally), which is why the composition happens in the pattern.
+:let remote 5,6,7
 
-# Disable SSH connect for public services — no SSH makes sense here
-:prog-options ssh 1.1.1.1      --disable
-:prog-options ssh 8.8.8.8      --disable
-:prog-options ssh 1.0.0.1      --disable
+:for probe-{1-3,$remote}
+    #### $0
+    :if $1 in $remote -> :with remote-ping ops@relay.example.com
+    10.31.$1.1  ## probe$1-ctrl
+    10.31.$1.2  ## probe$1-cam
+    :if $1 in $remote -> :end
+:end
 
-# Disable connect entirely for a specific restricted host
-:prog-options ssh restricted.example.com --disable
-
-# ── Key bindings ──────────────────────────────────────────────────────────
+# -- Key bindings ----------------------------------------------------------
 # :bind-key assigns a command (or chain of commands) to a key sequence.
 # Vim-like notation: <C-x> = Ctrl+x, <CR> = Enter, <Space>, <Up>, etc.
 # Multi-key sequences work naturally: za, gg, gt, etc.
 #
 # Variable expansion at keypress time:
-#   %h  — selected host display name  %i  — selected host IP (resolved)
-#   %r  — connectable target: static :resolv IP if set, else hostname
-#   %d  — SSH destination (SshPingMonitor only, e.g. user@gateway)
-#   %j  — jump host(s) (SshPingMonitor only, from -J flags)
-#   %H  — all hosts in section        %R  — section hosts (%r logic)
-#   %p  — port (TCP monitors only)    %s  — section title
-#   %%  — literal %
+#   %h  -- selected host display name  %i  -- selected host IP (resolved)
+#   %r  -- connectable target: static :resolv IP if set, else hostname
+#   %d  -- SSH destination (SshPingMonitor only, e.g. user@gateway)
+#   %j  -- jump host(s) (SshPingMonitor only, from -J flags)
+#   %H  -- all hosts in section        %R  -- section hosts (%r logic)
+#   %p  -- port (TCP monitors only)    %s  -- section title
+#   %%  -- literal %
 #
 # Custom separator: %{H:,} = comma-separated,  %{H:\n} = newline-separated.
 # Same syntax for lists: %{j: -J } joins jump hosts with ' -J ' between items.
@@ -242,10 +279,10 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # Conditional expansion: %{var?template}
 #   Expands 'template' when var is set, otherwise empty string.
 #   Inner % vars are also expanded.  Useful for optional SSH flags:
-#     %{j?-J %{j: -J }}  →  "-J host1 -J host2" when jump hosts exist, "" otherwise
+#     %{j?-J %{j: -J }}  ->  "-J host1 -J host2" when jump hosts exist, "" otherwise
 #
 # Append '...' to pre-fill the command line without executing (edit mode):
-#   :bind-key t :mux mtr %i...     — lets user review before Enter
+#   :bind-key t :mux mtr %i...     -- lets user review before Enter
 #
 # --desc TEXT    description shown in the ? help overlay "Custom bindings" section
 # --hint TEXT    short label shown in the bottom bar (use [x] notation for hotkey)
@@ -261,9 +298,9 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :bind-key x :set stats down \; :set dns hostname
 :bind-key <C-p> :pause
 
-# ── Conditional bindings ──────────────────────────────────────────────────
-# --if-cmd PRG  — only bind if PRG is found in PATH (checked once at load time).
-# --if-sh "CMD" — only bind if CMD exits 0 (blocked in kiosk mode).
+# -- Conditional bindings --------------------------------------------------
+# --if-cmd PRG  -- only bind if PRG is found in PATH (checked once at load time).
+# --if-sh "CMD" -- only bind if CMD exits 0 (blocked in kiosk mode).
 # When the condition fails, the binding is silently skipped.
 
 # Bind [m] to open mtr only if mtr is installed:
@@ -273,18 +310,18 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :bind-key --if-sh "man -w ping-bulk >/dev/null 2>&1" \
           --mode help --desc "man page" M :mux man ping-bulk
 
-# Multiple conditions — all must pass:
+# Multiple conditions -- all must pass:
 :bind-key --if-cmd nmap --if-cmd mtr --desc "scan+trace" --%h n \
           :mux nmap -sP %r \; :mux mtr %r
 
-# Overlay-mode bindings — bind q to close in both help and details overlay:
+# Overlay-mode bindings -- bind q to close in both help and details overlay:
 # :bind-key --mode help,details q :close
 #
 # Or bind q to quit from any context (main view + all overlays):
 # :bind-key --mode normal,help,details,command q :quit
 
-# ── Filter mode ───────────────────────────────────────────────────────────
-# [f] opens the filter prompt — type a glob pattern to show only matching
+# -- Filter mode -----------------------------------------------------------
+# [f] opens the filter prompt -- type a glob pattern to show only matching
 # hosts.  A bare string (no *, ?, [) is auto-wrapped as *pattern*.
 # [F] / Esc clears the active filter.
 # The filter banner is shown below the column header when a filter is active.
@@ -292,7 +329,7 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # Bind Ctrl+F to filter only within the "production" section:
 # :bind-key <C-f> :filter prod*
 
-# ── Dynamic Additions ──────────────────────────────────────────────────────
+# -- Dynamic Additions ------------------------------------------------------
 # You can also dynamically source other config files or add specific hosts
 # directly from within this script or interactively at runtime.
 #

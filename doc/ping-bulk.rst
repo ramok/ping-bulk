@@ -801,7 +801,9 @@ Format
     included only when the condition is true.  *VALUE* is a plain string
     or a ``$variable`` / ``${variable}`` reference; it is expanded before
     the test is evaluated.  The comma-separated token list on the right
-    side is **not** expanded.
+    side may also contain ``$variable`` references (expanded the same
+    way), but no brace expansion is applied and the list must not
+    contain spaces.
 
     Two condition operators are supported:
 

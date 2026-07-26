@@ -1,5 +1,5 @@
 #!/usr/bin/env -S ping-bulk -f
-# Simple example — public DNS resolvers and a local gateway.
+# Simple example -- public DNS resolvers and a local gateway.
 # Run directly:  chmod +x simple.hosts && ./simple.hosts
 # Or:            ping-bulk -f simple.hosts
 
