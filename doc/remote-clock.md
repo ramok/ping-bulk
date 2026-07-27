@@ -19,6 +19,13 @@ offset, yellow up to a minute, magenta beyond. `no-rt` means the host does not
 provide a usable timestamp. The host details overlay shows the remote clock,
 the local clock, and the offset side by side.
 
+While a host is down, probing pauses and both columns freeze at the last
+measurement — `drift` keeps the last offset and `rtime` stops ticking, showing
+the remote clock as it was read by the last probe. Both render in gray to
+signal the values are stale. Normal colours and the live-ticking `rtime`
+return with the first successful probe after the host recovers. The details
+overlay shows how old the measurement is (`Last probe: Ns ago`).
+
 ## How the clock is read
 
 The offset comes straight from the ICMP echo reply using the IPv4 **timestamp

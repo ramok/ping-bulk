@@ -4,7 +4,7 @@ Covers:
   _format_updown_time(seconds)
   Application._compute_updown(monitor)
   Application._compute_stat(monitor, mode)
-  Application._compute_all_stats(monitor)
+  _ALL_STATS × _compute_stat  ('All' mode per-field values)
   Application._updown_col_width()
 
 No ping threads are started; PingMonitor state is set directly on attributes.
@@ -397,124 +397,58 @@ class TestComputeStat:
 
 
 # ===========================================================================
-# TestComputeAllStats
+# TestAllStatsFields
 # ===========================================================================
 
-def _parse_all_stats_fields(result):
-    """Extract 8 fixed-width 6-char fields from _compute_all_stats output."""
-    return [result[i:i+6] for i in range(0, 62, 8)]
+class TestAllStatsFields:
+    """'All' mode draws one 6-char _compute_stat field per _ALL_STATS label.
 
+    The old _compute_all_stats string builder was removed; value formatting
+    is shared with the custom-columns mode via _compute_stat, so these tests
+    pin the label set and the per-field output for the 'All' preset."""
 
-class TestComputeAllStats:
-    """Application._compute_all_stats(monitor) returns exactly 62 characters."""
-
-    _EXPECTED_LEN = 62
-
-    def test_error_returns_62_chars(self, pb):
-        m = make_monitor(pb, error='fail')
-        result = pb.Application._compute_all_stats(m)
-        assert len(result) == self._EXPECTED_LEN, (
-            f"error case: expected {self._EXPECTED_LEN} chars, got {len(result)}: {result!r}"
-        )
+    def test_labels_order(self, pb):
+        assert pb._ALL_STATS == ('Avg', 'Min', 'Max', 'Loss%', 'StDev',
+                                 'RX', 'TX', 'XX')
 
     def test_error_all_question_marks(self, pb):
         m = make_monitor(pb, error='fail')
-        result = pb.Application._compute_all_stats(m)
-        # 8 fields of '    ??' joined by '  '
-        expected = '  '.join(['    ??'] * 8)
-        assert result == expected
+        for cname in pb._ALL_STATS:
+            assert pb.Application._compute_stat(m, cname) == '    ??', cname
 
-    def test_no_data_returns_62_chars(self, pb):
-        m = make_monitor(pb, latencies=[], rx_count=0, xx_count=0, ping_count=0)
-        result = pb.Application._compute_all_stats(m)
-        assert len(result) == self._EXPECTED_LEN, (
-            f"no-data case: expected {self._EXPECTED_LEN} chars, got {len(result)}: {result!r}"
-        )
+    def test_no_data_all_dashes_or_zero(self, pb):
+        m = make_monitor(pb)
+        for cname in ('Avg', 'Min', 'Max', 'Loss%', 'StDev'):
+            assert pb.Application._compute_stat(m, cname) == '     -', cname
+        for cname in ('RX', 'TX', 'XX'):
+            assert pb.Application._compute_stat(m, cname) == '     0', cname
 
-    def test_no_data_loss_field_is_dash(self, pb):
-        """When no pings have been sent the Loss% field is '    - ' (dash with space)."""
-        m = make_monitor(pb, latencies=[], rx_count=0, xx_count=0, ping_count=0)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
-        loss_field = fields[3]
-        assert loss_field == '    - ', (
-            f"Expected '    - ' for no-data loss, got {loss_field!r}"
-        )
-
-    def test_normal_values_returns_62_chars(self, pb):
-        m = make_monitor(pb,
-                         latencies=[10.0, 20.0, 30.0],
-                         rx_count=3, xx_count=1, ping_count=4)
-        result = pb.Application._compute_all_stats(m)
-        assert len(result) == self._EXPECTED_LEN, (
-            f"normal case: expected {self._EXPECTED_LEN} chars, got {len(result)}: {result!r}"
-        )
-
-    def test_avg_field(self, pb):
-        m = make_monitor(pb, latencies=[10.0, 20.0, 30.0],
-                         rx_count=3, xx_count=0, ping_count=3)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
-        assert fields[0] == '  20.0', f"Avg field: {fields[0]!r}"
-
-    def test_min_field(self, pb):
-        m = make_monitor(pb, latencies=[10.0, 20.0, 30.0],
-                         rx_count=3, xx_count=0, ping_count=3)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
-        assert fields[1] == '  10.0', f"Min field: {fields[1]!r}"
-
-    def test_max_field(self, pb):
-        m = make_monitor(pb, latencies=[10.0, 20.0, 30.0],
-                         rx_count=3, xx_count=0, ping_count=3)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
-        assert fields[2] == '  30.0', f"Max field: {fields[2]!r}"
-
-    def test_loss_field_with_data(self, pb):
-        # 1 loss out of 4 → 25.0%
-        m = make_monitor(pb, latencies=[10.0, 20.0, 30.0],
-                         rx_count=3, xx_count=1, ping_count=4)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
-        assert fields[3] == ' 25.0%', f"Loss% field: {fields[3]!r}"
-
-    def test_stdev_field(self, pb):
+    def test_normal_values(self, pb):
         lats = [10.0, 20.0, 30.0]
-        m = make_monitor(pb, latencies=lats, rx_count=3, xx_count=0, ping_count=3)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
+        m = make_monitor(pb, latencies=lats,
+                         rx_count=3, xx_count=1, ping_count=4)
         avg = sum(lats) / len(lats)
         expected_stdev = math.sqrt(sum((x - avg)**2 for x in lats) / len(lats))
-        assert fields[4] == f"{expected_stdev:6.1f}", f"StDev field: {fields[4]!r}"
-
-    def test_rx_tx_xx_fields(self, pb):
-        m = make_monitor(pb, latencies=[10.0],
-                         rx_count=7, xx_count=3, ping_count=10)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
-        assert fields[5] == '     7', f"RX field: {fields[5]!r}"
-        assert fields[6] == '    10', f"TX field: {fields[6]!r}"
-        assert fields[7] == '     3', f"XX field: {fields[7]!r}"
-
-    def test_eight_fields_total(self, pb):
-        """The result must split into exactly 8 fixed-position 6-char fields."""
-        m = make_monitor(pb, latencies=[10.0],
-                         rx_count=1, xx_count=0, ping_count=1)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
-        assert len(fields) == 8, (
-            f"Expected 8 fields, got {len(fields)}: {fields!r}"
-        )
+        expected = {
+            'Avg':   '  20.0',
+            'Min':   '  10.0',
+            'Max':   '  30.0',
+            'Loss%': ' 25.0%',   # 1 loss out of 4
+            'StDev': f"{expected_stdev:6.1f}",
+            'RX':    '     3',
+            'TX':    '     4',
+            'XX':    '     1',
+        }
+        for cname, want in expected.items():
+            assert pb.Application._compute_stat(m, cname) == want, cname
 
     def test_each_field_is_six_chars(self, pb):
         m = make_monitor(pb, latencies=[10.0, 20.0, 30.0],
                          rx_count=3, xx_count=1, ping_count=4)
-        result = pb.Application._compute_all_stats(m)
-        fields = _parse_all_stats_fields(result)
-        for i, f in enumerate(fields):
-            assert len(f) == 6, (
-                f"Field {i} has {len(f)} chars, expected 6: {f!r}"
+        for cname in pb._ALL_STATS:
+            field = pb.Application._compute_stat(m, cname)
+            assert len(field) == 6, (
+                f"{cname} has {len(field)} chars, expected 6: {field!r}"
             )
 
 

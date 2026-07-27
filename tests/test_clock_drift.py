@@ -8,6 +8,8 @@ Covers the pure helpers and the stat integration without touching the network:
   - _clock_probe_cmd      — local vs SSH (remote-ping) command construction
   - offset computation     — remote vs local, midnight wrap folded to ±12h
   - _compute_stat(Drift/RTime) — no-rt / not-probed / value / error states
+  - _display_stale         — down/error hosts gray out frozen stats; RTime
+                             freezes at the last probe instead of ticking
   - :set stats drift/rtime — alias parsing
   - :set clock-interval    — value parsing + validation
 
@@ -234,6 +236,66 @@ class TestComputeStatRTime:
         h0 = int(pb.Application._compute_stat(m0, 'RTime').strip()[:2])
         h1 = int(pb.Application._compute_stat(m1, 'RTime').strip()[:2])
         assert (h0 + 1) % 24 == h1
+
+
+# ===========================================================================
+# _display_stale — gray frozen stats while the host is down
+# ===========================================================================
+
+class TestDisplayStale:
+    """Down/error hosts render frozen stats (Drift/RTime, Avg/Min/Max/StDev)
+    in gray.  The values keep displaying, but RTime stops ticking — it
+    freezes at the remote time of the last probe."""
+
+    def test_alive_host_not_stale(self, pb):
+        m = make_monitor(pb, alive=True)
+        assert not pb.Application._display_stale(m)
+
+    def test_down_host_stale(self, pb):
+        m = make_monitor(pb, alive=False)
+        assert pb.Application._display_stale(m)
+
+    def test_never_replied_stale(self, pb):
+        m = make_monitor(pb)  # alive defaults to None (still connecting)
+        assert pb.Application._display_stale(m)
+
+    def test_error_host_stale(self, pb):
+        m = make_monitor(pb, alive=True, error='boom')
+        assert pb.Application._display_stale(m)
+
+    def test_down_host_keeps_showing_values(self, pb):
+        # The value is not blanked when the host goes down — only grayed.
+        m = make_monitor(pb, alive=False, clock_state='ok',
+                         clock_offset_ms=-1000)
+        assert pb.Application._compute_stat(m, 'Drift').strip() == '-1.0s'
+        val = pb.Application._compute_stat(m, 'RTime').strip()
+        assert len(val) == 8 and val.count(':') == 2, val
+
+    def test_down_host_rtime_frozen_at_last_probe(self, pb):
+        # RTime stops ticking when down: it shows the remote clock as of
+        # the last successful probe, not a live extrapolation.
+        import time
+        age = 3600.0
+        m = make_monitor(pb, alive=False, clock_state='ok', clock_offset_ms=0,
+                         _clock_ts=time.monotonic() - age)
+        val = pb.Application._compute_stat(m, 'RTime').strip()
+        h, mn, s = (int(x) for x in val.split(':'))
+        shown = h * 3600 + mn * 60 + s
+        expect = int(time.time() - age) % 86400
+        diff = abs(shown - expect)
+        assert min(diff, 86400 - diff) <= 2, (val, expect)
+
+    def test_alive_host_rtime_ticks_live(self, pb):
+        # An alive host ignores the probe age — the clock stays live.
+        import time
+        m = make_monitor(pb, alive=True, clock_state='ok', clock_offset_ms=0,
+                         _clock_ts=time.monotonic() - 3600.0)
+        val = pb.Application._compute_stat(m, 'RTime').strip()
+        h, mn, s = (int(x) for x in val.split(':'))
+        shown = h * 3600 + mn * 60 + s
+        expect = int(time.time()) % 86400
+        diff = abs(shown - expect)
+        assert min(diff, 86400 - diff) <= 2, (val, expect)
 
 
 # ===========================================================================

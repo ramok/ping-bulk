@@ -157,6 +157,13 @@ class EventEntry:
 # Stats column modes cycled with [s]; 'off' means hidden
 STATS_MODES = ['off', 'Down', 'Loss%', 'Avg', 'Min', 'Max', 'StDev', 'RX', 'TX', 'XX', 'All']
 
+# Reply-derived stats that freeze while a host is down; rendered gray then.
+# Counters (Loss%/RX/TX/XX) keep updating and Last/Down clear themselves.
+_FROZEN_STATS = ('Avg', 'Min', 'Max', 'StDev')
+
+# Columns of the 'All' stats mode, rendered one _compute_stat field each.
+_ALL_STATS = ('Avg', 'Min', 'Max', 'Loss%', 'StDev', 'RX', 'TX', 'XX')
+
 # Sentinel index used when a custom column set is active (beyond STATS_MODES list).
 _CUSTOM_STATS_SENTINEL = len(STATS_MODES)
 
@@ -4156,6 +4163,7 @@ class Application:
         # Default 30 s — clock skew drifts slowly, and for remote-ping hosts
         # each probe is a fresh SSH connection, so a short interval is costly.
         self.clock_interval = 30.0
+        self.stale_attr = curses.A_DIM    # replaced by gray pair in run()
         self._autofold_ts: dict = {}      # id(SectionLabel) -> timestamp when all hosts went alive
         self.running = True
         self.threads = []
@@ -6829,25 +6837,15 @@ class Application:
                     # Right-align in the stat field (5 spaces + symbol = 6 display cols)
                     stdscr.addstr(row, stat_value_col, "     ⏸", curses.color_pair(6) | row_attr)
                 elif show_single:
-                    stat_str = self._compute_stat(monitor, mode_name)
                     # _compute_stat() returns '    ??' when monitor.error is set
-                    if monitor.error is not None:
-                        stat_color = curses.color_pair(2) | curses.A_BOLD
-                    elif mode_name == 'Down':
-                        _, is_down = Application._compute_updown(monitor)
-                        stat_color = curses.color_pair(2) if is_down else 0
-                    else:
-                        stat_color = 0
-                    stdscr.addstr(row, stat_value_col, stat_str, stat_color | row_attr)
+                    stdscr.addstr(row, stat_value_col,
+                                  self._compute_stat(monitor, mode_name),
+                                  self._stat_attr(monitor, mode_name, row_attr))
                 else:
                     # off mode — show Last latency with color; '    ??' in bright red on error
-                    if monitor.error is not None:
-                        stdscr.addstr(row, stat_value_col, "    ??", curses.color_pair(2) | curses.A_BOLD | row_attr)
-                    elif monitor.latency is not None:
-                        color = curses.color_pair(1) if monitor.latency < 50 else curses.color_pair(3)
-                        stdscr.addstr(row, stat_value_col, f"{monitor.latency:6.1f}", color | row_attr)
-                    else:
-                        stdscr.addstr(row, stat_value_col, "     -", curses.color_pair(2) | row_attr)
+                    stdscr.addstr(row, stat_value_col,
+                                  self._compute_stat(monitor, 'Last'),
+                                  self._stat_attr(monitor, 'Last', row_attr))
 
             history = monitor.get_history_string(
                 display_count, self.history_offset, hist_mode, cell_width,
@@ -6920,21 +6918,21 @@ class Application:
             # All-stats block flush-left after hostname
             if show_all and all_stats_col < width:
                 # ms (Last latency)
-                if monitor.error is not None:
-                    stdscr.addstr(row, ms_col, "    ??", curses.color_pair(2) | curses.A_BOLD | row_attr)
-                elif monitor.latency is not None:
-                    ms_color = curses.color_pair(1) if monitor.latency < 50 else curses.color_pair(3)
-                    stdscr.addstr(row, ms_col, f"{monitor.latency:6.1f}", ms_color | row_attr)
-                else:
-                    stdscr.addstr(row, ms_col, "     -", curses.color_pair(2) | row_attr)
+                stdscr.addstr(row, ms_col, self._compute_stat(monitor, 'Last'),
+                              self._stat_attr(monitor, 'Last', row_attr))
                 # Up/Down
                 updown_str, is_down = Application._compute_updown(monitor)
                 updown_color = curses.color_pair(2) if is_down else 0
                 stdscr.addstr(row, updown_col, f"{updown_str:>{updown_col_w}}", updown_color | row_attr)
-                # Avg Min Max Loss% StDev RX TX XX
-                all_str = self._compute_all_stats(monitor)
-                all_color = (curses.color_pair(2) | curses.A_BOLD) if monitor.error is not None else 0
-                stdscr.addstr(row, tail_col, all_str, all_color | row_attr)
+                # Avg Min Max Loss% StDev RX TX XX — one addstr per 6-char
+                # field so each stat gets its own colour via _stat_attr.
+                for i, cname in enumerate(_ALL_STATS):
+                    try:
+                        stdscr.addstr(row, tail_col + i * 8,
+                                      self._compute_stat(monitor, cname),
+                                      self._stat_attr(monitor, cname, row_attr))
+                    except curses.error:
+                        pass
 
             # Custom stats block flush-left after hostname
             if show_custom and self.stats_custom and custom_start_col < width:
@@ -6949,33 +6947,7 @@ class Application:
                         val = self._compute_stat(monitor, cname)
                         val_stripped = val.strip()
                         val_padded = f"{val_stripped:>{w}}"
-                        if monitor.error is not None:
-                            attr = curses.color_pair(2) | curses.A_BOLD | row_attr
-                        elif cname == 'Down':
-                            _, is_down = Application._compute_updown(monitor)
-                            attr = (curses.color_pair(2) if is_down else 0) | row_attr
-                        elif cname == 'Last':
-                            if monitor.latency is not None:
-                                attr = (curses.color_pair(1) if monitor.latency < 50
-                                        else curses.color_pair(3)) | row_attr
-                            else:
-                                attr = curses.color_pair(2) | row_attr
-                        elif cname in ('Drift', 'RTime'):
-                            # Colour by |offset| in the same green→yellow→magenta
-                            # style as the ms latency column; dim when no data.
-                            with monitor.lock:
-                                d_state = monitor.clock_state
-                                d_off = monitor.clock_offset_ms
-                            if d_state == 'no-remote-time' or d_off is None:
-                                attr = curses.A_DIM | row_attr
-                            elif abs(d_off) < 1000:
-                                attr = curses.color_pair(1) | row_attr   # green  <1s
-                            elif abs(d_off) < 60000:
-                                attr = curses.color_pair(3) | row_attr   # yellow 1s–60s
-                            else:
-                                attr = curses.color_pair(5) | row_attr   # magenta ≥60s
-                        else:
-                            attr = row_attr
+                        attr = self._stat_attr(monitor, cname, row_attr)
                         try:
                             stdscr.addstr(row, col, val_padded, attr)
                         except curses.error:
@@ -7043,15 +7015,21 @@ class Application:
             return _format_offset(offset)
         elif mode == 'RTime':
             # Remote clock time-of-day (UTC), estimated live as local + offset so
-            # the displayed clock ticks smoothly between probes.
+            # the displayed clock ticks smoothly between probes.  While the host
+            # is down the estimate freezes at the last probe — extrapolating a
+            # dead host's clock is meaningless, so the last reading is shown.
             with monitor.lock:
                 state = monitor.clock_state
                 offset = monitor.clock_offset_ms
+                probe_ts = monitor._clock_ts
             if state == 'no-remote-time':
                 return "  no-rt"
             if offset is None:
                 return "       -"
-            local_ms = int((time.time() % 86400) * 1000)
+            now = time.time()
+            if Application._display_stale(monitor) and probe_ts is not None:
+                now -= time.monotonic() - probe_ts   # wall clock at last probe
+            local_ms = int((now % 86400) * 1000)
             return _format_utc_hms((local_ms + offset) % 86_400_000)
         return "     -"
 
@@ -7073,6 +7051,54 @@ class Application:
             return (_format_updown_time(elapsed), True)
         return ('-', False)
 
+    @staticmethod
+    def _display_stale(monitor):
+        """True when a host cannot produce fresh measurements (down/error).
+
+        Reply-derived stats (_FROZEN_STATS) then hold values from before the
+        outage, and the clock probe is paused (same gate as
+        check_state_changes), freezing Drift/RTime at the last probe.
+        Callers render all of these in self.stale_attr (gray) instead of
+        their normal colours, and freeze the RTime estimate.
+        """
+        return monitor.alive is not True or monitor.error is not None
+
+    def _stat_attr(self, monitor, cname, row_attr):
+        """Return the curses attribute for one stats cell of *monitor*.
+
+        Single source of truth for stat-cell colouring, shared by the
+        custom-columns, 'All' and single-stat renderers so a given stat is
+        coloured identically in every mode.
+        """
+        if monitor.error is not None:
+            return curses.color_pair(2) | curses.A_BOLD | row_attr
+        if cname == 'Down':
+            _, is_down = Application._compute_updown(monitor)
+            return (curses.color_pair(2) if is_down else 0) | row_attr
+        if cname == 'Last':
+            if monitor.latency is not None:
+                return (curses.color_pair(1) if monitor.latency < 50
+                        else curses.color_pair(3)) | row_attr
+            return curses.color_pair(2) | row_attr
+        if cname in ('Drift', 'RTime'):
+            # Colour by |offset| in the same green→yellow→magenta style as
+            # the ms latency column; gray when no data or while the host is
+            # down (offset frozen — clock probing paused until recovery).
+            with monitor.lock:
+                d_state = monitor.clock_state
+                d_off = monitor.clock_offset_ms
+            if (d_state == 'no-remote-time' or d_off is None
+                    or self._display_stale(monitor)):
+                return self.stale_attr | row_attr
+            if abs(d_off) < 1000:
+                return curses.color_pair(1) | row_attr    # green  <1s
+            if abs(d_off) < 60000:
+                return curses.color_pair(3) | row_attr    # yellow 1s–60s
+            return curses.color_pair(5) | row_attr        # magenta ≥60s
+        if cname in _FROZEN_STATS and self._display_stale(monitor):
+            return self.stale_attr | row_attr
+        return row_attr
+
     def _updown_col_width(self):
         """Return the column width needed for the Up/Down cell across all monitors.
 
@@ -7085,41 +7111,6 @@ class Application:
             if len(s) > max_w:
                 max_w = len(s)
         return max_w
-
-    @staticmethod
-    def _compute_all_stats(monitor):
-        """Compute a compact all-stats string for 'All' mode.
-
-        Returns a row of '    ??' placeholders (8 fields, 62 chars total) when
-        monitor.error is set.
-        Format (aligned to match the tail header in draw_hosts):
-          Avg    Min    Max    Loss%  StDev  RX     TX     XX
-        """
-        if monitor.error is not None:
-            placeholder = "    ??"
-            sep = "  "
-            return sep.join([placeholder] * 8)
-        with monitor.lock:
-            lat_count = monitor._lat_count
-            lat_avg   = monitor._lat_mean if lat_count else None
-            lat_min   = monitor._lat_min  if lat_count else None
-            lat_max   = monitor._lat_max  if lat_count else None
-            lat_stdev = (math.sqrt(monitor._lat_m2 / lat_count)
-                         if lat_count >= 2 else None)
-            rx = monitor.rx_count
-            xx = monitor.xx_count
-            tx = monitor.ping_count
-
-        avg_s   = f"{lat_avg:6.1f}"   if lat_avg   is not None else "     -"
-        min_s   = f"{lat_min:6.1f}"   if lat_min   is not None else "     -"
-        max_s   = f"{lat_max:6.1f}"   if lat_max   is not None else "     -"
-        stdev_s = f"{lat_stdev:6.1f}" if lat_stdev is not None else "     -"
-
-        total = rx + xx
-        loss_s = f"{xx / total * 100:5.1f}%" if total else "    - "
-
-        return (f"{avg_s}  {min_s}  {max_s}  {loss_s}  "
-                f"{stdev_s}  {rx:6d}  {tx:6d}  {xx:6d}")
 
     def _get_name_col_width(self, dns_mode_str: str) -> int:
         """Return the cached hostname column width for *dns_mode_str*.
@@ -10221,6 +10212,13 @@ class Application:
         curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)    # Hotkey
         curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK)  # Very slow (>100 ms)
         curses.init_pair(6, curses.COLOR_CYAN, curses.COLOR_BLACK)     # Paused
+        # Stale stats of a down host (Drift/RTime, _FROZEN_STATS): gray when
+        # the terminal has a bright-black colour, A_DIM fallback otherwise.
+        if curses.COLORS > 8:
+            curses.init_pair(7, 8, curses.COLOR_BLACK)                 # Gray (stale)
+            self.stale_attr = curses.color_pair(7)
+        else:
+            self.stale_attr = curses.A_DIM
 
         self.start_monitoring()
 
