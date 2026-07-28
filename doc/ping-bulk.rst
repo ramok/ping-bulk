@@ -102,6 +102,18 @@ OPTIONS
     logged to syslog.  See ``kiosk/README.md`` for full setup
     instructions and the security model.
 
+``--dump-hosts``
+    Print the hosts file in a simplified, fully expanded form and exit.
+    ``:for`` loops, ``:if`` conditionals, ``:let`` variables and brace
+    expansion are resolved; every monitored target becomes a plain
+    ``IP  ## name`` line (static ``:resolv`` mappings are merged into the
+    inline ``##`` form), section headers keep their ``##``/``###`` shape,
+    and all other directives are kept verbatim.  ``:remote-ping`` targets
+    are flattened to plain host lines (the relay is dropped) and
+    ``:source``'d files are spliced in, so the result is one
+    self-contained file that is easy to hand-edit — useful for handing a
+    generated inventory to someone who only needs to update IPs.
+
 ``HOST ...``
     One or more host names, IP addresses, or host:port combinations to monitor.
     If a port is specified (e.g. ``example.com:443``), it will perform a TCP

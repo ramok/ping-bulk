@@ -3479,6 +3479,124 @@ def parse_hosts_file(filename, variables=None):
     return _HostsParser(variables=variables).parse_file(filename)
 
 
+def _flatten_sourced(entries, _seen=None):
+    """Recursively splice ``:source FILE`` commands into the entry list.
+
+    Used by --dump-hosts so the output is a single self-contained file.
+    Unreadable files keep their ``:source`` line (plus a warning entry);
+    circular references are skipped with a warning.
+    """
+    if _seen is None:
+        _seen = set()
+    out = []
+    for e in entries:
+        if e[0] == 'cmd':
+            parts = e[1].split(None, 1)
+            if parts[0].lower() == ':source' and len(parts) > 1:
+                path = os.path.abspath(parts[1].strip())
+                if path in _seen:
+                    out.append(('warn', f':source loop skipped: {parts[1].strip()}'))
+                    continue
+                _seen.add(path)
+                try:
+                    sub = parse_hosts_file(path)
+                except OSError as exc:
+                    out.append(('warn', f':source kept, cannot open: {exc}'))
+                    out.append(e)
+                    continue
+                out.extend(_flatten_sourced(sub, _seen))
+                continue
+        out.append(e)
+    return out
+
+
+def _dump_simplified(entries):
+    """Serialise parsed entries back into a flat hosts file (--dump-hosts).
+
+    ``:for`` / ``:if`` / ``:let`` and brace expansion are already applied
+    by the parser, so the output contains no programming constructs — a
+    plain inventory that non-programmers can edit:
+
+      IP  ## name       hosts (static :resolv mappings become inline ##)
+      ## / ### Title    section headers, one '#' per nesting level + 1
+      other directives  kept verbatim (:set, :bind-key, :prog-options, …)
+
+    ``:remote-ping`` targets are flattened to plain host lines (the relay
+    is dropped), ``:source`` files are spliced in recursively, and
+    duplicate targets are emitted once.  ``:resolv`` lines merged into an
+    inline ``##`` are dropped; unconsumed ones are kept.
+
+    Returns ``(text, warnings)`` — *warnings* collects the parser's
+    warn/error entries for the caller to print on stderr.
+    """
+    entries = _flatten_sourced(entries)
+
+    # Pass 1: resolv maps and the target/name of every host line.
+    name2ip, ip2name = {}, {}
+    for e in entries:
+        if e[0] == 'cmd' and e[1].startswith(':resolv '):
+            parts = e[1].split()
+            if len(parts) == 3:
+                name2ip[parts[2]] = parts[1]
+                ip2name[parts[1]] = parts[2]
+
+    def host_item(entry):
+        """(target, display-name or None) for a host/remote-ping entry."""
+        if entry[0] == 'host':
+            ip = name2ip.get(entry[1])
+            return (ip, entry[1]) if ip is not None else (entry[1], None)
+        target = entry[1].split()[-1]          # :remote-ping … <target>
+        return (target, ip2name.get(target))
+
+    consumed = set()   # (ip, name) resolv pairs merged into a host line
+    for e in entries:
+        if e[0] == 'host' or (e[0] == 'cmd' and e[1].startswith(':remote-ping ')):
+            target, name = host_item(e)
+            if name is not None:
+                consumed.add((target, name))
+
+    # Pass 2: build output items in document order.
+    items = []         # ('host', target, name) | ('raw', line) | ('blank',)
+    warnings = []
+    hosts_seen = set()
+    for e in entries:
+        kind = e[0]
+        if kind == 'host' or (kind == 'cmd' and e[1].startswith(':remote-ping ')):
+            target, name = host_item(e)
+            if target in hosts_seen:
+                continue
+            hosts_seen.add(target)
+            items.append(('host', target, name))
+        elif kind == 'cmd':
+            parts = e[1].split()
+            if (e[1].startswith(':resolv ') and len(parts) == 3
+                    and (parts[1], parts[2]) in consumed):
+                continue
+            items.append(('raw', e[1]))
+        elif kind == 'section':
+            folded = '-' if len(e) > 3 and e[3] else ''
+            exempt = '!' if len(e) > 4 and e[4] else ''
+            items.append(('blank',))
+            items.append(('raw', '#' * (e[2] + 1) + folded + exempt + ' ' + e[1]))
+        elif kind in ('warn', 'error'):
+            warnings.append(f'{kind}: {e[1]}')
+
+    # Assemble; align the inline '##' names into one column.
+    width = max((len(it[1]) for it in items
+                 if it[0] == 'host' and it[2] is not None), default=0)
+    lines = []
+    for it in items:
+        if it[0] == 'blank':
+            if lines and lines[-1] != '':
+                lines.append('')
+        elif it[0] == 'raw':
+            lines.append(it[1])
+        else:
+            _, target, name = it
+            lines.append(f'{target:<{width}}  ## {name}' if name else target)
+    return '\n'.join(lines).strip('\n') + '\n', warnings
+
+
 class CmdDef:
     """Descriptor for a single ':' command: names, handler, completion choices, help text.
 
@@ -10513,6 +10631,9 @@ press '?' inside the app for the full keyboard reference.\
                         help='show full manual and exit')
     parser.add_argument('--help-example', action='store_true',
                         help='show full advanced example and exit')
+    parser.add_argument('--dump-hosts', action='store_true',
+                        help='print the hosts file fully expanded (no :for/:if/:let; '
+                             'plain "IP  ## name" lines) and exit')
     args = parser.parse_args()
 
     if args.help_full:
@@ -10535,19 +10656,32 @@ press '?' inside the app for the full keyboard reference.\
     if not args.hosts and not args.file:
         parser.print_help()
         sys.exit(0)
+
+    if args.dump_hosts:
+        try:
+            entries = _build_entries(args)
+        except OSError as e:
+            print(f"{_PROG_NAME}: cannot open '{e.filename}': {e}", file=sys.stderr)
+            sys.exit(1)
+        text, dump_warnings = _dump_simplified(entries)
+        print(text, end='')
+        for w in dump_warnings:
+            print(f"{_PROG_NAME}: {w}", file=sys.stderr)
+        sys.exit(0)
     return args
 
 
-def main(stdscr, args):
+def _build_entries(args):
+    """Build the startup entry list from -f files and positional hosts.
+
+    Shared by main() and --dump-hosts.  Raises OSError (with .filename set)
+    when a hosts file cannot be opened.
+    """
     entries = []
 
     # Load entries from each -f file in order, then append positional hosts
     for fpath in (args.file or []):
-        try:
-            entries.extend(parse_hosts_file(fpath))
-        except OSError as e:
-            print(f"{_PROG_NAME}: cannot open '{fpath}': {e}", file=sys.stderr)
-            return
+        entries.extend(parse_hosts_file(fpath))
 
     seen_cli_hosts = set()
     for host in args.hosts:
@@ -10565,6 +10699,15 @@ def main(stdscr, args):
                     else:
                         seen_cli_hosts.add(h)
                         entries.append(('host', h))
+    return entries
+
+
+def main(stdscr, args):
+    try:
+        entries = _build_entries(args)
+    except OSError as e:
+        print(f"{_PROG_NAME}: cannot open '{e.filename}': {e}", file=sys.stderr)
+        return
 
     if not entries:
         print(f"{_PROG_NAME}: no hosts to monitor", file=sys.stderr)
