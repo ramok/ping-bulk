@@ -7,3 +7,17 @@ tests/venv/
 # Demo recording output
 doc/demo/output/
 doc/demo/venv/
+
+# Python build artifacts
+__pycache__/
+build/
+*.egg-info/
+
+# Debian packaging build output
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.substvars
+debian/ping-bulk/
+debian/ping-bulk-doc/
+debian/ping-bulk-kiosk/
