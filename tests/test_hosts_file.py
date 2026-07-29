@@ -497,3 +497,93 @@ class TestUnknownDirective:
         assert any('unknown-in-for' in w for w in warns), (
             f"Expected warning for :unknown-in-for; warns={warns!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Unresolved '$' warnings
+# ---------------------------------------------------------------------------
+
+class TestUnresolvedDollarWarning:
+    """A literal '$' surviving expansion warns — '$' is not valid in real
+    host names, so it almost always means a back-reference that had nothing
+    to bind to (e.g. '## sh$i-cam$1' on a host line without a brace group)."""
+
+    def test_label_dollar_without_group_warns(self, pb, tmp_path):
+        content = (":for i in hub-{3}\n"
+                   "    10.0.$i.41 ## sh$i-cam$1\n"
+                   ":end\n")
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert any("unresolved '$'" in w for w in warns), warns
+
+    def test_plain_host_with_dollar_warns(self, pb, tmp_path):
+        # $1 outside any loop/brace context stays literal (undefined $name
+        # variables expand to '' instead and cannot be detected this way).
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, "host$1\n"))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert any("unresolved '$'" in w for w in warns), warns
+
+    def test_remote_ping_label_dollar_warns(self, pb, tmp_path):
+        content = (":for i in hub-{5}\n"
+                   "    :if $i in 5 -> :with remote-ping ops@relay\n"
+                   "    10.0.$i.41 ## sh$i-cam$1\n"
+                   "    :if $i in 5 -> :end\n"
+                   ":end\n")
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert any("unresolved '$'" in w for w in warns), warns
+
+    def test_brace_group_label_not_warned(self, pb, tmp_path):
+        content = (":for i in hub-{4}\n"
+                   "    10.0.$i.{41,42} ## sh$i-cam$1\n"
+                   ":end\n")
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert not warns, warns
+
+    def test_runtime_templates_not_warned(self, pb, tmp_path):
+        # Explicit :resolv / :remote-ping keep their brace templates for
+        # runtime expansion — '$N' there is legitimate.
+        content = (":resolv 10.0.1.{1..3} leaf-sw$1\n"
+                   ":remote-ping ops@x 10.20.0.{1..5}\n"
+                   "8.8.8.8\n")
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert not warns, warns
+
+
+# ---------------------------------------------------------------------------
+# :resolv remap warnings
+# ---------------------------------------------------------------------------
+
+class TestResolvRemapWarning:
+    """Redefining a :resolv mapping to a different value warns to the event
+    log — name-based monitors silently retarget on such collisions, so it is
+    almost always a hosts-file mistake (e.g. duplicate '## label')."""
+
+    @staticmethod
+    def make_app(pb, tmp_path):
+        from unittest.mock import patch
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        open(cfg, 'w').close()
+        with patch.object(pb, '_config_path', return_value=cfg):
+            return pb.Application([('host', '10.0.0.1')], log_file=None)
+
+    def test_name_remap_warns(self, pb, tmp_path):
+        app = self.make_app(pb, tmp_path)
+        app._apply_hosts_entry('10.0.0.41', 'cam')
+        app._apply_hosts_entry('10.0.0.42', 'cam')
+        assert any('remapped' in str(e) for e in app.events), list(app.events)
+
+    def test_ip_rename_warns(self, pb, tmp_path):
+        app = self.make_app(pb, tmp_path)
+        app._apply_hosts_entry('10.0.0.41', 'cam-a')
+        app._apply_hosts_entry('10.0.0.41', 'cam-b')
+        assert any('renamed' in str(e) for e in app.events), list(app.events)
+
+    def test_same_mapping_is_silent(self, pb, tmp_path):
+        app = self.make_app(pb, tmp_path)
+        app._apply_hosts_entry('10.0.0.41', 'cam')
+        app._apply_hosts_entry('10.0.0.41', 'cam')
+        assert not any('warning' in str(e) for e in app.events), list(app.events)

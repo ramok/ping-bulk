@@ -1542,7 +1542,7 @@ def _evaluate_if_condition(condition_str):
     """
     if not condition_str:
         return False
-    m = re.match(r'^(\S+)\s+(not\s+in|in)\s+(\S+)$', condition_str.strip())
+    m = _IF_COND_RE.match(condition_str.strip())
     if not m:
         return False
     value, operator, csv_list = m.group(1), m.group(2), m.group(3)
@@ -1551,6 +1551,35 @@ def _evaluate_if_condition(condition_str):
         return value in tokens
     else:  # "not in"
         return value not in tokens
+
+
+_IF_COND_RE = re.compile(r'^(\S+)\s+(not\s+in|in)\s+(\S+)$')
+
+
+def _if_condition_warning(condition_str):
+    """Return a warning message for a malformed :if/:elif condition, or None.
+
+    A condition that cannot be parsed evaluates to False, and in block form
+    that silently skips everything until :end — so a typo (most commonly a
+    missing ``->`` before an inline body) would swallow hosts without a
+    trace.
+    """
+    s = (condition_str or '').strip()
+    if _IF_COND_RE.match(s):
+        return None
+    if re.match(r'^(\S+)\s+(not\s+in|in)\s+(\S+)\s+', s):
+        return (f":if/:elif condition {s!r} has trailing text — "
+                f"missing '->' before an inline body?")
+    return (f":if/:elif condition {s!r} is malformed — "
+            f"expected 'VALUE in v1,v2,...' or 'VALUE not in v1,v2,...'")
+
+
+def _evaluate_if_condition_logged(condition_str, entries):
+    """Evaluate an :if/:elif condition; append a warn entry when malformed."""
+    warning = _if_condition_warning(condition_str)
+    if warning:
+        entries.append(('warn', warning))
+    return _evaluate_if_condition(condition_str)
 
 
 def _config_path():
@@ -2729,7 +2758,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                             if not currently_skipping:
                                 entries.append(('warn', ':if with empty inline body'))
                         elif not currently_skipping:
-                            if _evaluate_if_condition(cond_str):
+                            if _evaluate_if_condition_logged(cond_str, entries):
                                 body_list.insert(bj, body_str)
                         # No if_stack/block_open_stack push — no :end to match.
                     else:
@@ -2737,7 +2766,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                         if currently_skipping:
                             if_stack.append({'skipping': True, 'matched': True, 'seen_else': False})
                         else:
-                            result = _evaluate_if_condition(condition)
+                            result = _evaluate_if_condition_logged(condition, entries)
                             if_stack.append({'skipping': not result, 'matched': result, 'seen_else': False})
                         block_open_stack.append('if')
 
@@ -2756,7 +2785,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                         else:
                             condition_tmpl = parts[1].strip() if len(parts) > 1 else ''
                             condition = _apply_backref(condition_tmpl, captures, full_str)
-                            result = _evaluate_if_condition(condition)
+                            result = _evaluate_if_condition_logged(condition, entries)
                             frame['skipping'] = not result
                             frame['matched'] = result
 
@@ -2973,7 +3002,38 @@ class _HostsParser:
 
     def parse(self, src):
         """Parse hosts file source text, returning a list of entry tuples."""
-        return self._parse_lines(self._preprocess(src))
+        return self._warn_unresolved_dollar(
+            self._parse_lines(self._preprocess(src)))
+
+    @staticmethod
+    def _warn_unresolved_dollar(entries):
+        """Insert a warning after entries with a literal ``$`` left in them.
+
+        ``$`` is not valid in real host names, so one surviving expansion
+        almost always means a back-reference that had nothing to bind to
+        (e.g. ``## sh$i-cam$1`` on a host line without a brace group).
+        Explicit ``:resolv 10.0.{1..3}.1 sw$1`` / ``:remote-ping … {..}``
+        commands keep their templates for runtime brace expansion and are
+        not flagged.
+        """
+        out = []
+        for e in entries:
+            out.append(e)
+            subject = None
+            if e[0] in ('host', 'optional_host') and '$' in e[1]:
+                subject = f"host {e[1]!r}"
+            elif e[0] == 'cmd':
+                parts = e[1].split()
+                if (parts[0] == ':resolv' and len(parts) == 3
+                        and '$' in parts[2] and '{' not in parts[1]):
+                    subject = f"name {parts[2]!r} ({e[1]})"
+                elif (parts[0] == ':remote-ping' and len(parts) >= 3
+                        and '$' in parts[-1] and '{' not in parts[-1]):
+                    subject = f"target {parts[-1]!r} ({e[1]})"
+            if subject is not None:
+                out.append(('warn', f"unresolved '$' in {subject} — "
+                                    f"back-reference without a matching group?"))
+        return out
 
     # ── Preprocessing (lexer) ─────────────────────────────────────────────
 
@@ -3093,7 +3153,7 @@ class _HostsParser:
                                     expanded = _expand_let_vars(text, self.variables)
                                     eparts = expanded.split(None, 1)
                                     cond_args = eparts[1].strip() if len(eparts) > 1 else ''
-                                    matched = _evaluate_if_condition(cond_args)
+                                    matched = _evaluate_if_condition_logged(cond_args, entries)
                                     frame['skipping'] = not matched
                                     frame['matched'] = matched
                                 # else: already matched a prior branch — stay skipping
@@ -3162,7 +3222,7 @@ class _HostsParser:
                         if not body_str:
                             entries.append(('warn', ':if with empty inline body'))
                         else:
-                            if _evaluate_if_condition(cond_str.strip()):
+                            if _evaluate_if_condition_logged(cond_str.strip(), entries):
                                 body_text, body_comment = _strip_inline_comment(body_str)
                                 # The ## label may have been stripped from the full line
                                 # by _preprocess; use it if the body has none of its own.
@@ -3170,7 +3230,7 @@ class _HostsParser:
                                     lines.insert(i, (body_text, body_comment or comment))
                     else:
                         # Block form: push frame; closed by :end.
-                        matched = _evaluate_if_condition(args)
+                        matched = _evaluate_if_condition_logged(args, entries)
                         if_stack.append({'skipping': not matched, 'matched': matched, 'seen_else': False})
                 elif cmd_word == 'elif':
                     if not if_stack:
@@ -3182,7 +3242,7 @@ class _HostsParser:
                         elif frame['matched']:
                             frame['skipping'] = True
                         else:
-                            matched = _evaluate_if_condition(args)
+                            matched = _evaluate_if_condition_logged(args, entries)
                             frame['skipping'] = not matched
                             frame['matched'] = matched
                 elif cmd_word == 'else':
@@ -7933,9 +7993,19 @@ class Application:
         ping subprocess targets the IP address directly instead of the hostname.
 
         This is called at startup (via _dispatch_cmd from hosts-file :resolv
-        lines) and interactively.  Silent on success; reports a warning to the
-        event log only when no monitor matches.
+        lines) and interactively.  Silent on success; warns to the event log
+        when a mapping is redefined to a different value (name-based monitors
+        silently retarget on such collisions, so this is almost always a
+        hosts-file mistake) or, interactively, when no monitor matches.
         """
+        prev = self.hosts_map.get(hostname)
+        if prev is not None and prev[0] != ip:
+            self.add_event("resolv",
+                f"warning: '{hostname}' remapped {prev[0]} → {ip} — duplicate label?")
+        prev_pair = self.hosts_map.get(ip)
+        if prev_pair is not None and prev_pair[1] != hostname:
+            self.add_event("resolv",
+                f"warning: '{ip}' renamed '{prev_pair[1]}' → '{hostname}'")
         self.hosts_map[ip] = (ip, hostname)
         self.hosts_map[hostname] = (ip, hostname)
 

@@ -429,3 +429,85 @@ class TestIfInline:
         entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
         hosts = [v for k, v in entries if k == 'host']
         assert hosts == ['10.0.1.1', '10.0.2.2', '10.0.3.3']
+
+
+# ===========================================================================
+# TestMalformedConditionWarning
+# ===========================================================================
+
+class TestMalformedConditionWarning:
+    """A condition that cannot be parsed evaluates to False and (in block
+    form) silently skips everything until :end — so the parser must warn.
+    The most common cause is a missing '->' before an inline body."""
+
+    def test_missing_arrow_top_level_warns(self, pb, tmp_path):
+        content = """\
+            :if 1 in 1 10.0.0.1 ## victim
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert any("missing '->'" in w for w in warns), warns
+
+    def test_missing_arrow_inside_for_warns(self, pb, tmp_path):
+        content = """\
+            :for i in hub-{4,5}
+                :if $i not in 5    10.123.$i.41 ## sh$i-cam1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        arrow_warns = [w for w in warns if "missing '->'" in w]
+        assert len(arrow_warns) == 2, warns  # one per iteration
+
+    def test_bad_operator_warns_malformed(self, pb, tmp_path):
+        content = """\
+            :if foo equals bar
+            10.0.0.1
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert any('is malformed' in w for w in warns), warns
+
+    def test_malformed_elif_warns(self, pb, tmp_path):
+        content = """\
+            :let env dev
+            :if $env in prod
+            10.0.0.1
+            :elif $env
+            10.0.0.2
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert any('is malformed' in w for w in warns), warns
+
+    def test_malformed_inline_condition_warns(self, pb, tmp_path):
+        content = """\
+            :if justoneword -> 10.0.0.1
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert any('is malformed' in w for w in warns), warns
+
+    def test_valid_conditions_do_not_warn(self, pb, tmp_path):
+        content = """\
+            :let env prod
+            :if $env in prod
+            10.0.0.1
+            :elif $env not in dev,staging
+            10.0.0.2
+            :else
+            10.0.0.3
+            :end
+            :if $env in prod -> 10.0.0.4
+            :for i in hub-{1,2}
+                :if $i in 1 -> 10.0.$i.1
+                :if $i not in 1
+                10.0.$i.2
+                :end
+            :end
+        """
+        entries = pb.parse_hosts_file(write_hosts(tmp_path, content))
+        warns = [e[1] for e in entries if e[0] == 'warn']
+        assert not warns, warns

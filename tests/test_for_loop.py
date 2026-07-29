@@ -946,7 +946,7 @@ class TestForRemotePingLabel:
         try to connect to the wrong host."""
         content = """\
             :for i in hub-{1..2}
-                10.0.$1.1 ## h$1-router
+                10.0.$1.1 ## h$i-router
                 :remote-ping sh$1-relay 10.87.0.1 ## ps-jetson
             :end
         """
