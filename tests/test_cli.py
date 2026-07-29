@@ -113,10 +113,10 @@ DUMP_INPUT = """\
 
 
 class TestDumpHosts:
-    """--dump-hosts prints the expanded hosts file and exits 0.
+    """--dump-hosts prints the expanded host inventory and exits 0.
 
     :for/:if/:let are resolved, hosts render as 'IP  ## name', sections
-    keep their ##/### form, other directives stay verbatim, :remote-ping
+    keep their ##/### form, all other directives are omitted, :remote-ping
     targets are flattened to plain host lines, :source is spliced in."""
 
     @pytest.fixture()
@@ -163,10 +163,10 @@ class TestDumpHosts:
         assert '10.40.0.1  ## remote-host' in out, out
         assert '10.50.0.1' in out.splitlines(), out
 
-    def test_directives_kept_verbatim(self, app_path, hosts_file):
+    def test_directives_skipped(self, app_path, hosts_file):
         lines = self.dump(app_path, hosts_file).stdout.splitlines()
-        assert ':set stats down' in lines, lines
-        assert ':resolv 192.168.88.1 gw-def' in lines, lines
+        cmd_lines = [l for l in lines if l.startswith(':')]
+        assert not cmd_lines, cmd_lines
 
     def test_consumed_resolv_merged_into_inline_form(self, app_path, hosts_file):
         out = self.dump(app_path, hosts_file).stdout
@@ -192,3 +192,56 @@ class TestDumpHosts:
         result = self.dump(app_path, str(tmp_path / 'nope.hosts'))
         assert result.returncode == 1, result.stderr
         assert 'cannot open' in result.stderr, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# --dump-simple-script
+# ---------------------------------------------------------------------------
+
+class TestDumpSimpleScript:
+    """--dump-simple-script FILE writes a self-executing expanded config:
+    like --dump-hosts but with the other directives kept verbatim and a
+    #!/bin/sh bootstrap header; FILE is overwritten and chmod +x'ed."""
+
+    @pytest.fixture()
+    def hosts_file(self, tmp_path):
+        f = tmp_path / 'dump.hosts'
+        f.write_text(DUMP_INPUT)
+        return str(f)
+
+    def gen(self, app_path, hosts_file, out):
+        return run_app('--dump-simple-script', out, '-f', hosts_file,
+                       app_path=app_path)
+
+    def test_writes_executable_script(self, app_path, hosts_file, tmp_path):
+        out = str(tmp_path / 'gen.hosts')
+        result = self.gen(app_path, hosts_file, out)
+        assert result.returncode == 0, result.stderr
+        assert os.access(out, os.X_OK), "generated script must be executable"
+        content = open(out).read()
+        assert content.startswith('#!/bin/sh\n'), content[:40]
+        assert ':set stats down' in content          # directives kept
+        assert '10.30.1.1  ## sensor1-ctrl' in content
+        assert ':for' not in content                 # loops expanded
+
+    def test_overwrites_existing_file(self, app_path, hosts_file, tmp_path):
+        out = tmp_path / 'gen.hosts'
+        out.write_text('old content\n')
+        result = self.gen(app_path, hosts_file, str(out))
+        assert result.returncode == 0, result.stderr
+        content = out.read_text()
+        assert 'old content' not in content
+        assert content.startswith('#!/bin/sh\n')
+
+    def test_generated_script_reparses_cleanly(self, app_path, hosts_file, tmp_path):
+        out = str(tmp_path / 'gen.hosts')
+        self.gen(app_path, hosts_file, out)
+        result = run_app('--dump-hosts', '-f', out, app_path=app_path)
+        assert result.returncode == 0, result.stderr
+        assert '10.30.1.1  ## sensor1-ctrl' in result.stdout
+        assert result.stderr == '', result.stderr   # no parse warnings
+
+    def test_unwritable_target_exits_nonzero(self, app_path, hosts_file, tmp_path):
+        result = self.gen(app_path, hosts_file, str(tmp_path / 'no-dir' / 'x'))
+        assert result.returncode == 1, result.stderr
+        assert 'cannot write' in result.stderr, result.stderr

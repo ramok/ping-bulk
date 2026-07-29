@@ -103,16 +103,23 @@ OPTIONS
     instructions and the security model.
 
 ``--dump-hosts``
-    Print the hosts file in a simplified, fully expanded form and exit.
-    ``:for`` loops, ``:if`` conditionals, ``:let`` variables and brace
-    expansion are resolved; every monitored target becomes a plain
-    ``IP  ## name`` line (static ``:resolv`` mappings are merged into the
-    inline ``##`` form), section headers keep their ``##``/``###`` shape,
-    and all other directives are kept verbatim.  ``:remote-ping`` targets
-    are flattened to plain host lines (the relay is dropped) and
-    ``:source``'d files are spliced in, so the result is one
-    self-contained file that is easy to hand-edit — useful for handing a
-    generated inventory to someone who only needs to update IPs.
+    Print the hosts file as a simplified, fully expanded inventory and
+    exit.  ``:for`` loops, ``:if`` conditionals, ``:let`` variables and
+    brace expansion are resolved; the output contains only ``IP  ## name``
+    host lines (static ``:resolv`` mappings are merged into the inline
+    ``##`` form) and ``##``/``###`` section titles — every other directive
+    is omitted.  ``:remote-ping`` targets are flattened to plain host
+    lines (the relay is dropped) and ``:source``'d files are spliced in.
+
+``--dump-simple-script FILE``
+    Write the same fully expanded configuration to *FILE* as a
+    self-executing script and exit.  Unlike ``--dump-hosts``, the other
+    directives (``:set``, ``:bind-key``, ``:prog-options``, …) are kept
+    verbatim and a ``#!/bin/sh`` bootstrap header is prepended, so the
+    result runs directly (``./FILE``).  *FILE* is overwritten when it
+    already exists and is marked executable.  Useful for handing a
+    working, loop-free configuration to someone who only needs to
+    update IPs.
 
 ``HOST ...``
     One or more host names, IP addresses, or host:port combinations to monitor.
