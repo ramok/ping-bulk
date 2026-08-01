@@ -43,12 +43,27 @@ Via pip::
     pip install .
 
     # Directly from a Git repository
-    pip install git+https://github.com/YOUR_USER/ping-bulk.git
+    pip install git+https://github.com/ramok/ping-bulk.git
 
 Single-file copy (no pip required)::
 
     cp ping-bulk ~/.local/bin/
     chmod +x ~/.local/bin/ping-bulk
+
+or download the raw script straight from GitHub (curl or wget)::
+
+    curl -fsSL https://raw.githubusercontent.com/ramok/ping-bulk/master/ping-bulk \
+        -o ~/.local/bin/ping-bulk && chmod +x ~/.local/bin/ping-bulk
+
+The ``install.sh`` script in the repository automates the single-file
+install: it verifies that the system ``ping`` supports the required
+``-O``/``-D`` flags, downloads the raw script into
+``~/.local/bin/ping-bulk`` (overwriting a previous copy), and — when
+``~/.local/bin`` is not on ``PATH`` — appends an ``export PATH`` line to
+``~/.bashrc`` or ``~/.zshrc``, picked from ``$SHELL``.  Re-running it just
+refreshes the installed copy::
+
+    curl -fsSL https://raw.githubusercontent.com/ramok/ping-bulk/master/install.sh | sh
 
 
 OPTIONS
@@ -101,6 +116,16 @@ OPTIONS
     restricted (``rnano``/``rvim``), and every command dispatch is
     logged to syslog.  See ``kiosk/README.md`` for full setup
     instructions and the security model.
+
+``--help-full``
+    Print the complete built-in manual — every hotkey, ``:command``,
+    hosts-file directive, and expansion rule (the same content as the
+    ``?`` help overlay inside the app) — and exit.
+
+``--help-example``
+    Print a fully commented advanced hosts file demonstrating most
+    features and exit.  A good starting point for a new configuration:
+    ``ping-bulk --help-example > my.hosts``.
 
 ``--dump-hosts``
     Print the hosts file as a simplified, fully expanded inventory and

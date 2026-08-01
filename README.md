@@ -83,22 +83,50 @@ third-party dependencies — only the Python standard library and the system
 - Linux `ping` with `-O` and `-D` flag support (iputils-ping ≥ 20121221)
 - A terminal with colour support
 
-### Via pip (recommended)
+### Via pip
 
 ```sh
 # From a local clone
 pip install .
 
 # Directly from GitHub
-pip install git+https://github.com/YOUR_USER/ping-bulk.git
+pip install git+https://github.com/ramok/ping-bulk.git
 ```
 
 ### Single-file copy
+
+From a local clone:
 
 ```sh
 cp ping-bulk ~/.local/bin/
 chmod +x ~/.local/bin/ping-bulk
 ```
+
+Or download the raw script straight from GitHub:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ramok/ping-bulk/master/ping-bulk \
+    -o ~/.local/bin/ping-bulk && chmod +x ~/.local/bin/ping-bulk
+
+# the same with wget
+wget -qO ~/.local/bin/ping-bulk \
+    https://raw.githubusercontent.com/ramok/ping-bulk/master/ping-bulk \
+    && chmod +x ~/.local/bin/ping-bulk
+```
+
+### Installer script
+
+[`install.sh`](install.sh) automates the single-file install: it verifies
+that the system `ping` supports the required `-O`/`-D` flags, downloads the
+raw script into `~/.local/bin/ping-bulk` (overwriting a previous copy), and
+— when `~/.local/bin` is not on `PATH` — appends an `export PATH` line to
+`~/.bashrc` or `~/.zshrc`, picked from `$SHELL`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ramok/ping-bulk/master/install.sh | sh
+```
+
+The script is idempotent: re-running it just refreshes the installed copy.
 
 ## Quick start
 
@@ -121,27 +149,81 @@ Press **`?`** inside the running app for the full keyboard reference.
 ## CLI Options
 
 ```
-usage: ping-bulk [-h] [-f FILE] [-l LOGFILE] [--dns MODE] [--stats MODE]
-                 [--sort MODE] [--ping-view MODE] [HOST ...]
+usage: ping-bulk [-h] [--dns MODE] [--stats MODE] [--sort MODE]
+                 [--ping-view MODE] [-l LOGFILE] [-f FILE]
+                 [--sync-history {on,off}] [--kiosk] [--log-level LEVEL] [-v]
+                 [-q] [--help-full] [--help-example] [--dump-hosts]
+                 [--dump-simple-script FILE]
+                 [HOST ...]
 
 positional arguments:
   HOST                  hosts/IPs to ping
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
-  -f FILE, --file FILE  hosts file (# comment, ## section header, one host per line)
-  -l LOGFILE, --log-file LOGFILE
-                        append event log entries to this file in real time
-  --dns MODE            DNS display mode at startup: off | hostname | ip
-  --stats MODE          stats column at startup: off | Down | Loss% | Avg | Min | Max |
-                        StDev | RX | TX | XX | All
+  --dns MODE            DNS display mode at startup: off | hostname | ip |
+                        name+ip | ip+name
+  --stats MODE          stats column at startup: off | down | loss% | avg |
+                        min | max | stdev | rx | tx | xx | all
   --sort MODE           sort order at startup: none | name | status | latency
-  --ping-view MODE      ping history display mode at startup: success | rtt | scaled
-  --kiosk               kiosk mode — hardened session for unattended consoles
+  --ping-view MODE      ping history display mode at startup: success | rtt |
+                        scaled
+  -l, --log-file LOGFILE
+                        append event log entries to this file in real time
+  -f, --file FILE       hosts file; may be given multiple times, loaded in
+                        order
+  --sync-history {on,off}
+                        align history bars to wall-clock time (default: on)
+  --kiosk               run in kiosk mode: auto-launch tmux, restrict
+                        commands, use rnano/rvim
+  --log-level LEVEL     event log verbosity: quiet normal info debug trace
+                        (default: normal)
+  -v                    increase log verbosity (-v info, -vv debug)
+  -q                    decrease log verbosity (-q quiet)
+  --help-full           show full manual and exit
+  --help-example        show full advanced example and exit
+  --dump-hosts          print only the expanded host inventory ("IP ## name"
+                        lines and ## titles; no : commands) and exit
+  --dump-simple-script FILE
+                        write a self-executing hosts script to FILE (chmod +x,
+                        overwrites): fully expanded like --dump-hosts but with
+                        : commands kept and a #!/bin/sh header
 ```
 
 Command-line options override settings from the config file
 (`~/.config/ping-bulk/config`).
+
+### Built-in help
+
+`--help-full` prints the complete built-in manual — every hotkey, `:command`,
+hosts-file directive, and expansion rule (the same content as the `?` overlay
+inside the app).  `--help-example` prints a fully commented advanced hosts
+file demonstrating most features; it mirrors
+[`examples/ping-bulk.advance`](examples/ping-bulk.advance) and is a good
+starting point: `ping-bulk --help-example > my.hosts`.
+
+### Dumping an expanded hosts file
+
+Hosts files can use loops, conditionals, and variables (see below).  Two
+flags turn such a file into a flat, human-editable copy with every
+`:for`/`:if`/`:let` and brace expansion already resolved:
+
+- `--dump-hosts` prints a plain inventory to stdout: one `IP  ## name` line
+  per monitored target plus `##`/`###` section titles, nothing else.
+- `--dump-simple-script FILE` writes a runnable copy instead: the other
+  directives (`:set`, `:bind-key`, `:prog-options`, …) are kept and a
+  `#!/bin/sh` self-exec header is prepended, so `./FILE` starts ping-bulk
+  directly.  `FILE` is overwritten and marked executable.
+
+Both flatten `:remote-ping` targets to plain hosts and splice `:source`'d
+files in, which is handy for handing a working configuration to someone who
+only needs to update IPs.  Try them on the files in
+[`examples/`](examples/):
+
+```sh
+ping-bulk --dump-hosts -f examples/ping-bulk.advance
+ping-bulk --dump-simple-script flat.hosts -f examples/ping-bulk.advance
+```
 
 ## Hosts file
 
@@ -214,24 +296,24 @@ reference.
 
 ## Keyboard shortcuts
 
- | Key             | Action                   | 
- | -----           | --------                 | 
- | `q` / `Q`       | Quit                            |
- | `?`             | Help overlay                    |
- | `:`             | Open command line               |
- | `d` / `D`       | Cycle DNS mode                  |
- | `s` / `S`       | Cycle stats column              |
- | `o` / `O`       | Cycle sort order                |
- | `h` / `H`       | Cycle history mode              |
- | `p` / `P`       | Toggle pause                    |
- | `↑` / `↓`       | Navigate host list              |
- | `Enter`         | Show detailed stats             |
- | `Space`         | Insert marker / Toggle fold     |
- | `Esc`           | Clear host selection            |
- | `C`             | Clear event log                 |
- | `←` / `→`           | Scroll history (step)           |
- | `Ctrl+←` / `Ctrl+→` | Scroll history (page)           |
- | `PgUp` / `PgDn` | Scroll event log                |
+| Key                 | Action                      |
+| -----               | --------                    |
+| `q` / `Q`           | Quit                        |
+| `?`                 | Help overlay                |
+| `:`                 | Open command line           |
+| `d` / `D`           | Cycle DNS mode              |
+| `s` / `S`           | Cycle stats column          |
+| `o` / `O`           | Cycle sort order            |
+| `h` / `H`           | Cycle history mode          |
+| `p` / `P`           | Toggle pause                |
+| `↑` / `↓`           | Navigate host list          |
+| `Enter`             | Show detailed stats         |
+| `Space`             | Insert marker / Toggle fold |
+| `Esc`               | Clear host selection        |
+| `C`                 | Clear event log             |
+| `←` / `→`           | Scroll history (step)       |
+| `Ctrl+←` / `Ctrl+→` | Scroll history (page)       |
+| `PgUp` / `PgDn`     | Scroll event log            |
 
 ## Remote clock monitoring
 
