@@ -1648,7 +1648,11 @@ def _format_updown_time(seconds):
 def _format_offset(ms):
     """Format a signed clock offset in milliseconds as a compact string.
 
-    Always carries an explicit sign.  Output examples and widths:
+    Always carries an explicit sign — except an offset that rounds to zero
+    at the displayed 0.1 s precision, which is shown unsigned ("0.0s"):
+    at that magnitude the direction is measurement noise, and "-0.0s"
+    reads as a glitch.  Output examples and widths:
+      |offset| < 0.05 s → "0.0s"          (unsigned, 4 chars)
       |offset| < 60 s   → "+12.5s"        (one decimal second, ≤ 6 chars)
       |offset| < 60 m   → "+5m03s"        (≤ 7 chars)
       |offset| < 24 h   → "+11h07m"       (≤ 7 chars)
@@ -1657,6 +1661,8 @@ def _format_offset(ms):
     sign = '-' if ms < 0 else '+'
     total_s = abs(ms) / 1000.0
     if total_s < 60:
+        if round(total_s, 1) == 0:
+            return "0.0s"
         return f"{sign}{total_s:.1f}s"
     secs = int(round(total_s))
     if secs < 3600:
@@ -10298,8 +10304,12 @@ class Application:
         if c_state == 'no-remote-time' or c_off is not None:
             lines.append("  Clock (from ICMP timestamp, UTC):")
             if c_off is not None:
-                direction = ('remote ahead' if c_off > 0
-                             else 'remote behind' if c_off < 0 else 'in sync')
+                # Below the 0.1s display precision the direction is noise —
+                # _format_offset shows an unsigned "0.0s" for these, so the
+                # label says "in sync" rather than ahead/behind.
+                direction = ('in sync' if _format_offset(c_off) == '0.0s'
+                             else 'remote ahead' if c_off > 0
+                             else 'remote behind')
                 local_ms = self._local_utc_ms()
                 remote_ms = (local_ms + c_off) % 86_400_000
                 lines.append(f"    Remote UTC:  {_format_utc_hms(remote_ms)}   (no date/TZ)")

@@ -49,7 +49,11 @@ def make_app(pb, tmp_path, entries=None):
 
 class TestFormatOffset:
     @pytest.mark.parametrize('ms,expected', [
-        (0,            '+0.0s'),
+        (0,            '0.0s'),   # rounds to zero → unsigned (no '-0.0s')
+        (40,           '0.0s'),
+        (-40,          '0.0s'),
+        (60,           '+0.1s'),
+        (-60,          '-0.1s'),
         (300,          '+0.3s'),
         (-300,         '-0.3s'),
         (12500,        '+12.5s'),
@@ -64,9 +68,14 @@ class TestFormatOffset:
     def test_values(self, pb, ms, expected):
         assert pb._format_offset(ms) == expected
 
-    def test_always_signed(self, pb):
-        assert pb._format_offset(0).startswith('+')
-        assert pb._format_offset(-1).startswith('-')
+    def test_signed_above_display_precision(self, pb):
+        assert pb._format_offset(100).startswith('+')
+        assert pb._format_offset(-100).startswith('-')
+
+    def test_unsigned_below_display_precision(self, pb):
+        # ±49 ms rounds to 0.0s — direction is noise, so no sign at all.
+        assert pb._format_offset(-1) == '0.0s'
+        assert pb._format_offset(49) == '0.0s'
 
 
 # ===========================================================================
