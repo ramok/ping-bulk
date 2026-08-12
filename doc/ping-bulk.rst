@@ -199,19 +199,20 @@ Navigation
     Insert a timestamped *seen* separator into the event log.
 
 ``/``
-    Open the search prompt.  When a host is selected, searches hostnames;
-    otherwise searches the event log.  ``n`` / ``N`` navigate to the
-    next / previous match.  ``Esc`` cancels and clears highlights.
+    Open the search prompt (regex).  When a host is selected, searches
+    hostnames; otherwise searches the event log.  Plain text matches as
+    a substring; regex metacharacters work too.  ``n`` / ``N`` navigate
+    to the next / previous match.  ``Esc`` cancels and clears highlights.
     Press **Tab** inside the search prompt to switch to filter mode.
 
 ``f``
-    Open the filter prompt.  Type a glob pattern to show only matching
-    hosts; non-matching hosts are hidden.  A bare string (no ``*``, ``?``,
-    or ``[``) is automatically wrapped as ``*pattern*`` for substring
-    matching.  A full-width banner below the column header shows the
-    active filter and match count.  Press **Enter** to confirm, **Esc** to
-    cancel (restoring the previous filter), **Tab** to switch to search
-    mode.
+    Open the filter prompt.  Type a regex to show only matching hosts;
+    non-matching hosts are hidden.  Plain text matches as a substring;
+    use regex metacharacters (``\d``, ``|``, ``^``, ``$``, …) for more
+    power.  Invalid regex is treated as a literal string.  A full-width
+    banner below the column header shows the active filter and match
+    count.  Press **Enter** to confirm, **Esc** to cancel (restoring the
+    previous filter), **Tab** to switch to search mode.
 
 ``F``
     Clear the active host filter immediately.
@@ -679,9 +680,9 @@ Search and Filter
 ``:search``
     Open the search prompt (same as ``/``).  When a host is selected,
     searches host display names; otherwise searches the event log.
-    Matching is case-insensitive substring.  Press ``Enter`` to confirm and
-    jump to the first match, ``Esc`` to cancel.  Press **Tab** to switch to
-    the filter prompt.
+    Matching uses case-insensitive regex (plain text works as substring).
+    Press ``Enter`` to confirm and jump to the first match, ``Esc`` to
+    cancel.  Press **Tab** to switch to the filter prompt.
 
 ``:search-next [prev]``
     Jump to the next search match (same as ``n``).  With ``prev``,
@@ -691,9 +692,9 @@ Search and Filter
     Set or clear the host filter (same as ``f`` / ``F``).
 
     With a *pattern*, show only hosts whose display name, resolved IP, or
-    resolved hostname matches the glob.  A bare string is auto-wrapped as
-    ``*pattern*``.  With no arguments, open the interactive filter prompt.
-    With ``--clear``, clear the active filter.
+    resolved hostname matches the regex (substring search).  Invalid regex
+    is treated as a literal string.  With no arguments, open the
+    interactive filter prompt.  With ``--clear``, clear the active filter.
 
     When a filter is active:
 

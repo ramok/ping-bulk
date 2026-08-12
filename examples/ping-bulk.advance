@@ -321,13 +321,13 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # :bind-key --mode normal,help,details,command q :quit
 
 # -- Filter mode -----------------------------------------------------------
-# [f] opens the filter prompt -- type a glob pattern to show only matching
-# hosts.  A bare string (no *, ?, [) is auto-wrapped as *pattern*.
+# [f] opens the filter prompt -- type a regex to show only matching hosts.
+# Plain text matches as a substring; use regex metacharacters for more power.
 # [F] / Esc clears the active filter.
 # The filter banner is shown below the column header when a filter is active.
 #
 # Bind Ctrl+F to filter only within the "production" section:
-# :bind-key <C-f> :filter prod*
+# :bind-key <C-f> :filter prod
 
 # -- Dynamic Additions ------------------------------------------------------
 # You can also dynamically source other config files or add specific hosts

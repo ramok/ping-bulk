@@ -69,8 +69,8 @@ class TestUpdateFilterVisible:
         app._update_filter_visible()
         assert 0 in app._filter_visible
 
-    def test_bare_string_auto_wrapped_as_glob(self, pb, tmp_path):
-        """Bare string (no metacharacters) is wrapped as *query*."""
+    def test_bare_string_matches_as_substring(self, pb, tmp_path):
+        """Plain text without metacharacters matches as substring."""
         m = make_monitor(pb, 'web01.example.com')
         app = build_app(pb, tmp_path, [m])
         app._filter_query = 'web'
@@ -84,23 +84,41 @@ class TestUpdateFilterVisible:
         app._update_filter_visible()
         assert 0 not in app._filter_visible
 
-    def test_glob_pattern_star(self, pb, tmp_path):
+    def test_regex_dot_metachar(self, pb, tmp_path):
         m1 = make_monitor(pb, 'web01')
         m2 = make_monitor(pb, 'db01')
         app = build_app(pb, tmp_path, [m1, m2])
-        app._filter_query = 'web*'
+        app._filter_query = 'web.1'
         app._update_filter_visible()
         assert 0 in app._filter_visible      # web01 matches
         assert 1 not in app._filter_visible  # db01 does not
 
-    def test_glob_question_mark(self, pb, tmp_path):
+    def test_regex_alternation(self, pb, tmp_path):
+        m1 = make_monitor(pb, 'web01')
+        m2 = make_monitor(pb, 'db01')
+        m3 = make_monitor(pb, 'cache01')
+        app = build_app(pb, tmp_path, [m1, m2, m3])
+        app._filter_query = 'web|db'
+        app._update_filter_visible()
+        assert 0 in app._filter_visible
+        assert 1 in app._filter_visible
+        assert 2 not in app._filter_visible
+
+    def test_regex_anchor(self, pb, tmp_path):
         m1 = make_monitor(pb, 'web1')
         m2 = make_monitor(pb, 'web12')
         app = build_app(pb, tmp_path, [m1, m2])
-        app._filter_query = 'web?'
+        app._filter_query = r'^web\d$'
         app._update_filter_visible()
         assert 0 in app._filter_visible      # web1 matches
         assert 1 not in app._filter_visible  # web12 does not
+
+    def test_invalid_regex_falls_back_to_literal(self, pb, tmp_path):
+        m = make_monitor(pb, 'host[1')
+        app = build_app(pb, tmp_path, [m])
+        app._filter_query = '[1'
+        app._update_filter_visible()
+        assert 0 in app._filter_visible
 
     def test_section_included_when_child_matches(self, pb, tmp_path):
         s = make_section(pb, 'Servers')

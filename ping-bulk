@@ -803,7 +803,7 @@ _HELP_CMDS_INTERACTIVE = [
     "  :q  :quit                 quit",
     "",
     "  :edit                     open hosts file in external editor; reloads on save",
-    "  :filter \\[pattern]         filter hosts by glob pattern (bare string auto-wrapped as *pattern*)",
+    "  :filter \\[pattern]         filter hosts by regex (plain text matches as substring)",
     "  :filter --clear           remove active filter",
     "  :search                   open host search  (same as [/])",
     "  :search-next \\[prev]       jump to next / previous search match",
@@ -1046,15 +1046,16 @@ example.com:443
 # :bind-key --mode help,details r :close
 
 # ── Filter mode ─────────────────────────────────────────────────────────────
-# [f]  open filter prompt — type a glob pattern to show only matching hosts.
-#      A bare string is auto-wrapped as *pattern* (substring match).
+# [f]  open filter prompt — type a regex to show only matching hosts.
+#      Plain text works as substring match; regex metacharacters for power.
 # [F]  clear the active filter immediately.
 # [Esc] clears the filter (first press), then host selection (second press).
 #
 # Filter from the command line:
-#   :filter web*          # show only hosts matching web*
-#   :filter 10.0.1.*      # show only 10.0.1.x subnet
-#   :filter --clear       # remove filter
+#   :filter web            # substring match — show hosts containing "web"
+#   :filter sh.-ps         # regex — show sh1-ps31, sh2-ps31, …
+#   :filter 10[.]0[.]1[.]  # regex — show only 10.0.1.x subnet
+#   :filter --clear        # remove filter
 
 """
 
@@ -3867,8 +3868,7 @@ CMD_REGISTRY = [
            '[prev]',              'jump to next (or prev) search match',
            completable=False),
     CmdDef(['filter'],           '_cmd_filter',      None,
-           '[pattern|--clear]',   'filter host list by glob pattern; no args = open prompt',
-           completable=False),
+           '[pattern|--clear]',   'filter host list by regex; no args = open prompt'),
     CmdDef(['bind-key'],             '_cmd_bindkey',    None,
            '[--show] [key] [command]', 'bind/query/list key bindings',
            flags=['--show', '--mode', '--desc', '--hint',
@@ -4316,8 +4316,8 @@ class Application:
         self._unbound_defaults = set()  # key notations the user explicitly unbound
         self.multikey_timeout = 0 # ms; 0 = always wait for next key
         self._current_mode = 'normal'  # current UI mode: normal/help/details/command
-        # Filter mode: show only hosts matching a glob pattern (must be set before _load_config)
-        self._filter_query   = ''    # '' = inactive; glob pattern when active
+        # Filter mode: show only hosts matching a regex pattern (must be set before _load_config)
+        self._filter_query   = ''    # '' = inactive; regex pattern when active
         self._filter_visible = set() # entry indices visible under current filter
         self._filter_visible_monitors = set()  # monitor entry indices matching filter (for banner count)
         self._register_default_bindings()
@@ -5561,7 +5561,7 @@ class Application:
         _b('n', ':search-next',   desc='next search match')
         _b('N', ':search-next prev', desc='previous search match')
         # Filter
-        _b('f', ':filter',        desc='filter hosts by glob pattern')
+        _b('f', ':filter',        desc='filter hosts by regex')
         _b('F', ':filter --clear', desc='clear host filter')
 
         self._register_mode_bindings()
@@ -6653,7 +6653,7 @@ class Application:
             n_vis = len(self._filter_visible_monitors)
             n_tot = len(self.monitors)
             label = (f"  🔍  FILTER  {self._filter_query}"
-                     f"  [{n_vis}/{n_tot}]  [f] edit  [Esc] clear")
+                     f"  [{n_vis}/{n_tot}]  [f] edit  [F/Esc] clear")
             yield label, curses.A_REVERSE | curses.A_BOLD
         if (self.highlighted_index is not None
                 and 0 <= self.highlighted_index < len(self.entries)
@@ -7476,7 +7476,7 @@ class Application:
             stdscr.move(height - 1, min(len(line), width - 2))
         elif p['type'] == 'search':
             mode_label = 'hosts' if p['mode'] == 'hosts' else 'log'
-            label = f"/{mode_label}/ "
+            label = f"/{mode_label} (regex)/ "
             text  = ''.join(p['chars'])
             n_hits = len(self._search_results) if text else 0
             suffix = f"  [{n_hits} match{'es' if n_hits != 1 else ''}]" if text else \
@@ -7486,7 +7486,7 @@ class Application:
             cursor_x = min(len(label) + len(text), width - 2)
             stdscr.move(height - 1, cursor_x)
         elif p['type'] == 'filter':
-            label = "/filter/ "
+            label = "/filter (regex)/ "
             text  = ''.join(p['chars'])
             if text:
                 # Live preview: temporarily apply to get count
@@ -9405,10 +9405,14 @@ class Application:
 
     def _update_search_results(self):
         """Recompute self._search_results from self._search_query and _search_mode."""
-        q = self._search_query.lower()
+        q = self._search_query
         if not q:
             self._search_results = []
             return
+        try:
+            rx = re.compile(q, re.IGNORECASE)
+        except re.error:
+            rx = re.compile(re.escape(q), re.IGNORECASE)
         if self._search_mode == 'hosts':
             dns_mode = DNS_MODES[self.dns_mode]
             results = []
@@ -9417,13 +9421,13 @@ class Application:
                     name = entry.get_display_name(dns_mode).lower()
                     ip   = (entry.resolved_ip or '').lower()
                     host = (entry.resolved_hostname or '').lower()
-                    if q in name or q in ip or q in host:
+                    if rx.search(name) or rx.search(ip) or rx.search(host):
                         results.append(i)
             self._search_results = results
         else:
             event_list = self._get_filtered_events()
             self._search_results = [i for i, e in enumerate(event_list)
-                                    if q in e.text.lower()]
+                                    if rx.search(e.text)]
 
     def _apply_search_result(self, raw_idx):
         """Jump to search result at raw_idx (wraps around)."""
@@ -9516,12 +9520,10 @@ class Application:
             return
 
         q = self._filter_query
-        # Bare strings (no glob metacharacters) auto-wrapped as *query*
-        if not any(c in q for c in '*?[]'):
-            pattern = f'*{q}*'
-        else:
-            pattern = q
-        pattern = pattern.lower()
+        try:
+            rx = re.compile(q, re.IGNORECASE)
+        except re.error:
+            rx = re.compile(re.escape(q), re.IGNORECASE)
 
         dns_mode = DNS_MODES[self.dns_mode]
         entry_idx_map = {id(e): i for i, e in enumerate(self.entries)}
@@ -9532,9 +9534,7 @@ class Application:
                 name = entry.get_display_name(dns_mode).lower()
                 ip   = (entry.resolved_ip or '').lower()
                 host = (entry.resolved_hostname or '').lower()
-                if (fnmatch.fnmatch(name, pattern) or
-                        fnmatch.fnmatch(ip, pattern) or
-                        fnmatch.fnmatch(host, pattern)):
+                if rx.search(name) or rx.search(ip) or rx.search(host):
                     matching_indices.add(i)
 
         self._filter_visible_monitors = set(matching_indices)
