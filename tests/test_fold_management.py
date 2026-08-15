@@ -337,3 +337,57 @@ class TestFoldCloseOther:
         app._fold_close_other('sensor-hub')
         assert s1.folded is False
         assert s2.folded is True
+
+
+# ===========================================================================
+# z-sequence key bindings reach the trie
+# ===========================================================================
+
+class TestFoldKeyBindings:
+
+    def _resolve(self, pb, app, notation):
+        keys = pb._parse_key_notation(notation)
+        binding, _ = app._key_trie.resolve(keys, set())
+        return binding
+
+    @pytest.mark.parametrize('notation,cmd', [
+        ('zo', ':fold zo'),
+        ('zc', ':fold zc'),
+        ('zR', ':fold zR'),
+        ('zM', ':fold zM'),
+        ('zx', ':fold zx'),
+        ('z[', ':fold z['),
+        ('z]', ':fold z]'),
+    ])
+    def test_z_sequence_is_bound(self, pb, tmp_path, notation, cmd):
+        """Every documented z-sequence must resolve in the key trie.
+
+        z[ / z] were documented but never registered — the old
+        _handle_z_sequence dispatcher had no callers.
+        """
+        app = build_app_with_layout(pb, tmp_path, [])
+        binding = self._resolve(pb, app, notation)
+        assert binding is not None, f"{notation} is not bound"
+        assert cmd in binding.commands
+
+    def test_z_bracket_folds_healthy_sections(self, pb, tmp_path):
+        """z[ must actually fold sections whose hosts are all up."""
+        s1 = make_section(pb, 'AllUp', level=1)
+        m1 = make_monitor_alive(pb, 'up1', alive=True)
+        s2 = make_section(pb, 'HasDown', level=1)
+        m2 = make_monitor_alive(pb, 'down1', alive=False)
+        app = build_app_with_layout(pb, tmp_path, [s1, m1, s2, m2])
+        app._cmd_fold('z[')
+        assert s1.folded is True
+        assert s2.folded is False
+
+    def test_z_rbracket_folds_unhealthy_sections(self, pb, tmp_path):
+        """z] must actually fold sections with any host down."""
+        s1 = make_section(pb, 'AllUp', level=1)
+        m1 = make_monitor_alive(pb, 'up1', alive=True)
+        s2 = make_section(pb, 'HasDown', level=1)
+        m2 = make_monitor_alive(pb, 'down1', alive=False)
+        app = build_app_with_layout(pb, tmp_path, [s1, m1, s2, m2])
+        app._cmd_fold('z]')
+        assert s1.folded is False
+        assert s2.folded is True

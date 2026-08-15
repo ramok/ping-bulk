@@ -5359,23 +5359,6 @@ class Application:
         elif action == 'zx':
             self._fold_close_other()
 
-    def _handle_z_sequence(self, key):
-        """Dispatch a z* two-key fold sequence after 'z' was pressed.
-
-        Unrecognised follow-up keys are silently ignored.
-        """
-        action_map = {
-            ord('o'): 'zo', ord('O'): 'zO',
-            ord('c'): 'zc', ord('C'): 'zC',
-            ord('a'): 'za', ord('A'): 'zA',
-            ord('R'): 'zR', ord('M'): 'zM',
-            ord('r'): 'zr', ord('m'): 'zm',
-            ord('['): 'z[', ord(']'): 'z]',
-        }
-        action = action_map.get(key)
-        if action:
-            self._do_fold_action(action)
-
     # ── Bindable command methods ──────────────────────────────────────────────
 
     def _cmd_select(self, args=''):
@@ -5616,8 +5599,10 @@ class Application:
             'r': 'open one fold level (deepest closed)',
             'm': 'close one fold level (shallowest open)',
             'x': 'fold all except cursor section (close-other)',
+            '[': 'close sections where all hosts are up',
+            ']': 'close sections where any host is down',
         }
-        for ch in 'oOcCaArRmMx':
+        for ch in 'oOcCaArRmMx[]':
             _b(f'z{ch}', f':fold z{ch}', desc=_fold_descs[ch])
         # History scrolling
         _b('<Left>',    ':scroll ping-history half',  desc='scroll ping history older')
