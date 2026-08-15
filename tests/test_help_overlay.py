@@ -397,3 +397,93 @@ class TestHelpTabSwitching:
         assert app.help_tab == 4
         app._cmd_help_toggle_all()        # -> back to 1, not 3
         assert app.help_tab == 1
+
+
+# ===========================================================================
+# Help-mode bindings are reachable (trie beats the shared nav handler)
+# ===========================================================================
+
+class TestHelpModeBindingsReachable:
+    """Overlay nav keys must resolve through the trie, not a hardcoded handler.
+
+    _dispatch_overlay_nav_key used to run before the trie and swallow
+    Up/Down/k/j/PgUp/PgDn/Left/h/Right/l, so the registered help-mode entries
+    for those keys were dead and ':bind-key --mode help <Left> ...' could never
+    fire.
+    """
+
+    @pytest.mark.parametrize('notation,cmd', [
+        ('<Up>',    ':scroll-overlay up'),
+        ('<Down>',  ':scroll-overlay down'),
+        ('k',       ':scroll-overlay up'),
+        ('j',       ':scroll-overlay down'),
+        ('<Left>',  ':scroll-overlay-h left'),
+        ('<Right>', ':scroll-overlay-h right'),
+        ('h',       ':scroll-overlay-h left'),
+        ('l',       ':scroll-overlay-h right'),
+    ])
+    def test_default_nav_key_is_in_trie(self, tmp_path, notation, cmd):
+        app = _unit_app(tmp_path)
+        keys = _mod._parse_key_notation(notation)
+        binding, _ = app._key_trie.resolve(keys, set(), mode='help')
+        assert binding is not None, f"{notation} missing from help trie"
+        assert cmd in binding.commands
+
+    def test_user_rebind_of_left_takes_effect(self, tmp_path):
+        """A user binding on an overlay nav key must win over the default."""
+        app = _unit_app(tmp_path)
+        app._cmd_bindkey('--mode help <Left> :help prev')
+        binding, _ = app._key_trie.resolve(
+            _mod._parse_key_notation('<Left>'), set(), mode='help')
+        assert binding.commands == [':help prev']
+
+    def test_rebound_left_switches_tab_instead_of_scrolling(self, tmp_path):
+        """End to end: dispatching the rebound key must run the user's command."""
+        app = _unit_app(tmp_path)
+        app._cmd_bindkey('--mode help <Left> :help prev')
+        app._cmd_help('commands')            # tab 3
+        handled = app._dispatch_mode_key('help', _mod.curses.KEY_LEFT)
+        assert handled is True
+        assert app.help_tab == 2             # stepped back a tab, did not h-scroll
+
+    def test_unbound_key_still_reaches_nav_fallback(self, tmp_path):
+        """Keys with no trie binding must still hit _dispatch_overlay_nav_key."""
+        app = _unit_app(tmp_path)
+        app._cmd_help()
+        assert app._dispatch_mode_key('help', _mod.curses.KEY_PPAGE) is True
+        # PgUp is bound; a genuinely unbound key returns False so the caller
+        # can fall back.
+        assert app._dispatch_mode_key('help', ord('~')) is False
+
+    def test_rebound_help_key_wins_in_the_real_input_loop(
+            self, app_path, check_integration_deps, tmp_path):
+        """End-to-end: a user help-mode binding must beat the built-in nav key.
+
+        This drives the real input loop, which is where the bug lived: the
+        shared nav handler ran before the trie, so the unit-level checks above
+        pass even with the old ordering.  Left is rebound to switch tabs; with
+        the old order it would horizontally scroll instead and the tab would
+        not change.
+        """
+        from tmux_helper import TmuxSession
+
+        hosts = tmp_path / 'rebind.hosts'
+        hosts.write_text(
+            '127.0.0.1\n'
+            ':bind-key --mode help <Left> :help prev\n'
+        )
+        sess = TmuxSession('ping-bulk-test-helprebind', width=120, height=40)
+        try:
+            sess.send_literal(f'python3 {app_path} -f {hosts}')
+            sess.send_keys('Enter')
+            sess.wait_for('DNS:', timeout=10)
+            sess.send_keys('?')                 # opens on Bindings (tab 5 of 6)
+            sess.wait_for('[5:tabactive Bindings]'.replace(':tabactive', ''))
+            sess.send_keys('Left')              # rebound -> previous tab
+            sess.wait_for('Commands')           # tab 4 content/label reached
+            content = sess.capture_pane()
+            assert 'Command reference' in content or 'Interactive commands' in content, (
+                f"Left did not switch tabs; pane was:\n{content}"
+            )
+        finally:
+            sess.kill()

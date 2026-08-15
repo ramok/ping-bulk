@@ -10742,8 +10742,11 @@ class Application:
                             self._cmd_settings_apply()
                         elif self.help_tab == 5 and key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
                             self._cmd_settings_edit()
-                        elif not self._dispatch_overlay_nav_key(key):
-                            self._dispatch_mode_key('help', key)
+                        # Trie first so user :bind-key --mode help wins; the
+                        # shared nav handler is only a fallback for keys with
+                        # no binding at all.
+                        elif not self._dispatch_mode_key('help', key):
+                            self._dispatch_overlay_nav_key(key)
                     continue
                 if self.details_open:
                     if key == 3:  # Ctrl+C always closes overlays
@@ -10758,8 +10761,9 @@ class Application:
                         self._open_cmd_line()
                         continue
                     was_open = self.details_open
-                    if not self._dispatch_overlay_nav_key(key):
-                        self._dispatch_mode_key('details', key)
+                    # Trie first (see the help branch above).
+                    if not self._dispatch_mode_key('details', key):
+                        self._dispatch_overlay_nav_key(key)
                     if was_open and not self.details_open and key == ord('c'):
                         pass  # fall through to normal trie dispatch
                     else:
