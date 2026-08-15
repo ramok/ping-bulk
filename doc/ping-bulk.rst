@@ -358,7 +358,7 @@ Log levels
     Control which events appear in the event log panel.  The setting is
     applied at *display time*, so changing the level immediately reveals
     or hides previously buffered entries without losing history.  The
-    active level is saved by ``:saveconfig``.
+    active level is saved by ``:save-config``.
 
     +-----------+-------+------------------------------------------------------+
     | Level     | Value | What is visible                                      |
@@ -381,7 +381,7 @@ Log levels
 Configuration
 -------------
 
-``:saveconfig``
+``:save-config``
     Save current display settings (dns, stats, sort, history, log) and
     user-defined key bindings to the XDG config file
     (``~/.config/ping-bulk/config``).  Only bindings that differ from
@@ -1052,7 +1052,7 @@ pressing ``c`` directly.
 
 ``:set mux-split v|h|window``
     Set the default split direction used by ``:mux`` and the ``c``
-    hotkey.  Saved by ``:saveconfig``.
+    hotkey.  Saved by ``:save-config``.
 
 ``:edit``
     Open the loaded hosts file in an external editor.  After the editor
@@ -1373,7 +1373,7 @@ Settings are stored in ``$XDG_CONFIG_HOME/ping-bulk/config``
 (defaults to ``~/.config/ping-bulk/config``).
 
 A skeleton file with commented defaults is created on first run.
-Use ``:saveconfig`` to write the current settings, or edit the file
+Use ``:save-config`` to write the current settings, or edit the file
 directly.
 
 Recognised settings

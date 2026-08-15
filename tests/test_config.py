@@ -1,7 +1,7 @@
 """Unit tests for ping-bulk configuration file loading and saving.
 
 These tests exercise _config_path(), _load_config(), _save_config(),
-_create_default_config(), and the ':saveconfig' command handler without
+_create_default_config(), and the ':save-config' command handler without
 starting any ping threads or curses sessions.  A temporary directory is
 used for all config files so the real user config (~/.config/ping-bulk/)
 is never touched.
@@ -380,24 +380,24 @@ class TestSaveConfig:
 # ===========================================================================
 
 class TestSaveConfigCommand:
-    """:saveconfig command writes settings and reports success in the event log."""
+    """:save-config command writes settings and reports success in the event log."""
 
     def test_saveconfig_creates_file(self, pb, tmp_path):
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         with patch.object(pb, '_config_path', return_value=cfg):
-            app._dispatch_cmd('saveconfig')
-        assert os.path.isfile(cfg), ":saveconfig did not create the config file"
+            app._dispatch_cmd('save-config')
+        assert os.path.isfile(cfg), ":save-config did not create the config file"
 
     def test_saveconfig_emits_event(self, pb, tmp_path):
-        """:saveconfig must add a success event to the event log."""
+        """:save-config must add a success event to the event log."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         with patch.object(pb, '_config_path', return_value=cfg):
-            app._dispatch_cmd('saveconfig')
+            app._dispatch_cmd('save-config')
         events = list(app.events)
         assert any('config' in e and 'saved' in e for e in events), (
-            f":saveconfig event not found.\nEvents: {events}"
+            f":save-config event not found.\nEvents: {events}"
         )
 
     def test_saveconfig_event_mentions_path(self, pb, tmp_path):
@@ -405,7 +405,7 @@ class TestSaveConfigCommand:
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         with patch.object(pb, '_config_path', return_value=cfg):
-            app._dispatch_cmd('saveconfig')
+            app._dispatch_cmd('save-config')
         events = list(app.events)
         assert any(cfg in e for e in events), (
             f"Config path {cfg!r} not mentioned in events.\nEvents: {events}"
@@ -416,18 +416,18 @@ class TestSaveConfigCommand:
         app = make_app(pb, cfg, '')
         app.dns_mode = pb.DNS_MODES.index('ip')
         with patch.object(pb, '_config_path', return_value=cfg):
-            app._dispatch_cmd('saveconfig')
+            app._dispatch_cmd('save-config')
         with open(cfg) as f:
             content = f.read()
         assert ':set dns ip' in content
 
     def test_saveconfig_colon_prefix_accepted(self, pb, tmp_path):
-        """':saveconfig' (with leading colon) must also work."""
+        """':save-config' (with leading colon) must also work."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         with patch.object(pb, '_config_path', return_value=cfg):
-            app._dispatch_cmd(':saveconfig')
-        assert os.path.isfile(cfg), ":saveconfig with leading colon did not create file"
+            app._dispatch_cmd(':save-config')
+        assert os.path.isfile(cfg), ":save-config with leading colon did not create file"
 
 
 # ===========================================================================

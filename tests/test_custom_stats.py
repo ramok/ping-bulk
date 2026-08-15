@@ -173,7 +173,7 @@ class TestSaveconfigCustom:
         app._dispatch_cmd(':set stats last,avg')
         cfg_file = str(tmp_path / 'test_config')
         with patch.object(pb, '_config_path', return_value=cfg_file):
-            app._dispatch_cmd(':saveconfig')
+            app._dispatch_cmd(':save-config')
         content = open(cfg_file).read()
         assert ':set stats last,avg' in content, (
             f"Expected ':set stats last,avg' in saveconfig, got:\n{content}"
@@ -186,7 +186,7 @@ class TestSaveconfigCustom:
         assert app.stats_custom is None
         cfg_file = str(tmp_path / 'test_config2')
         with patch.object(pb, '_config_path', return_value=cfg_file):
-            app._dispatch_cmd(':saveconfig')
+            app._dispatch_cmd(':save-config')
         content = open(cfg_file).read()
         assert ':set stats Avg' in content, (
             f"Expected ':set stats Avg' in saveconfig, got:\n{content}"
@@ -198,7 +198,7 @@ class TestSaveconfigCustom:
         app.stats_custom = None
         cfg_file = str(tmp_path / 'test_config3')
         with patch.object(pb, '_config_path', return_value=cfg_file):
-            app._dispatch_cmd(':saveconfig')
+            app._dispatch_cmd(':save-config')
         content = open(cfg_file).read()
         assert ':set stats off' in content, (
             f"Expected ':set stats off' in saveconfig, got:\n{content}"
