@@ -712,7 +712,7 @@ _HELP_HOTKEYS = [
     "  [W]                   (:save)                            write event log to a file",
     "  [C]                   (:clear)                           clear event log",
     "  [Esc]                 (:select none)                     clear host selection + return to live history",
-    "  [?]                   (:help)                            show this help",
+    "  [?]                   (:help bindings)                   show key bindings (help overlay)",
     "  [←]/[→]               (:scroll ping-history half/half-)  scroll history ← older / → live",
     "  [Ctrl+←]/[Ctrl+→]     (:scroll ping-history full/full-)  scroll history ← older (page) / → live (page)",
     "  [Esc] (in history)    (:scroll ping-history reset)       return to live view",
@@ -803,7 +803,7 @@ _HELP_CMDS_INTERACTIVE = [
     "  :fold close-healthy       fold sections where all hosts are currently up    (z[)",
     "  :fold close-unhealthy     fold sections where any host is currently down    (z])",
     "  :save-config              save current settings to config file",
-    "  :help                     show this help",
+    "  :help \\[tab-number]       open help overlay; tab 1-6 or name  (:man alias)",
     "  :q  :quit                 quit",
     "",
     "  :edit                     open hosts file in external editor; reloads on save",
@@ -3848,16 +3848,15 @@ CMD_REGISTRY = [
            '<prog> <glob> <opts>', 'per-program options for :mux'),
     CmdDef(['edit'],             '_cmd_edit',       None,
            '',                    'open hosts file in editor; reloads on exit'),
-    CmdDef(['help'],             '_cmd_help',       None,
-           '',                    'show this help'),
+    CmdDef(['help', 'man'],      '_cmd_help',
+           [n.lower() for n in ('Interactive', 'Hosts file', 'Example',
+                                'Commands', 'Bindings', 'Settings')],
+           '[tab-number]',        'show this help; optional tab number or name'),
     CmdDef(['help-toggle-all'],      '_cmd_help_toggle_all', None,
            '',                    'toggle all-bindings view in help overlay',
            completable=False),
     CmdDef(['help-toggle-settings'], '_cmd_help_toggle_settings', None,
            '',                    'toggle settings view in help overlay',
-           completable=False),
-    CmdDef(['help-tab'],             '_cmd_help_tab', None,
-           '<0-5|next|prev>',        'switch help overlay tab',
            completable=False),
     CmdDef(['settings-cursor'],      '_cmd_settings_cursor', None,
            '<up|down>',           'move cursor in settings overlay',
@@ -4342,6 +4341,7 @@ class Application:
         self._load_cmd_history()
         self.help_open = False    # True while the help overlay is visible
         self.help_tab = 0                # 0=Interactive 1=Hosts 2=Example 3=Commands 4=Bindings 5=Settings
+        self._help_prev_tab = 0          # tab to return to when toggling out of Bindings/Settings
         self._tab_scroll = [0] * 6       # per-tab vertical scroll offsets
         self._tab_h_scroll = [0] * 6     # per-tab horizontal scroll offsets
         self.help_search = ''            # current search query within help overlay
@@ -5575,7 +5575,7 @@ class Application:
         _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'),
            desc='open SSH connection to selected host')
         _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
-        _b('?', ':help', hint='help:[?]', desc='open keyboard reference')
+        _b('?', ':help bindings', hint='help:[?]', desc='open keyboard reference')
         _b('<Esc>', ':select none', desc='clear host selection')
         # Selection
         _b('<Up>', ':select up', desc='select previous host')
@@ -5660,14 +5660,14 @@ class Application:
         _mb('help', '?',       ':close',                   desc='close help overlay')
         _mb('help', '<Esc>',   ':close',                   desc='close help overlay')
         _mb('help', '<CR>',    ':close',                   desc='close help overlay')
-        _mb('help', '<Tab>',   ':help-tab next',            desc='next tab')
-        _mb('help', '<S-Tab>', ':help-tab prev',            desc='previous tab')
-        _mb('help', '1',       ':help-tab 0',               desc='Interactive tab')
-        _mb('help', '2',       ':help-tab 1',               desc='Hosts file tab')
-        _mb('help', '3',       ':help-tab 2',               desc='Example tab')
-        _mb('help', '4',       ':help-tab 3',               desc='Commands tab')
-        _mb('help', '5',       ':help-tab 4',               desc='Bindings tab')
-        _mb('help', '6',       ':help-tab 5',               desc='Settings tab')
+        _mb('help', '<Tab>',   ':help next',                desc='next tab')
+        _mb('help', '<S-Tab>', ':help prev',                desc='previous tab')
+        _mb('help', '1',       ':help 1',                   desc='Interactive tab')
+        _mb('help', '2',       ':help 2',                   desc='Hosts file tab')
+        _mb('help', '3',       ':help 3',                   desc='Example tab')
+        _mb('help', '4',       ':help 4',                   desc='Commands tab')
+        _mb('help', '5',       ':help 5',                   desc='Bindings tab')
+        _mb('help', '6',       ':help 6',                   desc='Settings tab')
         _mb('help', '<Up>',    ':scroll-overlay up',       desc='scroll up')
         _mb('help', '<Down>',  ':scroll-overlay down',     desc='scroll down')
         _mb('help', '<PgUp>',  ':scroll-overlay page-',    desc='scroll up one page')
@@ -9428,47 +9428,80 @@ class Application:
         """Unfold (expand) all sections."""
         self._fold_all(False)
 
-    def _cmd_help(self, args=''):
-        """Open the help overlay (sets self.help_open = True).
+    @classmethod
+    def _resolve_help_tab(cls, arg):
+        """Resolve a tab number or name to a 0-based tab index, or None.
 
-        The overlay is drawn by _draw_help_overlay() and is never written to
-        the event log or the log file.  Scroll position is reset to the top
-        each time the overlay is opened.
+        Tab *numbers* are 1-6 as printed in the tab bar and as bound to the
+        ``1``-``6`` overlay keys, so what the user sees is what they type.
+        A case-insensitive unique prefix of a tab name also works, which is why
+        ``:help bind`` and ``:help Bindings`` both reach the Bindings tab.
         """
-        self.help_open = True
-        self.help_tab = 0
-        self._tab_scroll = [0] * 6
-        self._tab_h_scroll = [0] * 6
-        self.help_search_active = False
+        a = (arg or '').strip().lower()
+        if not a:
+            return None
+        if a.isdigit():
+            n = int(a)
+            return n - 1 if 1 <= n <= len(cls._TAB_NAMES) else None
+        hits = [i for i, name in enumerate(cls._TAB_NAMES)
+                if name.lower().startswith(a)]
+        return hits[0] if len(hits) == 1 else None
+
+    def _cmd_help(self, args=''):
+        """Open the help overlay, or switch tab when it is already open.
+
+        *args* may be a tab number (1-6), a tab name or unique prefix, or
+        ``next``/``prev`` to cycle.  Opening resets the per-tab scroll offsets;
+        switching tabs in an already-open overlay preserves them, so each tab
+        keeps its position.  The overlay is drawn by _draw_help_overlay() and is
+        never written to the event log or the log file.
+        """
+        a = args.strip()
+        old_tab = self.help_tab
+        was_open = self.help_open
+
+        if a in ('next', 'prev'):
+            step = 1 if a == 'next' else -1
+            tab = (self.help_tab + step) % len(self._TAB_NAMES)
+        elif a:
+            tab = self._resolve_help_tab(a)
+            if tab is None:
+                self.add_event("cmd", f"help: unknown tab '{a}'; choices: "
+                               f"1-{len(self._TAB_NAMES)} or "
+                               f"{' '.join(n.split()[0].lower() for n in self._TAB_NAMES)}")
+                return
+        else:
+            tab = 0 if not was_open else self.help_tab
+
+        if not was_open:
+            # Fresh open — start every tab at the top.
+            self._tab_scroll = [0] * len(self._TAB_NAMES)
+            self._tab_h_scroll = [0] * len(self._TAB_NAMES)
+            self.help_open = True
+            self.help_search_active = False
+        self.help_tab = tab
         self._current_mode = 'help'
 
-    def _cmd_help_tab(self, args=''):
-        """Switch to a help tab: 'next', 'prev', or tab index 0-5."""
-        a = args.strip()
-        if a == 'next':
-            old_tab = self.help_tab
-            self.help_tab = (self.help_tab + 1) % 6
-        elif a == 'prev':
-            old_tab = self.help_tab
-            self.help_tab = (self.help_tab - 1) % 6
-        else:
-            try:
-                old_tab = self.help_tab
-                self.help_tab = int(a) % 6
-            except ValueError:
-                return
-        if self.help_tab != old_tab:
+        # Remember where we came from on any change of tab, including the one
+        # that happens on open — otherwise toggling has nowhere to return to.
+        if tab != old_tab:
+            self._help_prev_tab = old_tab
             self.help_search = ''
             self.help_search_matches = []
             self.help_search_match_idx = 0
 
+    def _toggle_help_tab(self, tab):
+        """Jump to 0-based *tab*, or back to the tab we came from if already there."""
+        target = self._help_prev_tab if self.help_tab == tab else tab
+        self._cmd_help(str(target + 1))
+
     def _cmd_help_toggle_all(self, args=''):
         """Switch to or away from the Bindings tab."""
-        self._cmd_help_tab('prev' if self.help_tab == 4 else '4')
+        self._toggle_help_tab(4)
 
     def _cmd_help_toggle_settings(self, args=''):
         """Switch to or away from the Settings tab."""
-        self._cmd_help_tab('prev' if self.help_tab == 5 else '5')
+        self._toggle_help_tab(5)
 
     def _cmd_settings_cursor(self, args=''):
         """Move cursor up or down in the settings overlay."""

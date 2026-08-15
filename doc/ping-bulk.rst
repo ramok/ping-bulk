@@ -168,7 +168,9 @@ Navigation
     Quit.
 
 ``?``
-    Open the built-in help overlay.  Close with ``q``, ``Q``, or ``Esc``.
+    Open the built-in help overlay on the **Bindings** tab, which lists every
+    active key binding.  ``Tab`` / ``Shift-Tab`` or ``1``-``6`` switch tabs.
+    Close with ``q``, ``Q``, or ``Esc``.
 
 ``:``
     Open the command line (see **COMMANDS** below).
@@ -642,10 +644,26 @@ Monitoring via SSH
 Help
 ----
 
-``:help``
-    Open the built-in help overlay (same as ``?``).  Press ``A`` inside
-    the overlay to toggle a generated view of all current key bindings
-    (including default ones).
+``:help [tab-number]``, ``:man [tab-number]``
+    Open the built-in help overlay, or switch tab when it is already open.
+    With no argument the *Interactive* tab is shown; ``?`` opens the
+    *Bindings* tab instead.
+
+    *tab-number* is ``1``-``6`` exactly as printed in the tab bar and as
+    bound to the ``1``-``6`` overlay keys::
+
+        1 Interactive   2 Hosts file   3 Example
+        4 Commands      5 Bindings     6 Settings
+
+    A tab name or any unique prefix works too, so ``:help bindings`` and
+    ``:help bind`` both reach *Bindings*.  ``next`` and ``prev`` cycle.
+
+    Opening the overlay starts every tab at the top; switching tabs while it
+    is open preserves each tab's scroll position.
+
+    Inside the overlay, ``Tab`` / ``Shift-Tab`` cycle tabs and ``1``-``6``
+    jump straight to one.  ``↑``/``↓``/``k``/``j`` scroll, ``←``/``→``/``h``/``l``
+    scroll horizontally, and ``/`` searches the current tab.
 
 Folding
 -------
