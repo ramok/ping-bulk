@@ -142,6 +142,28 @@ class TestCategoryLevels:
         assert e.level == pb.LEVEL_QUIET
         assert e.category == 'seen'
 
+    def test_seen_marker_reaches_filtered_list(self, pb, tmp_path):
+        """mark_seen must sync the cached filtered list, or it never renders.
+
+        draw_events reads _get_filtered_events(); appending only to
+        self.events left the marker invisible at every loglevel.
+        """
+        app, _ = _make_app(pb, tmp_path)
+        before = len(app._get_filtered_events())  # prime the cache as the UI does
+        app.mark_seen()
+        after = app._get_filtered_events()
+        assert len(after) == before + 1
+        assert after[-1].category == 'seen'
+
+    def test_seen_marker_visible_at_every_loglevel(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        for lvl in (pb.LEVEL_QUIET, pb.LEVEL_NORMAL, pb.LEVEL_INFO, pb.LEVEL_DEBUG):
+            app.loglevel = lvl
+            app._filtered_events_dirty = True
+            before = len(app._get_filtered_events())
+            app.mark_seen()
+            assert len(app._get_filtered_events()) == before + 1, f"level {lvl}"
+
 
 # ===========================================================================
 # draw_events filtering

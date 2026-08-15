@@ -5139,6 +5139,15 @@ class Application:
         line = f"{timestamp}   ══════════════════ seen ══════════════════"
         entry = EventEntry(level=LEVEL_QUIET, category='seen', text=line)
         self.events.append(entry)
+        # Keep the cached filtered list in sync (same as add_event) — otherwise
+        # the marker sits in self.events but never reaches the drawn log.
+        if entry.level <= self.loglevel:
+            self._filtered_events.append(entry)
+            excess = len(self._filtered_events) - self.log_size
+            if excess > 0:
+                del self._filtered_events[:excess]
+        else:
+            self._filtered_events_dirty = True
         if self.log_file:
             try:
                 with open(self.log_file, 'a') as f:
