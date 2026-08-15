@@ -249,6 +249,11 @@ Display
 ``p`` / ``P``
     Toggle pause (freeze the display without stopping pings).
 
+``W``
+    Open the *write event log to file* prompt, pre-filled with the active
+    log file when one is set.  If the target file already exists a second
+    prompt offers ``[t]runcate`` or ``[a]ppend``.
+
 ``C``
     Open the *clear event log* confirmation prompt.
 
@@ -326,11 +331,20 @@ Event log
 ``:clear``
     Clear the event log (with confirmation prompt).
 
+``:save [file]``
+    Write the buffered event log to *file* (same as ``W``).  With no
+    argument, open a prompt pre-filled with the active log file; if the
+    target exists the prompt offers ``[t]runcate`` or ``[a]ppend``.
+    Passing a filename directly truncates any existing file.  The saved
+    file always contains **all** log levels regardless of the current
+    ``log-level`` setting.  The target also becomes the active streaming
+    log file.
+
 ``:log [file|off]``
     With no argument, print the active log file path (or report that
-    logging is off).  With a file path, save the current log to that
-    file and begin streaming future events there.  With ``off``,
-    disable streaming.
+    logging is off).  With a file path, stream *future* events to that
+    file — it does not write the already-buffered log; use ``:save`` for
+    that.  With ``off``, disable streaming.
 
 ``:set log-size <n>``
     Set the maximum number of lines kept in the in-memory event log.

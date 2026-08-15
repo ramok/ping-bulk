@@ -378,3 +378,60 @@ class TestLogLevelCliFlags:
 
     def test_explicit_log_level_minus_q(self, pb):
         assert self._apply(pb, log_level='info', quiet=1) == pb.LEVEL_NORMAL
+
+
+# ===========================================================================
+# :save — write buffered event log to a file
+# ===========================================================================
+
+class TestSaveCommand:
+
+    def test_save_command_is_registered(self, pb):
+        """:save must be reachable — _open_prompt_save had no callers before."""
+        assert 'save' in pb._CMD_MAP
+        assert pb._CMD_MAP['save'].action == '_open_prompt_save'
+
+    def test_w_key_is_bound_to_save(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('W'), set())
+        assert binding is not None
+        assert ':save' in binding.commands
+
+    def test_save_with_filename_writes_log(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'hello world')
+        target = tmp_path / 'out.log'
+        app._open_prompt_save(str(target))
+        assert target.exists()
+        assert 'hello world' in target.read_text()
+        assert app.prompt is None      # direct write, no prompt
+
+    def test_save_without_args_opens_prompt(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._open_prompt_save()
+        assert app.prompt is not None
+        assert app.prompt['type'] == 'save'
+
+    def test_save_prompt_prefills_active_log_file(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.log_file = '/tmp/existing.log'
+        app._open_prompt_save()
+        assert ''.join(app.prompt['chars']) == '/tmp/existing.log'
+
+    def test_save_writes_all_levels(self, pb, tmp_path):
+        """The saved file ignores loglevel filtering — users grep it."""
+        app, _ = _make_app(pb, tmp_path)
+        app.loglevel = pb.LEVEL_QUIET
+        app.add_event('bind-key', 'debug detail', level=pb.LEVEL_DEBUG)
+        target = tmp_path / 'all.log'
+        app._open_prompt_save(str(target))
+        assert 'debug detail' in target.read_text()
+
+    def test_save_via_dispatch_cmd(self, pb, tmp_path):
+        """':save <file>' through the normal command dispatcher."""
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'dispatched')
+        target = tmp_path / 'dispatch.log'
+        app._dispatch_cmd(f':save {target}')
+        assert target.exists()
+        assert 'dispatched' in target.read_text()

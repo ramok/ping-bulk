@@ -709,6 +709,7 @@ _HELP_HOTKEYS = [
     "  [G]                   (:select last)                     jump to last host",
     "  [Enter]               (:details)                         show detailed stats for highlighted host",
     "  [Space]               (:seen)                            insert 'seen' marker (or :fold toggle on section)",
+    "  [W]                   (:save)                            write event log to a file",
     "  [C]                   (:clear)                           clear event log",
     "  [Esc]                 (:select none)                     clear host selection + return to live history",
     "  [?]                   (:help)                            show this help",
@@ -794,7 +795,8 @@ _HELP_CMDS_INTERACTIVE = [
     "  :pause \\[on|off]            toggle/set global pause (stop all pings)",
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
-    "  :log \\[file|off]           show active log file, set/save log to file, or disable logging",
+    "  :save \\[file]              write event log to a file; no args opens a prompt      (W)",
+    "  :log \\[file|off]           show/set the streaming log file (future events), or disable logging",
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
     "  :fold close-other \\[pat]   fold all except sections matching regex pattern  (zx)",
@@ -3792,6 +3794,9 @@ CMD_REGISTRY = [
     CmdDef(['clear-prompt'],     '_open_prompt_clear', None,
            '',                    'clear event log (alias for :clear --confirm)',
            completable=False),
+    CmdDef(['save'],             '_open_prompt_save', None,
+           '[file]',              'write event log to file; no args = open prompt',
+           arg_completer=_complete_log_arg),
     CmdDef(['log'],              '_cmd_log',        None,
            '[file|off]',          'show/set/disable the streaming log file',
            arg_completer=_complete_log_arg,
@@ -5566,6 +5571,7 @@ class Application:
         # Actions
         _b('A', ':autofold', desc='toggle autofold on/off')
         _b('C', ':clear --confirm', desc='clear event log')
+        _b('W', ':save', desc='write event log to a file')
         _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'),
            desc='open SSH connection to selected host')
         _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
@@ -7477,7 +7483,7 @@ class Application:
 
         if self.log_file:
             header_suffix += f" → {self.log_file}"
-        header_suffix += " [C|lear]"
+        header_suffix += " [W|rite] [C|lear]"
 
         # Render title in white/bold; [key desc] tokens have key in white, desc default.
         self._draw_column_header(stdscr, start_row, 0, header_title, header_suffix, width)
@@ -7494,8 +7500,20 @@ class Application:
             stdscr.addstr(row, 0, entry.text[:width - 1], attr)
             row += 1
 
-    def _open_prompt_save(self):
-        """Open the save-log prompt (non-blocking; state stored in self.prompt)."""
+    def _open_prompt_save(self, args=''):
+        """Write the event log to a file, or open the save-log prompt.
+
+        With a filename argument the log is written straight away (existing
+        files are truncated).  Without one, a non-blocking prompt is opened
+        and the answer is handled by _handle_prompt_key.
+        """
+        filename = args.strip()
+        if filename:
+            if self.kiosk_mode and not self._kiosk_allow_path(filename, 'save'):
+                return
+            self.save_to_file(filename)
+            self.log_file = filename
+            return
         self.prompt = {
             'type': 'save',
             'chars': list(self.log_file) if self.log_file else [],
@@ -7583,7 +7601,9 @@ class Application:
             if key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
                 filename = ''.join(p['chars']).strip()
                 if filename:
-                    if os.path.exists(filename):
+                    if self.kiosk_mode and not self._kiosk_allow_path(filename, 'save'):
+                        self.prompt = None
+                    elif os.path.exists(filename):
                         # Advance to the truncate/append confirmation step
                         self.prompt = {'type': 'save_confirm', 'filename': filename, 'chars': []}
                     else:
@@ -8143,6 +8163,7 @@ class Application:
           pause                  — toggle pause
           seen                   — insert 'seen' marker in event log
           clear                  — clear event log
+          save [file]            — write event log to a file (no arg opens a prompt)
           log [file]             — show active log file; or save/stream log to file
           help                   — open the help overlay
 
