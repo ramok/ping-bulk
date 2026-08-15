@@ -6524,28 +6524,29 @@ class Application:
         return col
 
     @staticmethod
-    def _hint_text_width(text):
-        """Return the rendered column width of *text* as drawn by _draw_hint_text.
+    def _hint_text_segments(text):
+        """Yield ``(raw_start, raw_end, rendered_cols)`` for each atomic unit of *text*.
 
-        Mirrors the parser in _draw_hint_text without touching curses, so callers
-        can compute the visual width of a line for layout / sizing purposes.
-        Color annotations (``key:colorname``) are stripped — they contribute no
-        visible columns.  The ``|`` no-space separator and ``\\[`` escapes are
-        handled identically to the renderer.
+        A ``[key desc]`` token is one indivisible unit, so callers slicing by
+        rendered width never cut markup in half.  Plain characters are one unit
+        each.  This is the single source of truth for how _draw_hint_text maps
+        raw characters onto screen columns — both _hint_text_width and
+        _hint_text_slice are built on it.
         """
-        width = 0
         i = 0
-        while i < len(text):
+        n = len(text)
+        while i < n:
             ch = text[i]
-            if ch == '\\' and i + 1 < len(text) and text[i + 1] == '[':
-                width += 1   # literal '['
+            if ch == '\\' and i + 1 < n and text[i + 1] == '[':
+                yield (i, i + 2, 1)   # literal '['
                 i += 2
             elif ch == '[':
-                width += 1   # opening '['
+                start = i
+                cols = 1              # opening '['
                 i += 1
                 token = []
-                while i < len(text) and text[i] != ']':
-                    if text[i] == '\\' and i + 1 < len(text) and text[i + 1] in '[]':
+                while i < n and text[i] != ']':
+                    if text[i] == '\\' and i + 1 < n and text[i + 1] in '[]':
                         token.append(text[i + 1])
                         i += 2
                     else:
@@ -6560,24 +6561,55 @@ class Application:
                     key_part, desc_part = content, ''
                 else:
                     key_part, desc_part = content[:space_pos], content[space_pos:]
-                # Strip optional colour annotation (e.g. ".:green" → ".")
+                # Strip optional colour annotation (e.g. ".:green" → ".") — it
+                # costs raw characters but draws no columns.
                 colon = key_part.rfind(':')
                 if colon > 0 and key_part[colon + 1:] in _HINT_KEY_COLORS:
                     key_part = key_part[:colon]
-                # Count '/' separators as single chars between sub-keys
-                sub_keys = key_part.split('/')
-                if len(sub_keys) > 1 and all(sub_keys):
-                    width += len(key_part)   # chars + '/' separators already counted
-                else:
-                    width += len(key_part)
-                width += len(desc_part)
-                if i < len(text):   # closing ']'
-                    width += 1
+                cols += len(key_part) + len(desc_part)
+                if i < n:             # closing ']'
+                    cols += 1
                     i += 1
+                yield (start, i, cols)
             else:
-                width += 1
+                yield (i, i + 1, 1)
                 i += 1
-        return width
+
+    @staticmethod
+    def _hint_text_width(text):
+        """Return the rendered column width of *text* as drawn by _draw_hint_text.
+
+        Mirrors the parser in _draw_hint_text without touching curses, so callers
+        can compute the visual width of a line for layout / sizing purposes.
+        Color annotations (``key:colorname``) are stripped — they contribute no
+        visible columns.  The ``|`` no-space separator and ``\\[`` escapes are
+        handled identically to the renderer.
+        """
+        return sum(cols for _, _, cols in Application._hint_text_segments(text))
+
+    @staticmethod
+    def _hint_text_slice(text, start_col=0, width=None):
+        """Return the markup substring of *text* rendering columns [start_col, +width).
+
+        Slicing markup with plain string indexing is wrong: ``:colorname``
+        annotations consume raw characters but no columns, so ``line[:n]`` cuts
+        a line whose rendered width is already ≤ n.  This walks whole segments
+        instead, so the result never renders wider than *width* and never splits
+        a ``[key desc]`` token.
+        """
+        end_col = None if width is None else start_col + max(0, width)
+        out = []
+        col = 0
+        for raw_start, raw_end, cols in Application._hint_text_segments(text):
+            seg_end = col + cols
+            if seg_end <= start_col:      # entirely before the window
+                col = seg_end
+                continue
+            if end_col is not None and seg_end > end_col:
+                break                    # would overflow — stop cleanly
+            out.append(text[raw_start:raw_end])
+            col = seg_end
+        return ''.join(out)
 
     @staticmethod
     def _draw_hint_text(stdscr, row, col, text, width):
@@ -9800,7 +9832,10 @@ class Application:
             else:
                 try:
                     stdscr.addstr(r, col0, '│', border_attr)
-                    text = line[:inner_w].ljust(inner_w)[:inner_w]
+                    # Markup-aware cut: ':colorname' costs raw chars but no
+                    # columns, so plain slicing would clip a line that fits.
+                    text = self._hint_text_slice(line, 0, inner_w)
+                    text += ' ' * max(0, inner_w - self._hint_text_width(text))
                     end_col = self._draw_hint_text(stdscr, r, col0 + 1, text,
                                                    col0 + 1 + inner_w + 1)
                     right_border = col0 + 1 + inner_w
@@ -9830,11 +9865,14 @@ class Application:
                 try:
                     stdscr.addstr(r, col0, '│', border_attr)
                     # Apply horizontal scroll: slice the line before display.
-                    sliced = line[h_scroll:h_scroll + inner_w]
-                    # Show … when content is cut on the right
-                    if len(line) > h_scroll + inner_w:
-                        sliced = sliced[:inner_w - 1] + '…'
-                    text = sliced.ljust(inner_w)[:inner_w]
+                    # Widths are in rendered columns, not raw characters, so
+                    # colour markup is not mistaken for visible text.
+                    if self._hint_text_width(line) > h_scroll + inner_w:
+                        # Content continues past the right edge — leave room for …
+                        sliced = self._hint_text_slice(line, h_scroll, inner_w - 1) + '…'
+                    else:
+                        sliced = self._hint_text_slice(line, h_scroll, inner_w)
+                    text = sliced + ' ' * max(0, inner_w - self._hint_text_width(sliced))
                     # Cursor row in settings overlay: highlight whole line
                     if selected_line is not None and abs_line_idx == selected_line:
                         stdscr.addstr(r, col0 + 1, text, curses.A_BOLD | curses.A_REVERSE)
