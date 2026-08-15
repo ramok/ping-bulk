@@ -56,8 +56,22 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 14 (event log + help overlay)**: Filter and search switched from
+  glob/substring to case-insensitive regex (invalid patterns fall back to
+  literal). `:fold close-other [regex]` / `zx` focuses one section. `:save`
+  writes the event log — a snapshot by default, streaming only via `--follow`
+  or the `[w]`/`[f]` prompt step — bound to `W`. `:help` now takes a tab
+  (number 1-6, name, prefix, `next`/`prev`); `:help-tab` and `:saveconfig` were
+  removed outright (renamed to `:help` and `:save-config`); `:man` aliases
+  `:help`; `?` opens the Bindings tab.
+  Bugs fixed: the `[Space]` seen marker never rendered (`mark_seen` skipped the
+  `_filtered_events` cache); `z[`/`z]` were documented but unbound (dead
+  `_handle_z_sequence`); overlay lines carrying `:colorname` markup were cut by
+  the markup's length because sizing used rendered columns but slicing used raw
+  characters; overlay nav keys could not be rebound (nav handler ran before the
+  trie); a long log path pushed the Events key hints off screen.
 - **Phase 12 (syntax cleanup)**: `:ssh` renamed to `:remote-ping`, `:ssh-begin`/`:ssh-end` renamed to `:remote-ping-begin`/`:remote-ping-end`. Added `:prog-options-begin <prog>` / `:prog-options-end` block form for grouping multiple prog-options rules under one program. No backward compatibility. 9 new tests added.
-- **Phase 11 (vim-style UX)**: `:unbind-key <key>` removes a binding; `:bind-key <key>` (no cmd) now queries what's bound; `G`/`gg`/`Ctrl-F`/`Ctrl-B` vim navigation defaults; `:fold` word aliases (`open`, `close`, `open-recursive`, etc.); help overlay shows `:command` annotations per hotkey; `A` in help overlay toggles a generated all-bindings view; `/` context-aware search (host list or event log) with `n`/`N` navigation.
+- **Phase 11 (vim-style UX)**: `:unbind-key <key>` removes a binding; `:bind-key <key>` (no cmd) now queries what's bound; `G`/`gg`/`Ctrl-F`/`Ctrl-B` vim navigation defaults; `:fold` word aliases (`open`, `close`, `open-recursive`, etc.); help overlay shows `:command` annotations per hotkey; `/` context-aware search (host list or event log) with `n`/`N` navigation.  (The all-bindings view is now help tab 5, reached with `?`, `5`, or `:help bindings` — the old `A` toggle no longer exists.)
 - **Phase 10 (log levels)**: `quiet/normal/info/debug` log levels via `:set loglevel`, `-v`/`-q` flags, event coloring by severity.
 - **Phase 9 (`:edit` improvements + `:resolv` warning fix)**: `:edit` command enhancements, resolv warning deduplication.
 - **Phase 8 (command flags + key binding system)**: Full flag consistency refactor, `:bind-key` rename, `:quit --confirm` re-press pattern, data-driven overlay dispatch, `--mode`/`--desc`/`--hint` flags, bottom-bar hints moved from hardcoded Python to user-configurable trie entries.
@@ -122,18 +136,19 @@ There are four UI modes that determine which binding table is active:
 The active mode is tracked in `self._current_mode`.
 
 ### Binding tables
-- **Normal mode**: bindings stored in `_key_trie` (supports multi-key sequences like `gg`).
-- **Overlay modes** (`help`, `details`, `command`): bindings stored in `_mode_bindings[mode]` — single-key only, no sequences.
+All modes live in the **same** `_key_trie`, in per-mode buckets
+(`node.bindings[mode]`). There is no `_mode_bindings` dict.
+- **Normal mode**: supports multi-key sequences like `gg`.
+- **Overlay modes** (`help`, `details`, `command`): single-key only, no sequences.
 
 ### Adding a default binding (Python side)
 1. In `_register_default_bindings()` use the `_b()` helper for normal-mode keys:
    ```python
    _b('q', ':quit', hint='[q]uit')
    ```
-2. For overlay-mode defaults, add to `_register_mode_bindings()`:
+2. For overlay-mode defaults, use the `_mb()` helper in `_register_mode_bindings()`:
    ```python
-   self._mode_bindings.setdefault('help', {})[ord('q')] = _Binding(
-       commands=[':close'], key_notation='q', mode='help', origin='default')
+   _mb('help', 'q', ':close', desc='close help overlay')
    ```
 3. `--hint` makes the label appear in the bottom bar; only set it on the most important actions.
 4. `--desc` makes the binding appear in the `?` help overlay "Custom bindings" section.
@@ -144,12 +159,18 @@ Users write `:bind-key` directives:
 :bind-key ? :help --desc "Show help"
 :bind-key --mode details q :close --hint "[q]uit"
 ```
-`_cmd_bindkey` parses these and populates either `_key_trie` (normal mode) or `_mode_bindings` (overlay modes).
+`_cmd_bindkey` parses these and inserts into `_key_trie` under the target mode.
 
 ### Dispatching
 - Normal mode: `_dispatch_key(key)` walks the trie and calls `_dispatch_cmd()`.
-- Overlay modes: `_dispatch_mode_key(mode, key)` looks up `_mode_bindings[mode][key]` and calls `_dispatch_cmd()`.
+- Overlay modes: `_dispatch_mode_key(mode, key)` resolves `_key_trie` in that
+  mode bucket and calls `_dispatch_cmd()`; it returns False when nothing is bound.
 - The main input loop **must not** contain bare `if key == ord('x')` checks for anything user-rebindable.
+- `_dispatch_mode_key` runs **before** `_dispatch_overlay_nav_key`, which is only
+  a fallback for keys with no binding. Reversing that order makes every overlay
+  nav key unrebindable — that was a real bug.
+- Mode lookup does **not** fall back to normal mode: a key unbound in `help`
+  does nothing rather than firing its normal-mode binding.
 
 ### Built-in overlay commands
 | Command | Effect |
@@ -166,7 +187,9 @@ Users write `:bind-key` directives:
 
 ### Command naming
 - Use **kebab-case**: `:bind-key`, `:scroll-history`, `:scroll-overlay`, `:prog-options`.
-- Keep old names as **aliases** when renaming; `saveconfig` always writes the canonical (new) name.
+- Keep old names as **aliases** when renaming *unless* the user asks for a clean
+  break; `:saveconfig` → `:save-config` and `:help-tab` → `:help` were removed
+  outright. `_save_config` always writes the canonical (new) name.
 - Register aliases in `CMD_ALIASES` (or equivalent), not as separate `CmdDef` entries.
 
 ### Flag naming
