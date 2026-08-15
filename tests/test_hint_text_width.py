@@ -210,3 +210,43 @@ class TestTabHeaderFits:
             assert sliced.count('[') == sliced.count(']'), (
                 f"unbalanced markup at inner_w={inner_w}: {sliced!r}"
             )
+
+
+class TestCompactPath:
+    """The Events header shortens the log path; key hints must never be lost."""
+
+    def C(self, pb, path, w):
+        return pb.Application._compact_path(path, w)
+
+    def test_short_path_unchanged(self, pb):
+        assert self.C(pb, '/tmp/a.log', 40) == '/tmp/a.log'
+
+    def test_home_collapses_to_tilde(self, pb):
+        import os
+        p = os.path.join(os.path.expanduser('~'), 'logs', 'a.log')
+        assert self.C(pb, p, 40) == '~/logs/a.log'
+
+    def test_tilde_form_used_even_when_it_then_fits(self, pb):
+        import os
+        home = os.path.expanduser('~')
+        p = os.path.join(home, 'x.log')
+        out = self.C(pb, p, len(p))          # would fit unshortened too
+        assert out.startswith('~')
+
+    def test_long_path_is_elided_from_the_left(self, pb):
+        out = self.C(pb, '/very/deeply/nested/place/events.log', 20)
+        assert len(out) <= 20
+        assert out.startswith('…')
+        assert out.endswith('events.log'), "the file name must survive"
+
+    def test_never_exceeds_budget(self, pb):
+        p = '/a/b/c/d/e/f/g/h/i/events.log'
+        for w in range(0, len(p) + 5):
+            assert len(self.C(pb, p, w)) <= max(0, w), f"width={w}"
+
+    def test_zero_or_negative_budget_yields_nothing(self, pb):
+        assert self.C(pb, '/tmp/a.log', 0) == ''
+        assert self.C(pb, '/tmp/a.log', -5) == ''
+
+    def test_tiny_budget_degrades_to_ellipsis(self, pb):
+        assert self.C(pb, '/tmp/a.log', 2) == '……'

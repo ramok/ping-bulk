@@ -6715,6 +6715,28 @@ class Application:
                 i += 1
         return col
 
+    @staticmethod
+    def _compact_path(path, max_w):
+        """Shorten *path* to at most *max_w* columns, keeping both ends readable.
+
+        ``$HOME`` collapses to ``~`` first, since that is free.  If it still
+        does not fit, the middle is elided — the directory tail and the file
+        name are what identify a log, so a bare prefix would be useless.
+        Returns '' when *max_w* leaves no usable room.
+        """
+        home = os.path.expanduser('~')
+        if home and home != '/' and path.startswith(home + os.sep):
+            path = '~' + path[len(home):]
+        if max_w <= 0:
+            return ''
+        if len(path) <= max_w:
+            return path
+        if max_w <= 3:
+            return '…' * max_w
+        # Favour the tail: a log is identified by its name, not its root.
+        tail = max_w - 2                      # room after '…/' … keep it simple
+        return '…' + path[-tail:] if tail > 0 else '…'
+
     def _draw_column_header(self, stdscr, row, col, title, suffix, width):
         """Draw a column header: *title* in white/bold then *suffix* via _draw_hint_text.
 
@@ -7513,9 +7535,15 @@ class Application:
             header_title = 'Events'
             header_suffix = f" lines {line_start}-{line_end}/{total} [PgUp/PgDn scroll] [Esc resume]"
 
-        if self.log_file:
-            header_suffix += f" → {self.log_file}"
+        # Key hints are appended before the log path and always win the space:
+        # the path is informational, the hints are how you drive the log.
         header_suffix += " [W|rite] [C|lear]"
+        if self.log_file:
+            used = len(header_title) + self._hint_text_width(header_suffix)
+            room = width - 1 - used - 3        # 3 = ' → '
+            shown = self._compact_path(self.log_file, room)
+            if shown:
+                header_suffix += f" → {shown}"
 
         # Render title in white/bold; [key desc] tokens have key in white, desc default.
         self._draw_column_header(stdscr, start_row, 0, header_title, header_suffix, width)
