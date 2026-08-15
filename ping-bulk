@@ -795,7 +795,7 @@ _HELP_CMDS_INTERACTIVE = [
     "  :pause \\[on|off]            toggle/set global pause (stop all pings)",
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
-    "  :save \\[file]              write event log to a file; no args opens a prompt      (W)",
+    "  :save \\[--follow] \\[file]   write event log to a file; --follow also streams there (W)",
     "  :log \\[file|off]           show/set the streaming log file (future events), or disable logging",
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
@@ -3795,8 +3795,8 @@ CMD_REGISTRY = [
            '',                    'clear event log (alias for :clear --confirm)',
            completable=False),
     CmdDef(['save'],             '_open_prompt_save', None,
-           '[file]',              'write event log to file; no args = open prompt',
-           arg_completer=_complete_log_arg),
+           '[--follow] [file]',   'write event log to file; --follow also streams there',
+           arg_completer=_complete_log_arg, flags=['--follow']),
     CmdDef(['log'],              '_cmd_log',        None,
            '[file|off]',          'show/set/disable the streaming log file',
            arg_completer=_complete_log_arg,
@@ -7535,21 +7535,33 @@ class Application:
     def _open_prompt_save(self, args=''):
         """Write the event log to a file, or open the save-log prompt.
 
-        With a filename argument the log is written straight away (existing
-        files are truncated).  Without one, a non-blocking prompt is opened
-        and the answer is handled by _handle_prompt_key.
+        ``:save <file>`` writes a snapshot and leaves logging alone.
+        ``:save --follow <file>`` also makes *file* the streaming log, so
+        later events keep landing there.  With no filename a prompt is opened
+        and _handle_prompt_key walks the answers.
         """
-        filename = args.strip()
-        if filename:
-            if self.kiosk_mode and not self._kiosk_allow_path(filename, 'save'):
+        rest = args.strip()
+        follow = False
+        for flag in ('--follow', '-F'):
+            if rest == flag or rest.startswith(flag + ' '):
+                follow = True
+                rest = rest[len(flag):].strip()
+                break
+        if rest:
+            if self.kiosk_mode and not self._kiosk_allow_path(rest, 'save'):
                 return
-            self.save_to_file(filename)
-            self.log_file = filename
+            self._save_log_to(rest, append=False, follow=follow)
             return
         self.prompt = {
             'type': 'save',
             'chars': list(self.log_file) if self.log_file else [],
         }
+
+    def _save_log_to(self, filename, append=False, follow=False):
+        """Write the log to *filename*; when *follow*, also stream there from now on."""
+        self.save_to_file(filename, append=append, write_separator=append)
+        if follow:
+            self.log_file = filename
 
     def _open_prompt_clear(self, args=''):
         """Open the clear-log confirmation prompt (non-blocking)."""
@@ -7571,6 +7583,11 @@ class Application:
             stdscr.move(height - 1, cursor_x)
         elif p['type'] == 'save_confirm':
             line = "File exists: [t]runcate  [a]ppend  Esc=cancel"
+            stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
+            stdscr.move(height - 1, min(len(line), width - 2))
+        elif p['type'] == 'save_follow':
+            line = ("[w]rite once   [f]ollow (write + log there from now on)"
+                    "   Esc=cancel")
             stdscr.addstr(height - 1, 0, line.ljust(width - 1)[:width - 1], curses.A_REVERSE)
             stdscr.move(height - 1, min(len(line), width - 2))
         elif p['type'] == 'clear':
@@ -7639,9 +7656,9 @@ class Application:
                         # Advance to the truncate/append confirmation step
                         self.prompt = {'type': 'save_confirm', 'filename': filename, 'chars': []}
                     else:
-                        self.save_to_file(filename)
-                        self.log_file = filename
-                        self.prompt = None
+                        # New file — only the write-once/follow question is left
+                        self.prompt = {'type': 'save_follow', 'filename': filename,
+                                       'append': False, 'chars': []}
                 else:
                     self.prompt = None  # empty filename — cancel
             elif key == 27:  # Escape — cancel
@@ -7655,12 +7672,20 @@ class Application:
         elif p['type'] == 'save_confirm':
             filename = p['filename']
             if key in (ord('t'), ord('T')):
-                self.save_to_file(filename, append=False)
-                self.log_file = filename
+                self.prompt = {'type': 'save_follow', 'filename': filename,
+                               'append': False, 'chars': []}
             elif key in (ord('a'), ord('A')):
-                if self.log_file != filename:
-                    self.save_to_file(filename, append=True, write_separator=True)
-                self.log_file = filename
+                self.prompt = {'type': 'save_follow', 'filename': filename,
+                               'append': True, 'chars': []}
+            else:
+                # Any other key (Esc, Enter, …) — cancel without saving
+                self.prompt = None
+
+        elif p['type'] == 'save_follow':
+            if key in (ord('w'), ord('W')):
+                self._save_log_to(p['filename'], append=p['append'], follow=False)
+            elif key in (ord('f'), ord('F')):
+                self._save_log_to(p['filename'], append=p['append'], follow=True)
             # Any other key (Esc, Enter, …) — cancel without saving
             self.prompt = None
 
@@ -8195,7 +8220,7 @@ class Application:
           pause                  — toggle pause
           seen                   — insert 'seen' marker in event log
           clear                  — clear event log
-          save [file]            — write event log to a file (no arg opens a prompt)
+          save [--follow] [file] — write event log to a file (no arg opens a prompt)
           log [file]             — show active log file; or save/stream log to file
           help                   — open the help overlay
 

@@ -333,14 +333,23 @@ Event log
 ``:clear``
     Clear the event log (with confirmation prompt).
 
-``:save [file]``
-    Write the buffered event log to *file* (same as ``W``).  With no
-    argument, open a prompt pre-filled with the active log file; if the
-    target exists the prompt offers ``[t]runcate`` or ``[a]ppend``.
-    Passing a filename directly truncates any existing file.  The saved
-    file always contains **all** log levels regardless of the current
-    ``log-level`` setting.  The target also becomes the active streaming
-    log file.
+``:save [--follow] [file]``
+    Write the buffered event log to *file* (same as ``W``).
+
+    By default this is a **snapshot**: the file is written and logging is
+    left alone.  With ``--follow`` the file also becomes the active
+    streaming log, so later events keep landing there — the same thing
+    ``:log`` does.
+
+    With no filename a prompt opens, pre-filled with the active log file:
+
+    1. ``Write log to:`` — type a path and press ``Enter``.
+    2. Only if the file exists: ``[t]runcate`` or ``[a]ppend``.
+    3. ``[w]rite once`` or ``[f]ollow`` — the snapshot/stream choice above.
+
+    ``Esc`` at any step cancels without writing.  The saved file always
+    contains **all** log levels regardless of the current ``log-level``
+    setting, so it stays greppable.
 
 ``:log [file|off]``
     With no argument, print the active log file path (or report that

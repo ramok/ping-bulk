@@ -435,3 +435,128 @@ class TestSaveCommand:
         app._dispatch_cmd(f':save {target}')
         assert target.exists()
         assert 'dispatched' in target.read_text()
+
+
+# ===========================================================================
+# :save follow semantics — snapshot by default, stream only on request
+# ===========================================================================
+
+ENTER = ord('\n')
+ESC   = 27
+
+
+class TestSaveFollowFlow:
+    """Writing a snapshot must not silently redirect future logging.
+
+    :save used to set log_file as a side effect, so asking for one file
+    quietly moved the live log there too.
+    """
+
+    def test_plain_save_does_not_start_following(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'hello')
+        target = tmp_path / 'snap.log'
+        app._open_prompt_save(str(target))
+        assert target.exists()
+        assert app.log_file is None, "snapshot must not become the streaming log"
+
+    def test_follow_flag_starts_following(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'hello')
+        target = tmp_path / 'follow.log'
+        app._open_prompt_save(f'--follow {str(target)}')
+        assert target.exists()
+        assert app.log_file == str(target)
+
+    def test_new_file_asks_write_or_follow(self, pb, tmp_path):
+        """A new filename skips truncate/append and goes straight to the choice."""
+        app, _ = _make_app(pb, tmp_path)
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(tmp_path / 'new.log'))
+        app._handle_prompt_key(ENTER)
+        assert app.prompt['type'] == 'save_follow'
+        assert app.prompt['append'] is False
+
+    def test_existing_file_asks_truncate_then_follow(self, pb, tmp_path):
+        target = tmp_path / 'exists.log'
+        target.write_text('old\n')
+        app, _ = _make_app(pb, tmp_path)
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(target))
+        app._handle_prompt_key(ENTER)
+        assert app.prompt['type'] == 'save_confirm'
+        app._handle_prompt_key(ord('a'))          # append
+        assert app.prompt['type'] == 'save_follow'
+        assert app.prompt['append'] is True
+
+    def test_w_writes_without_following(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'payload')
+        target = tmp_path / 'once.log'
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(target))
+        app._handle_prompt_key(ENTER)
+        app._handle_prompt_key(ord('w'))
+        assert app.prompt is None
+        assert 'payload' in target.read_text()
+        assert app.log_file is None
+
+    def test_f_writes_and_follows(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'payload')
+        target = tmp_path / 'tail.log'
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(target))
+        app._handle_prompt_key(ENTER)
+        app._handle_prompt_key(ord('f'))
+        assert app.prompt is None
+        assert 'payload' in target.read_text()
+        assert app.log_file == str(target)
+
+    def test_following_captures_later_events(self, pb, tmp_path):
+        """After [f], a new event must land in the file."""
+        app, _ = _make_app(pb, tmp_path)
+        target = tmp_path / 'live.log'
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(target))
+        app._handle_prompt_key(ENTER)
+        app._handle_prompt_key(ord('f'))
+        app.add_event('cmd', 'arrived-later')
+        assert 'arrived-later' in target.read_text()
+
+    def test_escape_at_follow_step_writes_nothing(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        target = tmp_path / 'cancelled.log'
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(target))
+        app._handle_prompt_key(ENTER)
+        app._handle_prompt_key(ESC)
+        assert app.prompt is None
+        assert not target.exists()
+        assert app.log_file is None
+
+    def test_append_preserves_existing_content(self, pb, tmp_path):
+        target = tmp_path / 'grow.log'
+        target.write_text('previous\n')
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'fresh')
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(target))
+        app._handle_prompt_key(ENTER)
+        app._handle_prompt_key(ord('a'))
+        app._handle_prompt_key(ord('w'))
+        body = target.read_text()
+        assert 'previous' in body and 'fresh' in body
+
+    def test_truncate_replaces_existing_content(self, pb, tmp_path):
+        target = tmp_path / 'wipe.log'
+        target.write_text('previous\n')
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'fresh')
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(target))
+        app._handle_prompt_key(ENTER)
+        app._handle_prompt_key(ord('t'))
+        app._handle_prompt_key(ord('w'))
+        body = target.read_text()
+        assert 'previous' not in body and 'fresh' in body
