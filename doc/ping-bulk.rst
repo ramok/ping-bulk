@@ -663,12 +663,19 @@ Folding
     +------------------------+---------+------------------------------------+
     | ``close-level``        | ``zm``  | Close one level                    |
     +------------------------+---------+------------------------------------+
+    | ``close-other [pat]``  | ``zx``  | Close all except match             |
+    +------------------------+---------+------------------------------------+
+
+    ``close-other`` folds every section, then recursively unfolds sections
+    whose title matches the regex *pat*.  Without *pat*, unfolds the section
+    at the cursor.  Plain text works as a substring match.
 
     Examples::
 
         :fold toggle
         :fold close-all
         :fold zA
+        :fold close-other sensor-hub-3
 
 ``:fold-all`` / ``:unfold-all``
     Fold / unfold all sections at once (shorthand for ``:fold close-all``

@@ -6,6 +6,7 @@ Covers:
   _fold_level_step(direction)   — zm/zr level-by-level fold cycling
   _fold_healthy()               — fold sections where all monitors alive
   _fold_unhealthy()             — fold sections with any monitor down
+  _fold_close_other(pattern)    — fold all except matching sections
 """
 
 import os
@@ -241,3 +242,98 @@ class TestFoldHealthyUnhealthy:
         assert all(s.folded for s in [s1, s2])
         app._fold_all(False)
         assert not any(s.folded for s in [s1, s2])
+
+
+# ===========================================================================
+# _fold_close_other — fold all except matching sections
+# ===========================================================================
+
+class TestFoldCloseOther:
+
+    def test_pattern_matches_one_section(self, pb, tmp_path):
+        s1 = make_section(pb, 'Alpha', level=1)
+        m1 = make_monitor_alive(pb, 'a1')
+        s2 = make_section(pb, 'Bravo', level=1)
+        m2 = make_monitor_alive(pb, 'b1')
+        s3 = make_section(pb, 'Charlie', level=1)
+        m3 = make_monitor_alive(pb, 'c1')
+        app = build_app_with_layout(pb, tmp_path, [s1, m1, s2, m2, s3, m3])
+        app._fold_close_other('Bravo')
+        assert s1.folded is True
+        assert s2.folded is False
+        assert s3.folded is True
+
+    def test_pattern_matches_multiple_sections(self, pb, tmp_path):
+        s1 = make_section(pb, 'sensor-hub-1', level=1)
+        m1 = make_monitor_alive(pb, 'h1')
+        s2 = make_section(pb, 'sensor-hub-2', level=1)
+        m2 = make_monitor_alive(pb, 'h2')
+        s3 = make_section(pb, 'harbour', level=1)
+        m3 = make_monitor_alive(pb, 'h3')
+        app = build_app_with_layout(pb, tmp_path, [s1, m1, s2, m2, s3, m3])
+        app._fold_close_other('sensor-hub')
+        assert s1.folded is False
+        assert s2.folded is False
+        assert s3.folded is True
+
+    def test_no_pattern_cursor_on_section(self, pb, tmp_path):
+        s1 = make_section(pb, 'A', level=1)
+        m1 = make_monitor_alive(pb, 'a1')
+        s2 = make_section(pb, 'B', level=1)
+        m2 = make_monitor_alive(pb, 'b1')
+        app = build_app_with_layout(pb, tmp_path, [s1, m1, s2, m2])
+        app.highlighted_index = 2  # s2
+        app._fold_close_other()
+        assert s1.folded is True
+        assert s2.folded is False
+
+    def test_no_pattern_cursor_on_monitor(self, pb, tmp_path):
+        s1 = make_section(pb, 'A', level=1)
+        m1 = make_monitor_alive(pb, 'a1')
+        s2 = make_section(pb, 'B', level=1)
+        m2 = make_monitor_alive(pb, 'b1')
+        app = build_app_with_layout(pb, tmp_path, [s1, m1, s2, m2])
+        app.highlighted_index = 3  # m2 (under s2)
+        app._fold_close_other()
+        assert s1.folded is True
+        assert s2.folded is False
+
+    def test_recursive_unfold_of_matched_section(self, pb, tmp_path):
+        s1 = make_section(pb, 'Top', level=1)
+        s2 = make_section(pb, 'Sub', level=2)
+        m1 = make_monitor_alive(pb, 'h1')
+        s3 = make_section(pb, 'Other', level=1)
+        m2 = make_monitor_alive(pb, 'h2')
+        app = build_app_with_layout(pb, tmp_path, [s1, s2, m1, s3, m2])
+        app._fold_close_other('Top')
+        assert s1.folded is False
+        assert s2.folded is False  # descendant also unfolded
+        assert s3.folded is True
+
+    def test_no_match_preserves_fold_state(self, pb, tmp_path):
+        s1 = make_section(pb, 'A', level=1, folded=False)
+        s2 = make_section(pb, 'B', level=1, folded=True)
+        app = build_app_with_layout(pb, tmp_path, [s1, s2])
+        app._fold_close_other('nonexistent')
+        assert s1.folded is False  # unchanged
+        assert s2.folded is True   # unchanged
+
+    def test_invalid_regex_falls_back_to_literal(self, pb, tmp_path):
+        s1 = make_section(pb, 'test[1', level=1)
+        m1 = make_monitor_alive(pb, 'h1')
+        s2 = make_section(pb, 'other', level=1)
+        m2 = make_monitor_alive(pb, 'h2')
+        app = build_app_with_layout(pb, tmp_path, [s1, m1, s2, m2])
+        app._fold_close_other('[1')
+        assert s1.folded is False
+        assert s2.folded is True
+
+    def test_case_insensitive_matching(self, pb, tmp_path):
+        s1 = make_section(pb, 'Sensor-HUB-3', level=1)
+        m1 = make_monitor_alive(pb, 'h1')
+        s2 = make_section(pb, 'other', level=1)
+        m2 = make_monitor_alive(pb, 'h2')
+        app = build_app_with_layout(pb, tmp_path, [s1, m1, s2, m2])
+        app._fold_close_other('sensor-hub')
+        assert s1.folded is False
+        assert s2.folded is True

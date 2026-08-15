@@ -733,6 +733,7 @@ _HELP_FOLDING = [
     "  Folding",
     "  [\\]/zR]          (:fold open-all)          open (unfold) ALL sections",
     "  [\\[/zM]          (:fold close-all)         close (fold) ALL sections",
+    "  [zx]             (:fold close-other)       fold all except cursor section (or regex pattern)",
     "  [z\\[]            (:fold close-healthy)     fold sections where all hosts are up",
     "  [z\\]]            (:fold close-unhealthy)   fold sections where any host is down",
     "",
@@ -796,6 +797,7 @@ _HELP_CMDS_INTERACTIVE = [
     "  :log \\[file|off]           show active log file, set/save log to file, or disable logging",
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
+    "  :fold close-other \\[pat]   fold all except sections matching regex pattern  (zx)",
     "  :fold close-healthy       fold sections where all hosts are currently up    (z[)",
     "  :fold close-unhealthy     fold sections where any host is currently down    (z])",
     "  :saveconfig               save current settings to config file",
@@ -3884,7 +3886,8 @@ CMD_REGISTRY = [
            ['toggle', 'toggle-recursive',
             'open', 'close', 'open-recursive', 'close-recursive',
             'open-all', 'close-all', 'open-level', 'close-level',
-            'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm'],
+            'close-other',
+            'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'zx'],
            '<action>',            'fold action (toggle, open, close, open-all, …)'),
     CmdDef(['scroll'],           '_cmd_scroll', None,
            '<ping-history|event-history> <action>', 'scroll a named view (ping-history, event-history)'),
@@ -5223,6 +5226,64 @@ class Application:
         if changed:
             self._fold_state_changed()
 
+    def _fold_close_other(self, pattern=None):
+        """Fold all sections except those matching *pattern* (or the cursor section).
+
+        When *pattern* is given, sections whose title matches the
+        case-insensitive regex are kept open (with descendants).
+        When *pattern* is None, the section at ``highlighted_index`` is used
+        (resolving through a Monitor to its parent section if needed).
+        """
+        matched = set()
+        if pattern is not None:
+            try:
+                rx = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                rx = re.compile(re.escape(pattern), re.IGNORECASE)
+            for entry in self.entries:
+                if isinstance(entry, SectionLabel) and rx.search(entry.title):
+                    matched.add(id(entry))
+            if not matched:
+                self.add_event("fold",
+                    f"close-other: no section matches '{pattern}'")
+                return
+        else:
+            entry = None
+            if (self.highlighted_index is not None and
+                    0 <= self.highlighted_index < len(self.entries)):
+                entry = self.entries[self.highlighted_index]
+            if isinstance(entry, SectionLabel):
+                matched.add(id(entry))
+            elif isinstance(entry, Monitor):
+                ancestors = self._get_ancestor_sections(self.highlighted_index)
+                if ancestors:
+                    matched.add(id(ancestors[-1]))
+            if not matched:
+                self.add_event("fold", "close-other: no section at cursor")
+                return
+
+        # Pass 1: fold everything
+        for entry in self.entries:
+            if isinstance(entry, SectionLabel):
+                entry.folded = True
+        # Pass 2: unfold matched sections and their descendants
+        for entry in self.entries:
+            if not isinstance(entry, SectionLabel) or id(entry) not in matched:
+                continue
+            entry.folded = False
+            in_subtree = False
+            for e2 in self.entries:
+                if e2 is entry:
+                    in_subtree = True
+                    continue
+                if not isinstance(e2, SectionLabel):
+                    continue
+                if in_subtree and e2.level > entry.level:
+                    e2.folded = False
+                elif in_subtree:
+                    break
+        self._fold_state_changed()
+
     def _fold_level_step(self, direction):
         """Open or close sections one level at a time (global, like zr/zm).
 
@@ -5295,6 +5356,8 @@ class Application:
             self._fold_healthy()
         elif action == 'z]':
             self._fold_unhealthy()
+        elif action == 'zx':
+            self._fold_close_other()
 
     def _handle_z_sequence(self, key):
         """Dispatch a z* two-key fold sequence after 'z' was pressed.
@@ -5372,11 +5435,18 @@ class Application:
 
         Word aliases: open, close, open-recursive, close-recursive,
                       open-all, close-all, open-level, close-level,
-                      toggle, toggle-recursive, close-healthy, close-unhealthy.
-        Z-actions: za, zA, zo, zO, zc, zC, zR, zM, zr, zm, z[, z].
+                      toggle, toggle-recursive, close-healthy, close-unhealthy,
+                      close-other [pattern].
+        Z-actions: za, zA, zo, zO, zc, zC, zR, zM, zr, zm, z[, z], zx.
         """
         if not args:
             self.add_event("cmd", "fold: missing action argument")
+            return
+        # close-other accepts an optional trailing pattern argument
+        parts = args.strip().split(None, 1)
+        if parts[0] in ('close-other', 'zx'):
+            pattern = parts[1].strip() if len(parts) > 1 else None
+            self._fold_close_other(pattern)
             return
         action = args.strip()
         fold_map = {
@@ -5394,7 +5464,7 @@ class Application:
             'close-unhealthy':  'z]',
         }
         action = fold_map.get(action, action)
-        valid = {'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'z[', 'z]'}
+        valid = {'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'z[', 'z]', 'zx'}
         if action in valid:
             self._do_fold_action(action)
         else:
@@ -5545,8 +5615,9 @@ class Application:
             'M': 'close (fold) ALL sections',
             'r': 'open one fold level (deepest closed)',
             'm': 'close one fold level (shallowest open)',
+            'x': 'fold all except cursor section (close-other)',
         }
-        for ch in 'oOcCaArRmM':
+        for ch in 'oOcCaArRmMx':
             _b(f'z{ch}', f':fold z{ch}', desc=_fold_descs[ch])
         # History scrolling
         _b('<Left>',    ':scroll ping-history half',  desc='scroll ping history older')
