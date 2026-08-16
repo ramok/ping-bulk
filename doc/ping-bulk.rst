@@ -251,6 +251,10 @@ Display
 ``p`` / ``P``
     Toggle pause (freeze the display without stopping pings).
 
+``l``
+    Cycle the screen layout: ``all`` → ``ping`` → ``log`` → ``all``.
+    See ``:layout`` under **COMMANDS**.
+
 ``W``
     Open the *write event log to file* prompt, pre-filled with the active
     log file when one is set.  If the target file already exists a second
@@ -332,6 +336,30 @@ Event log
 
 ``:clear``
     Clear the event log (with confirmation prompt).
+
+``:layout [all|ping|log]``
+    Choose how the host list and the event log share the window (same as
+    ``l``).  With no argument, cycle to the next mode.
+
+    +------------+--------------------------------------------------------+
+    | Mode       | Effect                                                 |
+    +============+========================================================+
+    | ``all``    | Hosts take the space they need, the log gets the rest   |
+    +------------+--------------------------------------------------------+
+    | ``ping``   | Host list only — the event log is hidden               |
+    +------------+--------------------------------------------------------+
+    | ``log``    | Event log only, full height — the host list is hidden  |
+    +------------+--------------------------------------------------------+
+
+    In ``all`` the host list is served first, so a list long enough to fill
+    the window leaves the log no rows at all.  ``log`` is the way to read the
+    log in that situation.  ``ping`` only differs from ``all`` when the hosts
+    do *not* fill the window, where it suppresses the log anyway.
+
+    Switching to ``log`` clears the host selection so ``↑``/``↓`` scroll the
+    log rather than moving an invisible cursor.  The mode is shown in the
+    status bar as ``layout:<mode>`` while it is not ``all``, and is saved by
+    ``:save-config``.
 
 ``:save [--follow] [file]``
     Write the buffered event log to *file* (same as ``W``).
