@@ -255,6 +255,10 @@ Display
     Cycle the screen layout: ``all`` → ``ping`` → ``log`` → ``all``.
     See ``:layout`` under **COMMANDS**.
 
+``L``
+    Show the event log full screen; press again to return to the previous
+    layout.  A there-and-back peek at the log, rather than cycling around.
+
 ``W``
     Open the *write event log to file* prompt, pre-filled with the active
     log file when one is set.  If the target file already exists a second
@@ -337,7 +341,7 @@ Event log
 ``:clear``
     Clear the event log (with confirmation prompt).
 
-``:layout [all|ping|log]``
+``:layout [--toggle] [all|ping|log]``
     Choose how the host list and the event log share the window (same as
     ``l``).  With no argument, cycle to the next mode.
 
@@ -355,6 +359,12 @@ Event log
     the window leaves the log no rows at all.  ``log`` is the way to read the
     log in that situation.  ``ping`` only differs from ``all`` when the hosts
     do *not* fill the window, where it suppresses the log anyway.
+
+    With ``--toggle``, switch to *mode* (default ``log``) or, when already
+    there, back to the layout in use before the jump — so one key is a
+    there-and-back peek rather than a cycle to walk around.  ``L`` is bound to
+    ``:layout --toggle log``.  Coming back from ``log`` returns to ``ping`` if
+    that is where you were, not blindly to ``all``.
 
     Switching to ``log`` clears the host selection so ``↑``/``↓`` scroll the
     log rather than moving an invisible cursor.  The mode is shown in the

@@ -76,6 +76,82 @@ class TestLayoutCommand:
         assert pb._CMD_MAP['layout'].completable is True
 
 
+class TestLayoutToggle:
+    """`L` is a there-and-back peek at the log, not another cycle step."""
+
+    def test_toggle_enters_log_from_all(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout('--toggle log')
+        assert app.layout == 'log'
+
+    def test_toggle_returns_to_all(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout('--toggle log')
+        app._cmd_layout('--toggle log')
+        assert app.layout == 'all'
+
+    def test_toggle_returns_to_ping_not_all(self, pb, tmp_path):
+        """It returns where you came from, not blindly to the default."""
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout('ping')
+        app._cmd_layout('--toggle log')
+        assert app.layout == 'log'
+        app._cmd_layout('--toggle log')
+        assert app.layout == 'ping'
+
+    def test_toggle_defaults_to_log(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout('--toggle')
+        assert app.layout == 'log'
+
+    def test_toggle_works_for_any_mode(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout('--toggle ping')
+        assert app.layout == 'ping'
+        app._cmd_layout('--toggle ping')
+        assert app.layout == 'all'
+
+    def test_toggle_from_log_when_prev_is_also_log(self, pb, tmp_path):
+        """Degenerate case must not strand the user on the same layout."""
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout('log')
+        app._layout_prev = 'log'
+        app._cmd_layout('--toggle log')
+        assert app.layout == 'all'
+
+    def test_toggle_rejects_unknown_mode(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout('--toggle bogus')
+        assert app.layout == 'all'
+        assert any('unknown mode' in e.text for e in app.events)
+
+    def test_cycling_updates_the_return_target(self, pb, tmp_path):
+        """After cycling, toggle must come back to the cycled-to layout."""
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout()                 # all -> ping
+        assert app.layout == 'ping'
+        app._cmd_layout('--toggle log')   # ping -> log
+        app._cmd_layout('--toggle log')   # log -> ping
+        assert app.layout == 'ping'
+
+    def test_toggle_into_log_clears_selection(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        app.highlighted_index = 0
+        app._cmd_layout('--toggle log')
+        assert app.highlighted_index is None
+
+    def test_capital_l_is_bound_to_toggle(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('L'), set())
+        assert binding is not None
+        assert binding.commands == [':layout --toggle log']
+
+    def test_lowercase_l_still_cycles(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('l'), set())
+        assert binding.commands == [':layout']
+
+
 class TestLayoutPersistence:
 
     def test_default_not_written_to_config(self, pb, tmp_path):

@@ -719,6 +719,7 @@ _HELP_HOTKEYS = [
     "  [Enter]               (:details)                         show detailed stats for highlighted host",
     "  [Space]               (:seen)                            insert 'seen' marker (or :fold toggle on section)",
     "  [l]                   (:layout)                          cycle layout: all / ping only / log only",
+    "  [L]                   (:layout --toggle log)             full-screen event log, press again to go back",
     "  [W]                   (:save)                            write event log to a file",
     "  [C]                   (:clear)                           clear event log",
     "  [Esc]                 (:select none)                     clear host selection + return to live history",
@@ -806,6 +807,7 @@ _HELP_CMDS_INTERACTIVE = [
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
     "  :layout \\[all|ping|log]   screen layout; no arg cycles  (l)",
+    "  :layout --toggle \\[mode]  jump to mode (default log) and back again  (L)",
     "  :save \\[--follow] \\[file]   write event log to a file; --follow also streams there (W)",
     "  :log \\[file|off]           show/set the streaming log file (future events), or disable logging",
     "  :fold-all                 fold (collapse) all sections",
@@ -3790,7 +3792,8 @@ CMD_REGISTRY = [
            cli_flags=('--sort',),
            cli_kwargs={'metavar': 'MODE', 'choices': ['none', 'name', 'status', 'latency'], 'help': 'sort order at startup: none | name | status | latency'}),
     CmdDef(['layout'],           '_cmd_layout',     lambda: list(LAYOUTS),
-           '[mode]',              'cycle or set screen layout (all/ping/log)',
+           '[--toggle] [mode]',   'cycle, set, or toggle screen layout (all/ping/log)',
+           flags=['--toggle'],
            cli_flags=('--layout',),
            cli_kwargs={'metavar': 'MODE', 'choices': list(LAYOUTS),
                        'help': f"screen layout at startup: {' | '.join(LAYOUTS)}"}),
@@ -4341,6 +4344,7 @@ class Application:
         self._current_mode = 'normal'  # current UI mode: normal/help/details/command
         # Screen layout (must be set before _load_config so a config can pick one)
         self.layout = 'all'          # see LAYOUTS
+        self._layout_prev = 'all'    # where :layout --toggle returns to
         # Filter mode: show only hosts matching a regex pattern (must be set before _load_config)
         self._filter_query   = ''    # '' = inactive; regex pattern when active
         self._filter_visible = set() # entry indices visible under current filter
@@ -5593,6 +5597,7 @@ class Application:
         _b('C', ':clear --confirm', desc='clear event log')
         _b('W', ':save', desc='write event log to a file')
         _b('l', ':layout', desc='cycle layout: all / ping only / log only')
+        _b('L', ':layout --toggle log', desc='full-screen event log, and back')
         _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'),
            desc='open SSH connection to selected host')
         _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
@@ -9076,20 +9081,48 @@ class Application:
             self.cycle_history_mode(1)
 
     def _cmd_layout(self, args=''):
-        """Cycle (no arg) or set the screen layout: all | ping | log.
+        """Cycle, set, or toggle the screen layout: all | ping | log.
+
+        ``:layout``                  — cycle to the next mode
+        ``:layout <mode>``           — switch to *mode*
+        ``:layout --toggle [mode]``  — switch to *mode* (default ``log``), or,
+          when already there, back to the layout in use before the jump.  That
+          makes one key a there-and-back peek at the log instead of a cycle
+          the user has to walk around.
 
         Switching to 'log' clears the host selection, because with the host
         list hidden the arrow keys should scroll the log rather than move an
         invisible cursor.
         """
-        want = args.strip().lower()
-        if want:
+        rest = args.strip()
+        toggle = False
+        for flag in ('--toggle', '-t'):
+            if rest == flag or rest.startswith(flag + ' '):
+                toggle = True
+                rest = rest[len(flag):].strip()
+                break
+        want = rest.lower()
+
+        if toggle:
+            target = want or 'log'
+            if target not in LAYOUTS:
+                self.add_event("cmd",
+                    f"layout: unknown mode '{rest}' — choices: {' '.join(LAYOUTS)}")
+                return
+            # Already on the target — return to where we came from.  Falling
+            # back to 'all' keeps the key useful if that was the target too.
+            want = target if self.layout != target else (
+                self._layout_prev if self._layout_prev != target else 'all')
+        elif want:
             if want not in LAYOUTS:
                 self.add_event("cmd",
-                    f"layout: unknown mode '{args.strip()}' — choices: {' '.join(LAYOUTS)}")
+                    f"layout: unknown mode '{rest}' — choices: {' '.join(LAYOUTS)}")
                 return
         else:
             want = LAYOUTS[(LAYOUTS.index(self.layout) + 1) % len(LAYOUTS)]
+
+        if want != self.layout:
+            self._layout_prev = self.layout
         self.layout = want
         if want == 'log':
             self.highlighted_index = None
