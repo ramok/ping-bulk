@@ -1,0 +1,406 @@
+after publishing on github.com need to add to documentation "simple" installation by downloading "raw" script and install it in ~/.local/bin or /usr/local/bin
+    - using curl or wget
+- fresh start, autofold trigger after 30 sec. what problem can be with "extr"? suppose to be "extra"
+
+- (1111 min 31 sec) should be also show hours, days, weeks and month
+2026-04-19T10:34:48+0200   gw-canary-lte          host down.    Up time:   66691 sec (1111 min 31 sec)
+
+- host list row count, calculate from total ammount of host and section titles. but when it folded/unfolded, it's need to be recalculated
+
+```
+── [+] sevices (5 folded)           9↑/1↓                     ..............................................
+  ── [-] extr (autofold lock)       4↑/1↓
+    admin (10.10.10.17)                45s   0.2   0.3    0.0 ..............................................
+    certs (10.10.10.6)                 45s   0.3   0.3    0.0 ..............................................
+    yocto (10.10.10.9)                 45s   0.3   0.3    0.0 ..............................................
+```
+
+- mtr curses like feature
+    - how they make scale?? it's dynamic
+    - Scale:  .:0 ms  1:2 ms  2:5 ms  3:10 ms  a:15 ms  b:22 ms  c:30 ms  >
+    - order for stats:all loss,snt,last,avg,best,wrst,stdev
+
+- new name of project?
+    - project already has more features when just a ping
+        - can connect via ssh
+        - rerun in mux sessions
+        - run external tools like mtr
+    - propose new project name
+    - hosts-mon, ...?
+    - something -ng, lazy(not fan of it), ...
+    - some name from mipholoty? hugin, crow of odin?
+        - another name pingology, monitology...?
+
+    - :remote-ping --> :remote-ping-via?
+
+- I need a demo of usage
+    - it is possible to make script which run scenarion and create "ascii screen record"
+        - how to display which keys was pressed?
+        - then convert it to .webp
+            - what tools need?
+    - separate script which can remake demo with new features or interface chaning updated
+    - propose scenario for a demo
+
+│ │ tmux show-option -gv base-index 2>/dev/null || echo "not set"
+│ │ tmux show-option -gv pane-base-index 2>/dev/null || echo "not set"
+
+- traceroute on selected host in overlay window  (alternative screen?)
+    - run mtr-tiny tui interface, and by quit switch back?
+        - how complex it can be implement? man mtr
+            - same features as in mtr?
+    - idea about 'traceroute desing interface for "one host strace in one line"'
+        - like "8.8.8.8   gw -> host -> host ... -> (target-1)-hop -> target" adapned to line lenght?
+        - if there is no hops, show just ping
+    - pingtrace? variants
+        - internal implementation?
+        - mtr --raw
+        - traceroute
+        - what alse tools available?
+    - mtr-packet ?
+
+- search history permanent? how complex
+- i wanna separate history search for a help and for a hostlist/eventlog(combined)
+
+- discuss feature about running tools like mtr on remote selected host
+  - what key binding?
+
+- mouse support
+  - :set mouse on/off (off by default)
+  - handle with :bind-key?!
+  - section 
+    - left click - fold/unfold
+  - host
+    - left click - details
+    - any click outside of overlay - close overlay
+  - overlay windows
+    - scroll up/down
+    - shift or ctrl(?) scroll - left-right
+  - left click on help witch describe hotkeys or status should call this hotkey
+     - for example:
+       - click on "[SPACE to set "seen" mark]" shoud set seen mark
+       - click on "| Pause |" should invoke "pause"
+         - may be make refactor and make main menu look like:
+           - instead of
+               DNS:off | stats:down,last,avg,stdev | order:none | History:success | Sync:off | Pause | help:? | Clear log | quit
+           - like
+               [DNS:off] [stats:down,last,avg,stdev] [order:none] [History:success] [Sync:off] [Pause] [help:?] [Clear log] [quit]
+
+
+- need a discuss plan about refactoring generating help from keybinding list.
+   - what approach to use
+   - how complex it can be?
+
+- need a plan for a ping-bulk script:
+    - there is vehicles which can be potentialy detected via 'ping -b'
+        - there is formula how to convert collected addresses from broadcast to serial number of vehicle
+           - TDB
+        - shell part of script:
+            - call 'ping -b'
+            - collect IP
+            - determinate serial number
+            - run ping-bulk with some :let variables set
+
+- need to plan for a new feature:
+    - form of :source which can run some command, which run in backround and collect IPs
+        - :source! or :source|
+        - for example "ping -b"
+        - if new IP arrive, it displayed by ping-bulk
+            - possible to delete interactively hosts without ping
+            - exaration time for such host. set by variable
+        - later can be expanded which different "neighbour discovery" tools
+            - what neighbour discovery tools exist?
+        
+
+
+- tabs??
+  - vscode and vim hotkeys switch between tabs
+  - :tab ??
+
+- in select host mode, if title selected and pressing Enter, going to mode "showin only host on section"
+  - in this mode it filter out all other host, including event messages
+  - mode is marken, that you can press Esc to quit from it
+  - rename :title to to :section?
+
+
+- new feature, inderactive host list editing
+  - del should remove title or host
+  - shift-up/down should move host (not title)
+  - if layout changes, on quit (by q or ctrl-c) ask if user want to store changed layout as script
+
+
+- refactoring:
+    - move terminal keys esc sequences like 
+       _CTRL_LEFT_SEQS = (b"\x1b[1;5D", b"\x1b[5D", b"\x1bOd")
+       _CTRL_RIGHT_SEQS = (b"\x1b[1;5C", b"\x1b[5C", b"\x1bOc")
+       in one place, that it easy to add new keys
+
+
+- create command :http for monitoring http/https services
+    - GET requests? how to properly "ping" http?
+
+- [x] DONE :layout all|ping|log
+  - 'l'       -> :layout --toggle log  (full-screen log, press again to return
+                 to the layout you came from — ping, not blindly all)
+  - 'Ctrl-L'  -> :layout              (cycle all -> ping -> log)
+  - --layout MODE at startup; persisted by :save-config; status bar shows
+    layout:<mode> while it is not 'all'
+  - Events header labels the key [l full] / [l back] to match what the next
+    press does
+  - ":layout custom" / ":layout filter" NOT done — underspecified, and the
+    filtered-host-list part is already covered by :filter (now regex).
+  - Known gap: in 'all' with a host list long enough to squeeze the log to
+    zero rows there is no Events header, so the [l full] hint is not visible
+    in exactly the case the feature rescues. Reachable via ? (Bindings tab).
+    Fix if it bites: add hint='[l]og' to the binding for a bottom-bar label.
+
+- create command :save
+  - ":saveconfig" should rename by ":save-config"
+    - for "save config with all :set, :let and :bind-key. (?)
+  - ":save [filename]" should ask for a filename, if not given and store list of titles, hosts and settings in #! file
+
+    - if file exist, ask if you want it override
+
+
+
+run test in parallel fail
+#parallel -j2 pytest -n auto -v ::: tests/ tests
+
+
+- i need a plan for refactoring
+    - need to propose plan focused on:
+        - performance
+            - as long as ping-bulk work, so it work slower
+            - invistigage and predict how much memory ping-buld need in timeline
+            - what code can be CPU consuming and how to imrove it
+            - eximation of complexity of fixes
+        - code reusage
+            - find pattern
+            - inroduute new subsystem
+            - nerrow down exaptions
+        - dead code, back compat which can be removed
+        - covering tests
+        - security in kiosk mode
+            - prevent user to access to local files
+            - running programs which not in protected config
+            - getting shell in remote ssh shells
+            - checking dangerous settings of tmux?
+
+
+same as
+rm -rf ~/.local/share/nvim/avante/
+rm -rf ~/.cache/nvim/avante/
+:AvanteClear cache
+
+
+    sh1-ps31 → ps-jetson       2h16m ........................................................................................                                                                                                                 →
+    sh1-cam41                  2h15m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh1-cam42                  2h15m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+  ── [-] sensor-hub-2          7↓/1-                                                                                                                                                                                                           
+    sh2-streamcaster           2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh2-router                 2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh2-comm-mod               2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh2-jetson                 2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh2-ps31                   2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX┌───────────────────────────────────────────────────────────────────┐XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh2-ps31 → ps-jetson           -                                                 │  Host: sh1-ps31 → ps-jetson                                       │                                                                                    →
+    sh2-cam41                  2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│  Cmd:  ssh -o BatchMode=yes dev@10.123.1.31 ping -O -D 10.87.0.1  │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh2-cam42                  2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│───────────────────────────────────────────────────────────────────│XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+  ── [-] sensor-hub-3       1↑/6↓/1-                                                 │  Status: UP                                                       │                                                                                     
+    sh3-streamcaster              ??                                                 │  Uptime: 2h 16m                                                   │                                                                                    →
+    sh3-router                  2h8m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│                                                                   │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh3-comm-mod                2h8m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│  Last RTT: 0.39 ms                                                │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh3-jetson                  2h8m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│                                                                   │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh3-ps31                    2h9m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│  Packet Statistics:                                               │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh3-ps31 → ps-jetson       2h16m ................................................│    Total sent (TX): 88                                            │................................                                                    →
+    sh3-cam41                  2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│    Received (RX):   88                                            │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh3-cam42                  2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│    Lost (XX):       0                                             │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+  ── [-] sensor-hub-4          7↓/1-                                                 │    Loss rate:       0.00%                                         │                                                                                     
+    sh4-streamcaster           2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│                                                                   │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh4-router                 2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│  Latency Statistics:                                              │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh4-comm-mod               2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│    Min:     0.13 ms                                               │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh4-jetson                 2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│    Max:     0.41 ms                                               │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh4-ps31                   2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│    Average: 0.25 ms                                               │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh4-ps31 → ps-jetson           -                                                 │    StdDev:  0.10 ms                                               │                                                                                    →
+    sh4-cam41                  2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│                                                                   │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+    sh4-cam42                  2h16m XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX│  Recent Events:                                                   │XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX                                                    →
+                                                                                     │    2026-04-07T19:06:52+0200   sh1-ps31 → ps-jetson host starts up │                                                                                     
+Events [SPACE to set "seen" mark] [PgUp to scroll]                                   │                                                                   │                                                                                     
+2026-04-07T19:11:59+0200   sh1-ps31             host recover. Down time: 216 sec (3 m│  [Enter / q / Esc] Close  [↑ / ↓ / PgUp / PgDn] Scroll            │                                                                                     
+2026-04-07T19:11:59+0200   sh3-router           host recover. Down time: 217 sec (3 m└───────────────────────────────────────────────────────────────────┘
+
+
+################################################################################
+# 2026-08-15 — event log / help overlay review
+# Analysed and root-caused; commits landed for the first two only.
+################################################################################
+
+## DONE (committed 2026-08-15 / 08-16)
+- [x] [SPACE] seen marker never rendered — mark_seen() appended to self.events
+      but not to the _filtered_events cache that draw_events reads. (ea92d45)
+- [x] z[ / z] were documented but unbound — _handle_z_sequence had no callers.
+      (b2162e5)
+- [x] :save / [W] to write event log to a file — save_to_file() and its prompt
+      existed but were unreachable. (a70ffa0)
+- [x] :fold close-other [regex] / zx. (1fd0f55)
+- [x] item 1 — :save is a snapshot; streaming is opt-in via --follow or the
+      final [w]rite-once / [f]ollow prompt step. (e3da1dd)
+- [x] item 2 — :saveconfig renamed to :save-config, no alias. (e9e9daf)
+- [x] item 3 — Events header keeps its key hints; log path collapses $HOME to ~
+      then elides from the left. (9d43a86)
+- [x] item 4 — :help takes a tab (number 1-6, name, prefix, next/prev);
+      :help-tab dropped; ? opens Bindings; :man alias; toggles return to the
+      origin tab. (e7f6265)
+- [x] item 5 — overlay nav keys are rebindable: the trie is consulted before
+      the shared nav handler. Arrows-switch-tabs idea dropped as requested.
+      (798dc99)
+- [x] item 7 — markup-aware slicing; the tab header and colour-annotated
+      legend lines are no longer over-cut. (2951235)
+- [x] CLAUDE.md corrected: the 'A toggles all-bindings' and '_mode_bindings'
+      claims were both stale.
+
+## STILL OPEN from this review
+- Pinned overlay rows ignore h_scroll, and max_line_w excludes them, so a
+  header wider than the box cannot be scrolled into view. It now degrades at
+  token boundaries instead of mid-label, which was the reported symptom, but
+  the underlying asymmetry remains.
+- _build_tab_lines() re-shifts _settings_line_map by _HELP_PINNED on every
+  call and is called at least twice per interaction; idempotent only because
+  _build_settings_lines rebuilds from scratch. Still fragile.
+- The settings-cursor highlight row draws with addstr and len(), so a settings
+  line containing markup would highlight the wrong span. Not hit today.
+
+## SUPERSEDED (kept for context)
+
+### original notes
+## DONE (committed 2026-08-15)
+- [x] [SPACE] seen marker never rendered — mark_seen() appended to self.events
+      but not to the _filtered_events cache that draw_events reads. (ea92d45)
+- [x] z[ / z] were documented but unbound — _handle_z_sequence had no callers.
+      (b2162e5)
+- [x] :save / [W] to write event log to a file — save_to_file() and its prompt
+      existed but were unreachable. (a70ffa0)
+- [x] :fold close-other [regex] / zx. (1fd0f55)
+
+## 1. :save vs :log filename correlation  — DESIGN, needs decision
+Right now `:save <file>` writes the buffer AND sets log_file, so future events
+silently start streaming there. That side effect is the surprise to remove.
+
+Options:
+  a) keep coupling (current) — "save" means "keep the log here" from now on
+  b) decouple — :save is a snapshot only, :log is the only way to stream
+  c) prompt "also stream future events here?" — but the truncate/append prompt
+     already asks one question; a second is too much
+  d) flag — :save <file> = snapshot only (safe default),
+            :save --follow <file> = snapshot + start streaming
+
+RECOMMEND (d). Matches the project flag policy (long flags canonical, --word
+booleans), keeps the default non-surprising, stays discoverable. The Events
+header already shows "→ /path" only while streaming, so the two states are
+visually distinct without extra UI.
+
+## 2. :save log | :save config ?  — DESIGN, needs decision
+`:saveconfig` already exists for settings.
+
+Options:
+  a) keep two commands (status quo)
+  b) :save log [file] / :save config [file], :saveconfig as alias
+  c) :save = log only, keep :saveconfig separate
+
+RECOMMEND (c) — do NOT add a subcommand. The two differ in frequency and in
+destination (config has a fixed path, the log does not), and (b) would force
+`W` to mean `:save log`. But the naming is a wart: per the kebab-case policy
+`:saveconfig` should be `:save-config` with `saveconfig` kept as an alias.
+
+## 3. Show active log file in the Events header, compact
+Already shown — draw_events does `header_suffix += f" → {self.log_file}"` — but
+the full path is printed and the whole suffix is hard-truncated when it does not
+fit, so on a narrow terminal the [W|rite]/[C|lear] hints get cut instead.
+TODO: shorten the path when the header would overflow — ~/ for $HOME, then
+elide the middle (…/parent/name.log), keeping the key hints always visible.
+Hints must win over the path.
+
+## 4. `?` should open the help overlay on the Bindings tab
+_cmd_help() accepts args but ignores them: it always sets help_tab = 0 and
+resets every per-tab scroll offset. So `:help 4` opens Interactive.
+TODO:
+  - make :help [tab] honour its argument (index 0-5 or name, e.g. `:help
+    bindings`) and only reset scroll for the tab being opened
+  - then point `?` at the chosen tab
+  - DECIDE which tab is actually wanted: tab 4 "Bindings" is the generated
+    dump of every trie binding; tab 0 "Interactive" is the curated hotkey list
+    plus user bindings. "Bindings" was asked for, but tab 0 may be the better
+    landing page — worth a look at both before switching the default.
+  - :help-toggle-all and :help-toggle-settings have NO key bound to either;
+    also their "leave" path is `prev` (index-1), so exiting Settings lands on
+    Bindings rather than the tab you came from. Fix or drop them.
+
+## 5. Left/Right arrows in the help overlay
+Today: Left/Right = horizontal scroll by 4 columns. So do `h`/`l` — the arrows
+and the vim keys are duplicates.
+Horizontal scroll cannot simply be removed: content is wider than the box
+(Settings tab 186 cols, Interactive/Commands 117).
+RECOMMEND: arrows switch tabs, `h`/`l` keep horizontal scroll. Nothing is lost
+because the two are redundant today, and it is vim-consistent.
+CAVEAT: the help-mode Left/Right trie entries are dead code — the main loop
+calls _dispatch_overlay_nav_key() BEFORE the trie and that function consumes
+Up/Down/k/j/PgUp/PgDn/Left/h/Right/l itself. A user
+`:bind-key --mode help <Left> …` therefore never fires. Fix the shadowing or
+make the change inside _dispatch_overlay_nav_key.
+
+## 7. Help overlay: truncated tab header — ROOT CAUSED, needs fix + tests
+Symptom: the tab bar ends in "[Tab]/[S-" — the nav hint and the last tab
+labels are cut off.
+
+Cause: the overlay MEASURES with _hint_text_width() (which strips ":colorname"
+markup, returning display columns) but SLICES with plain Python string
+indexing (raw characters).
+The active tab is marked "[N:tabactive Name]"; ":tabactive" costs 10 raw
+characters and 0 display columns. So the header is raw 113 / rendered 103, and
+_draw_overlay_box does `line[:inner_w]` with inner_w derived from rendered
+widths — dropping exactly 10 raw chars whenever inner_w == 103.
+
+Measured per tab (raw 113 / rendered 103 for all):
+    tab0 Interactive  ideal_w=117  body=117  -> header intact
+    tab1 Hosts file   ideal_w=103  body=101  -> CUT by 10  <-- reported
+    tab2 Example      ideal_w=113  body=113  -> header intact
+    tab3 Commands     ideal_w=117  body=117  -> header intact
+    tab4 Bindings     ideal_w=103  body= 53  -> CUT by 10
+    tab5 Settings     ideal_w=186  body=186  -> header intact
+i.e. it breaks exactly on the two tabs where the header is the widest line,
+which is why the bug looks tab-dependent. On a terminal narrower than the box
+it is cut further.
+
+Two aggravating factors — the header cannot be scrolled back into view:
+  - max_line_w (used for max_h_scroll) is computed over lines[pinned_count:],
+    EXCLUDING the pinned header, while ideal_w INCLUDES it. The header can set
+    the box width but never contributes to the scroll range.
+  - the pinned-row draw path ignores h_scroll entirely and always slices from
+    index 0.
+
+SECOND SITE, same root cause: the scrollable-row path does
+`sliced = line[h_scroll:h_scroll + inner_w]` and then appends "…" based on
+raw len(). _HELP_LEGEND contains colour annotations — "[.:green = reply]" is
+raw 17 / rendered 11, "[?:brightred = process error]" likewise — so those
+lines are over-truncated and get a spurious ellipsis.
+
+FIX: introduce markup-aware slicing (a _hint_text_slice(line, start, width)
+that walks the string skipping ":colorname" runs) and use it everywhere a
+line is cut; include pinned lines in max_line_w, or exempt the header from
+setting the box width.
+
+TESTS to add (item 7 explicitly asks for coverage):
+  - _hint_text_width(header) vs len(header) differ by exactly the markup length
+  - for every tab: the rendered header ends with "↔ tab", i.e. nothing is lost
+  - a legend line containing ":green" is not truncated and gains no "…"
+  - narrow-terminal case: header degrades gracefully and key hints survive
+  - round-trip: slice(line, 0, _hint_text_width(line)) == full rendered line
+
+## Also found while reviewing (not requested)
+- CLAUDE.md is stale: it says "`A` in help overlay toggles a generated
+  all-bindings view". That predates the tabbed refactor. `A` is unbound in
+  help mode and does nothing (mode lookup has no fallback to normal mode, so
+  it does not reach :autofold either). The view is now tab 5 / `:bind-key
+  --show`.
+- _build_tab_lines() re-shifts _settings_line_map keys by _HELP_PINNED on
+  every call, and is called at least twice per interaction (draw +
+  _update_help_search). It is idempotent today only because
+  _build_settings_lines rebuilds the map from scratch each time — fragile.
