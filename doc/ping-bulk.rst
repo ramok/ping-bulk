@@ -252,12 +252,14 @@ Display
     Toggle pause (freeze the display without stopping pings).
 
 ``l``
-    Cycle the screen layout: ``all`` → ``ping`` → ``log`` → ``all``.
-    See ``:layout`` under **COMMANDS**.
-
-``L``
     Show the event log full screen; press again to return to the previous
     layout.  A there-and-back peek at the log, rather than cycling around.
+    The Events header labels this key ``[l full]`` or ``[l back]`` to match
+    what the next press will do.
+
+``Ctrl-L``
+    Cycle the screen layout: ``all`` → ``ping`` → ``log`` → ``all``.
+    See ``:layout`` under **COMMANDS**.
 
 ``W``
     Open the *write event log to file* prompt, pre-filled with the active
@@ -342,8 +344,8 @@ Event log
     Clear the event log (with confirmation prompt).
 
 ``:layout [--toggle] [all|ping|log]``
-    Choose how the host list and the event log share the window (same as
-    ``l``).  With no argument, cycle to the next mode.
+    Choose how the host list and the event log share the window.  With no
+    argument, cycle to the next mode (same as ``Ctrl-L``).
 
     +------------+--------------------------------------------------------+
     | Mode       | Effect                                                 |
@@ -362,7 +364,7 @@ Event log
 
     With ``--toggle``, switch to *mode* (default ``log``) or, when already
     there, back to the layout in use before the jump — so one key is a
-    there-and-back peek rather than a cycle to walk around.  ``L`` is bound to
+    there-and-back peek rather than a cycle to walk around.  ``l`` is bound to
     ``:layout --toggle log``.  Coming back from ``log`` returns to ``ping`` if
     that is where you were, not blindly to ``all``.
 

@@ -718,8 +718,8 @@ _HELP_HOTKEYS = [
     "  [G]                   (:select last)                     jump to last host",
     "  [Enter]               (:details)                         show detailed stats for highlighted host",
     "  [Space]               (:seen)                            insert 'seen' marker (or :fold toggle on section)",
-    "  [l]                   (:layout)                          cycle layout: all / ping only / log only",
-    "  [L]                   (:layout --toggle log)             full-screen event log, press again to go back",
+    "  [l]                   (:layout --toggle log)             full-screen event log, press again to go back",
+    "  [Ctrl+L]              (:layout)                          cycle layout: all / ping only / log only",
     "  [W]                   (:save)                            write event log to a file",
     "  [C]                   (:clear)                           clear event log",
     "  [Esc]                 (:select none)                     clear host selection + return to live history",
@@ -806,8 +806,8 @@ _HELP_CMDS_INTERACTIVE = [
     "  :pause \\[on|off]            toggle/set global pause (stop all pings)",
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
-    "  :layout \\[all|ping|log]   screen layout; no arg cycles  (l)",
-    "  :layout --toggle \\[mode]  jump to mode (default log) and back again  (L)",
+    "  :layout --toggle \\[mode]  jump to mode (default log) and back again  (l)",
+    "  :layout \\[all|ping|log]   screen layout; no arg cycles  (Ctrl+L)",
     "  :save \\[--follow] \\[file]   write event log to a file; --follow also streams there (W)",
     "  :log \\[file|off]           show/set the streaming log file (future events), or disable logging",
     "  :fold-all                 fold (collapse) all sections",
@@ -5596,8 +5596,8 @@ class Application:
         _b('A', ':autofold', desc='toggle autofold on/off')
         _b('C', ':clear --confirm', desc='clear event log')
         _b('W', ':save', desc='write event log to a file')
-        _b('l', ':layout', desc='cycle layout: all / ping only / log only')
-        _b('L', ':layout --toggle log', desc='full-screen event log, and back')
+        _b('l', ':layout --toggle log', desc='full-screen event log, and back')
+        _b('<C-l>', ':layout', desc='cycle layout: all / ping only / log only')
         _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'),
            desc='open SSH connection to selected host')
         _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
@@ -7565,6 +7565,9 @@ class Application:
 
         # Key hints are appended before the log path and always win the space:
         # the path is informational, the hints are how you drive the log.
+        # The [l] label tracks the layout, because the same key means
+        # "make this full screen" and "give me the hosts back".
+        header_suffix += " [l back]" if self.layout == 'log' else " [l full]"
         header_suffix += " [W|rite] [C|lear]"
         if self.log_file:
             used = len(header_title) + self._hint_text_width(header_suffix)

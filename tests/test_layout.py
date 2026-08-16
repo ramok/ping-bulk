@@ -65,11 +65,11 @@ class TestLayoutCommand:
         app._cmd_layout('ping')
         assert app.highlighted_index == 0
 
-    def test_l_key_is_bound_to_layout(self, pb, tmp_path):
+    def test_ctrl_l_is_bound_to_cycle(self, pb, tmp_path):
         app, _ = _app(pb, tmp_path)
-        binding, _ = app._key_trie.resolve(pb._parse_key_notation('l'), set())
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('<C-l>'), set())
         assert binding is not None
-        assert ':layout' in binding.commands
+        assert binding.commands == [':layout']
 
     def test_command_is_registered_and_completable(self, pb):
         assert 'layout' in pb._CMD_MAP
@@ -140,16 +140,18 @@ class TestLayoutToggle:
         app._cmd_layout('--toggle log')
         assert app.highlighted_index is None
 
-    def test_capital_l_is_bound_to_toggle(self, pb, tmp_path):
+    def test_l_is_bound_to_toggle(self, pb, tmp_path):
+        """The plain key is the common action: peek at the log and back."""
         app, _ = _app(pb, tmp_path)
-        binding, _ = app._key_trie.resolve(pb._parse_key_notation('L'), set())
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('l'), set())
         assert binding is not None
         assert binding.commands == [':layout --toggle log']
 
-    def test_lowercase_l_still_cycles(self, pb, tmp_path):
+    def test_capital_l_is_not_bound(self, pb, tmp_path):
+        """L was the toggle before the swap; it must not linger."""
         app, _ = _app(pb, tmp_path)
-        binding, _ = app._key_trie.resolve(pb._parse_key_notation('l'), set())
-        assert binding.commands == [':layout']
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('L'), set())
+        assert binding is None
 
 
 class TestLayoutPersistence:
@@ -212,14 +214,36 @@ class TestLayoutRendering:
         finally:
             sess.kill()
 
-    def test_l_key_cycles_to_log(self, app_path, check_integration_deps, tmp_path):
+    def test_l_key_toggles_log_and_back(self, app_path, check_integration_deps, tmp_path):
         sess = self._session(app_path, tmp_path, 'lay-key')
         try:
-            sess.send_keys('l')          # -> ping
-            sess.wait_for('layout:ping')
             sess.send_keys('l')          # -> log
             sess.wait_for('layout:log')
             sess.wait_for('Events')
+            sess.send_keys('l')          # -> back to all
+            sess.wait_for_absence('layout:')
+        finally:
+            sess.kill()
+
+    def test_ctrl_l_cycles(self, app_path, check_integration_deps, tmp_path):
+        sess = self._session(app_path, tmp_path, 'lay-cycle')
+        try:
+            sess.send_keys('C-l')        # -> ping
+            sess.wait_for('layout:ping')
+            sess.send_keys('C-l')        # -> log
+            sess.wait_for('layout:log')
+            sess.send_keys('C-l')        # -> all
+            sess.wait_for_absence('layout:')
+        finally:
+            sess.kill()
+
+    def test_events_header_shows_the_layout_hint(self, app_path, check_integration_deps, tmp_path):
+        """The [l] label must say what the key will do from here."""
+        sess = self._session(app_path, tmp_path, 'lay-hint')
+        try:
+            sess.send_keys('l')          # -> log, header visible
+            sess.wait_for('Events')
+            assert 'l back' in sess.capture_pane(), "log layout should offer 'back'"
             sess.send_keys('l')          # -> all
             sess.wait_for_absence('layout:')
         finally:
