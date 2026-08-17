@@ -8063,9 +8063,14 @@ class Application:
         self._draw_completion_popup(stdscr, height, width,
                                    c.get('completions', []), c.get('comp_idx', -1))
         text = ''.join(c['chars'])
-        line = (':' + text).ljust(width - 1)[:width - 1]
+        # Scroll so the cursor stays on screen — otherwise a long path is cut at
+        # the right edge and Tab-cycling changes only off-screen characters,
+        # which looks like completion doing nothing.  The ':' costs one column.
+        visible, cur_off = self._scroll_text_window(text, c['cursor'],
+                                                    max(0, width - 2))
+        line = (':' + visible).ljust(width - 1)[:width - 1]
         stdscr.addstr(height - 1, 0, line, curses.A_REVERSE)
-        cursor_x = min(1 + c['cursor'], width - 2)
+        cursor_x = min(1 + cur_off, width - 2)
         stdscr.move(height - 1, cursor_x)
 
     def _handle_cmd_key(self, key):

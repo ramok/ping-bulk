@@ -754,3 +754,62 @@ class TestTabHandling:
             f"Expected 'set stats zzz' unchanged, got {text!r}"
         )
 
+
+
+# ===========================================================================
+# Long-argument scrolling in the command line
+# ===========================================================================
+
+class TestCommandLineScrolling:
+    """A long argument must scroll into view, not be clipped at the edge.
+
+    The line used to be cut at the right edge, so Tab-cycling a long path
+    changed only off-screen characters and completion looked inert.
+    """
+
+    def _session(self, app_path, tmp_path, name, width=60):
+        from tmux_helper import TmuxSession
+        hosts = tmp_path / 'h.hosts'
+        hosts.write_text('127.0.0.1\n')
+        sess = TmuxSession(f'ping-bulk-test-{name}', width=width, height=16)
+        sess.send_literal(f'python3 {app_path} -f {hosts}')
+        sess.send_keys('Enter')
+        sess.wait_for('DNS:', timeout=10)
+        return sess
+
+    def _logdir(self, tmp_path):
+        d = tmp_path / 'deeply' / 'nested' / 'logs'
+        d.mkdir(parents=True)
+        (d / 'alpha.log').write_text('')
+        (d / 'alpha2.log').write_text('')
+        return d
+
+    def test_completed_tail_is_visible(self, app_path, check_integration_deps, tmp_path):
+        d = self._logdir(tmp_path)
+        sess = self._session(app_path, tmp_path, 'cmdscroll')
+        try:
+            sess.send_keys(':')
+            sess.send_literal(f'save {d}/a')
+            sess.send_keys('Tab')
+            # The completed text lives past the right edge of a 60-col window,
+            # so it is only readable if the line scrolls.
+            sess.wait_for('alpha')
+            content = sess.capture_pane()
+            assert '…' in content, "a scrolled line should mark the hidden head"
+        finally:
+            sess.kill()
+
+    def test_home_scrolls_back_to_the_start(self, app_path, check_integration_deps, tmp_path):
+        d = self._logdir(tmp_path)
+        sess = self._session(app_path, tmp_path, 'cmdhome')
+        try:
+            sess.send_keys(':')
+            sess.send_literal(f'save {d}/alpha.log')
+            sess.wait_for('alpha.log')
+            sess.send_keys('C-a')          # cursor to start
+            sess.wait_for(':save')          # the head is on screen again
+            line = next(l for l in sess.capture_pane().splitlines()
+                        if l.startswith(':save'))
+            assert not line.startswith(':…'), "head should not be marked as hidden"
+        finally:
+            sess.kill()
