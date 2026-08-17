@@ -560,3 +560,133 @@ class TestSaveFollowFlow:
         app._handle_prompt_key(ord('w'))
         body = target.read_text()
         assert 'previous' not in body and 'fresh' in body
+
+
+# ===========================================================================
+# Save prompt: path completion and directory rejection
+# ===========================================================================
+
+TAB  = ord('\t')
+
+
+class TestSavePromptCompletion:
+    """The filename prompt completes paths, like the ':' command line does."""
+
+    def _open(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._open_prompt_save()
+        app.prompt['chars'] = []
+        return app
+
+    def test_unique_match_is_applied(self, pb, tmp_path):
+        (tmp_path / 'only.log').write_text('')
+        app = self._open(pb, tmp_path)
+        app.prompt['chars'] = list(str(tmp_path / 'on'))
+        app._handle_prompt_key(TAB)
+        assert ''.join(app.prompt['chars']) == str(tmp_path / 'only.log')
+        assert app.prompt['completions'] == [], "unique match needs no popup"
+
+    def test_multiple_matches_fill_common_prefix(self, pb, tmp_path):
+        (tmp_path / 'alpha.log').write_text('')
+        (tmp_path / 'alpha2.log').write_text('')
+        app = self._open(pb, tmp_path)
+        app.prompt['chars'] = list(str(tmp_path / 'a'))
+        app._handle_prompt_key(TAB)
+        assert ''.join(app.prompt['chars']) == str(tmp_path / 'alpha')
+        assert len(app.prompt['completions']) == 2, "popup should stay open"
+
+    def test_further_tabs_cycle_forward(self, pb, tmp_path):
+        (tmp_path / 'alpha.log').write_text('')
+        (tmp_path / 'alpha2.log').write_text('')
+        app = self._open(pb, tmp_path)
+        app.prompt['chars'] = list(str(tmp_path / 'a'))
+        app._handle_prompt_key(TAB)          # LCP
+        app._handle_prompt_key(TAB)          # first candidate
+        first = ''.join(app.prompt['chars'])
+        app._handle_prompt_key(TAB)          # second candidate
+        second = ''.join(app.prompt['chars'])
+        assert first != second
+        assert {first, second} == {str(tmp_path / 'alpha.log'),
+                                   str(tmp_path / 'alpha2.log')}
+
+    def test_shift_tab_cycles_backward(self, pb, tmp_path):
+        (tmp_path / 'alpha.log').write_text('')
+        (tmp_path / 'alpha2.log').write_text('')
+        app = self._open(pb, tmp_path)
+        app.prompt['chars'] = list(str(tmp_path / 'a'))
+        app._handle_prompt_key(TAB)
+        app._handle_prompt_key(TAB)
+        forward = ''.join(app.prompt['chars'])
+        app._handle_prompt_key(TAB)
+        app._handle_prompt_key(pb.curses.KEY_BTAB)
+        assert ''.join(app.prompt['chars']) == forward
+
+    def test_directory_candidate_keeps_trailing_slash(self, pb, tmp_path):
+        """So the next Tab can descend into it."""
+        (tmp_path / 'sub').mkdir()
+        app = self._open(pb, tmp_path)
+        app.prompt['chars'] = list(str(tmp_path / 'su'))
+        app._handle_prompt_key(TAB)
+        assert ''.join(app.prompt['chars']).endswith('/')
+
+    def test_typing_invalidates_stale_candidates(self, pb, tmp_path):
+        (tmp_path / 'alpha.log').write_text('')
+        (tmp_path / 'alpha2.log').write_text('')
+        app = self._open(pb, tmp_path)
+        app.prompt['chars'] = list(str(tmp_path / 'a'))
+        app._handle_prompt_key(TAB)
+        assert app.prompt['completions']
+        app._handle_prompt_key(ord('x'))
+        assert app.prompt['completions'] == []
+
+    def test_backspace_invalidates_stale_candidates(self, pb, tmp_path):
+        (tmp_path / 'alpha.log').write_text('')
+        (tmp_path / 'alpha2.log').write_text('')
+        app = self._open(pb, tmp_path)
+        app.prompt['chars'] = list(str(tmp_path / 'a'))
+        app._handle_prompt_key(TAB)
+        assert app.prompt['completions']
+        app._handle_prompt_key(127)
+        assert app.prompt['completions'] == []
+
+    def test_no_match_leaves_buffer_alone(self, pb, tmp_path):
+        app = self._open(pb, tmp_path)
+        typed = str(tmp_path / 'nothing-here')
+        app.prompt['chars'] = list(typed)
+        app._handle_prompt_key(TAB)
+        assert ''.join(app.prompt['chars']) == typed
+
+
+class TestSavePromptDirectoryRejected:
+    """A directory exists but is not writable as a log file."""
+
+    def test_directory_does_not_advance_to_truncate_prompt(self, pb, tmp_path):
+        """os.path.exists() is true for a dir, so it used to ask truncate/append."""
+        app, _ = _make_app(pb, tmp_path)
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(tmp_path))
+        app._handle_prompt_key(ENTER)
+        assert app.prompt is not None, "prompt should stay open"
+        assert app.prompt['type'] == 'save', "must not become save_confirm"
+
+    def test_directory_reports_a_clear_error(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._open_prompt_save()
+        app.prompt['chars'] = list(str(tmp_path))
+        app._handle_prompt_key(ENTER)
+        assert any('is a directory' in e.text for e in app.events)
+
+    def test_dot_is_rejected(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._open_prompt_save()
+        app.prompt['chars'] = ['.']
+        app._handle_prompt_key(ENTER)
+        assert app.prompt['type'] == 'save'
+        assert any('is a directory' in e.text for e in app.events)
+
+    def test_directory_arg_to_command_is_rejected(self, pb, tmp_path):
+        """':save <dir>' must not attempt the write either."""
+        app, _ = _make_app(pb, tmp_path)
+        app._open_prompt_save(str(tmp_path))
+        assert any('is a directory' in e.text for e in app.events)
+        assert app.log_file is None

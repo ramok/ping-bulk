@@ -387,7 +387,15 @@ Event log
     2. Only if the file exists: ``[t]runcate`` or ``[a]ppend``.
     3. ``[w]rite once`` or ``[f]ollow`` — the snapshot/stream choice above.
 
-    ``Esc`` at any step cancels without writing.  The saved file always
+    ``Esc`` at any step cancels without writing.
+
+    ``Tab`` completes file and directory names at step 1.  A single match is
+    filled in; several fill in the longest common prefix and open a list that
+    further ``Tab`` presses cycle through (``Shift-Tab`` cycles backwards).
+    Directories keep a trailing ``/`` so the next ``Tab`` descends into them.
+
+    Naming a directory is refused with an error rather than treated as an
+    existing file, and the prompt stays open so the name can be finished.  The saved file always
     contains **all** log levels regardless of the current ``log-level``
     setting, so it stays greppable.
 

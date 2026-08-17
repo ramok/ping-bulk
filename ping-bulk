@@ -809,6 +809,7 @@ _HELP_CMDS_INTERACTIVE = [
     "  :layout --toggle \\[mode]  jump to mode (default log) and back again  (l)",
     "  :layout \\[all|ping|log]   screen layout; no arg cycles  (Ctrl+L)",
     "  :save \\[--follow] \\[file]   write event log to a file; --follow also streams there (W)",
+    "                            the 'Write log to:' prompt completes paths with \\[Tab]",
     "  :log \\[file|off]           show/set the streaming log file (future events), or disable logging",
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
@@ -7614,13 +7615,24 @@ class Application:
         self.prompt = {
             'type': 'save',
             'chars': list(self.log_file) if self.log_file else [],
+            'cursor': len(self.log_file) if self.log_file else 0,
+            'completions': [], 'comp_idx': -1, 'comp_prefix': '',
         }
 
     def _save_log_to(self, filename, append=False, follow=False):
-        """Write the log to *filename*; when *follow*, also stream there from now on."""
+        """Write the log to *filename*; when *follow*, also stream there from now on.
+
+        Returns False without writing when *filename* is a directory — it
+        exists, so an exists() check alone would wave it through.
+        """
+        if os.path.isdir(filename):
+            self.add_event("save",
+                f"error: '{filename}' is a directory — give a file name")
+            return False
         self.save_to_file(filename, append=append, write_separator=append)
         if follow:
             self.log_file = filename
+        return True
 
     def _open_prompt_clear(self, args=''):
         """Open the clear-log confirmation prompt (non-blocking)."""
@@ -7634,6 +7646,8 @@ class Application:
         """
         p = self.prompt
         if p['type'] == 'save':
+            self._draw_completion_popup(stdscr, height, width,
+                                       p.get('completions', []), p.get('comp_idx', -1))
             label = "Write log to: "
             text  = ''.join(p['chars'])
             line  = (label + text).ljust(width - 1)[:width - 1]
@@ -7706,11 +7720,23 @@ class Application:
         p = self.prompt
 
         if p['type'] == 'save':
+            if key == ord('\t'):
+                self._prompt_complete(p)
+                return
+            if key == curses.KEY_BTAB:
+                self._prompt_complete(p, backward=True)
+                return
             if key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
                 filename = ''.join(p['chars']).strip()
                 if filename:
                     if self.kiosk_mode and not self._kiosk_allow_path(filename, 'save'):
                         self.prompt = None
+                    elif os.path.isdir(filename):
+                        # A directory exists but cannot be written to — keep the
+                        # prompt open so the name can be finished, rather than
+                        # asking truncate/append about something unwritable.
+                        self.add_event("save",
+                            f"error: '{filename}' is a directory — give a file name")
                     elif os.path.exists(filename):
                         # Advance to the truncate/append confirmation step
                         self.prompt = {'type': 'save_confirm', 'filename': filename, 'chars': []}
@@ -7725,8 +7751,12 @@ class Application:
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 if p['chars']:
                     p['chars'].pop()
+                p['completions'] = []   # buffer changed — candidates are stale
+                p['comp_idx'] = -1
             elif 32 <= key < 127:
                 p['chars'].append(chr(key))
+                p['completions'] = []
+                p['comp_idx'] = -1
 
         elif p['type'] == 'save_confirm':
             filename = p['filename']
@@ -7907,6 +7937,91 @@ class Application:
         except OSError as e:
             self.add_event("save", f"error: {e}")
 
+    def _draw_completion_popup(self, stdscr, height, width, completions, comp_idx):
+        """Draw a completion popup on the rows just above the bottom line.
+
+        Shared by the ``:`` command line and the path prompts.  Candidates that
+        happen to be command names are annotated with their help text; paths
+        get no annotation, so the same popup serves both.
+        """
+        if not completions:
+            return
+        # How many rows the popup can occupy (leave room for the input line itself)
+        max_popup_rows = min(len(completions), height - 2)
+        if max_popup_rows <= 0:
+            return
+        # Scroll the popup view so the highlighted entry is always visible.
+        if comp_idx < 0:
+            view_start = 0
+        else:
+            view_start = max(0, min(comp_idx, len(completions) - max_popup_rows))
+        visible = completions[view_start:view_start + max_popup_rows]
+
+        descs = [(_CMD_MAP[cand].help or '') if cand in _CMD_MAP else ''
+                 for cand in visible]
+        max_cand_w = max((len(cand) for cand in visible), default=0)
+        desc_width = width - 1 - (max_cand_w + 2)   # room left after a 2-space gap
+
+        for i, candidate in enumerate(visible):
+            row = height - 1 - max_popup_rows + i
+            if row < 0:
+                continue
+            actual_idx = view_start + i
+            attr = (curses.A_REVERSE | curses.A_BOLD) if actual_idx == comp_idx else curses.A_REVERSE
+            desc = descs[i]
+            if desc_width > 4 and desc:
+                cell = f"{candidate:<{max_cand_w}}  {desc}"
+            else:
+                cell = candidate
+            try:
+                stdscr.addstr(row, 0, cell.ljust(width - 1)[:width - 1], attr)
+            except curses.error:
+                pass
+
+    def _prompt_complete(self, p, backward=False):
+        """Tab-complete a filename prompt in place.
+
+        The whole buffer is the path — unlike the command line there is no
+        leading command to skip, and paths may contain spaces, so splitting on
+        whitespace would be wrong here.
+
+        First Tab computes candidates: a lone match is applied outright, several
+        fill in the longest common prefix and open the popup.  Further Tabs
+        cycle.  Directory candidates keep their trailing '/' so the next Tab
+        descends.
+        """
+        text = ''.join(p['chars'])
+
+        def _use(candidate):
+            p['chars'] = list(candidate)
+            p['cursor'] = len(candidate)
+
+        if not p.get('completions'):
+            if backward:
+                return
+            p['comp_prefix'] = text
+            p['completions'] = _complete_path_arg(text)
+            p['comp_idx'] = -1
+            if len(p['completions']) == 1:
+                _use(p['completions'][0])
+                p['completions'] = []       # unique — nothing to show
+                return
+            if len(p['completions']) > 1:
+                lcp = p['completions'][0]
+                for s in p['completions'][1:]:
+                    while not s.startswith(lcp):
+                        lcp = lcp[:-1]
+                        if not lcp:
+                            break
+                if len(lcp) > len(text):
+                    _use(lcp)               # extend, keep the popup open
+            return
+
+        # Popup already open — cycle through the candidates.
+        step = -1 if backward else 1
+        p['comp_idx'] = (p.get('comp_idx', -1) + step) % len(p['completions'])
+        _use(p['completions'][p['comp_idx']])
+
     def _draw_cmd(self, stdscr, height, width):
         """Draw the active command line on the bottom row with a text cursor.
 
@@ -7920,42 +8035,8 @@ class Application:
         is always in view.
         """
         c = self.cmd
-        completions = c.get('completions', [])
-        comp_idx = c.get('comp_idx', -1)
-
-        if completions:
-            # How many rows the popup can occupy (leave room for the cmd line itself)
-            max_popup_rows = min(len(completions), height - 2)
-            # Scroll the popup view so the highlighted entry is always visible.
-            if comp_idx < 0:
-                view_start = 0
-            else:
-                view_start = max(0, min(comp_idx, len(completions) - max_popup_rows))
-            visible = completions[view_start:view_start + max_popup_rows]
-
-            # Build descriptions for visible items (command names only).
-            descs = [(_CMD_MAP[cand].help or '') if cand in _CMD_MAP else ''
-                     for cand in visible]
-            max_cand_w = max((len(cand) for cand in visible), default=0)
-            desc_col = max_cand_w + 2          # two-space separator
-            desc_width = width - 1 - desc_col  # remaining room for description
-
-            for i, candidate in enumerate(visible):
-                row = height - 1 - max_popup_rows + i
-                if row < 0:
-                    continue
-                actual_idx = view_start + i
-                attr = (curses.A_REVERSE | curses.A_BOLD) if actual_idx == comp_idx else curses.A_REVERSE
-                desc = descs[i]
-                if desc_width > 4 and desc:
-                    cell = f"{candidate:<{max_cand_w}}  {desc}"
-                else:
-                    cell = candidate
-                try:
-                    stdscr.addstr(row, 0, cell.ljust(width - 1)[:width - 1], attr)
-                except curses.error:
-                    pass
-
+        self._draw_completion_popup(stdscr, height, width,
+                                   c.get('completions', []), c.get('comp_idx', -1))
         text = ''.join(c['chars'])
         line = (':' + text).ljust(width - 1)[:width - 1]
         stdscr.addstr(height - 1, 0, line, curses.A_REVERSE)
