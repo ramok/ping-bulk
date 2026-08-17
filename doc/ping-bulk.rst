@@ -394,6 +394,10 @@ Event log
     further ``Tab`` presses cycle through (``Shift-Tab`` cycles backwards).
     Directories keep a trailing ``/`` so the next ``Tab`` descends into them.
 
+    A path longer than the terminal is scrolled so its end stays visible — the
+    file name is the part worth reading — with a leading ``…`` marking the
+    hidden head.
+
     Naming a directory is refused with an error rather than treated as an
     existing file, and the prompt stays open so the name can be finished.  The saved file always
     contains **all** log levels regardless of the current ``log-level``

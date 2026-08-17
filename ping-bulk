@@ -6766,6 +6766,27 @@ class Application:
         tail = max_w - 2                      # room after '…/' … keep it simple
         return '…' + path[-tail:] if tail > 0 else '…'
 
+    @staticmethod
+    def _scroll_text_window(text, cursor, avail, ellipsis='…'):
+        """Return ``(visible, cursor_col)`` for a one-line input that overflows.
+
+        Scrolls the window so *cursor* stays on screen — for an append-only
+        prompt that means the tail of a long path stays readable instead of
+        being cut at the right edge.  When text is scrolled off to the left the
+        first column shows *ellipsis*, so it is visible that more exists.
+        *cursor_col* is the cursor offset within the returned slice.
+        """
+        if avail <= 0:
+            return '', 0
+        if len(text) <= avail:
+            return text, min(cursor, avail)
+        # Keep the cursor in view, but never scroll past the end of the text.
+        start = min(max(0, cursor - avail + 1), len(text) - avail)
+        visible = text[start:start + avail]
+        if start > 0 and ellipsis:
+            visible = ellipsis + visible[1:]
+        return visible, cursor - start
+
     def _draw_column_header(self, stdscr, row, col, title, suffix, width):
         """Draw a column header: *title* in white/bold then *suffix* via _draw_hint_text.
 
@@ -7650,9 +7671,13 @@ class Application:
                                        p.get('completions', []), p.get('comp_idx', -1))
             label = "Write log to: "
             text  = ''.join(p['chars'])
-            line  = (label + text).ljust(width - 1)[:width - 1]
+            # Editing here is append-only, so the cursor is always at the end —
+            # scrolling keeps the tail of a long path visible.
+            visible, cur_off = self._scroll_text_window(
+                text, len(text), max(0, width - 1 - len(label)))
+            line  = (label + visible).ljust(width - 1)[:width - 1]
             stdscr.addstr(height - 1, 0, line, curses.A_REVERSE)
-            cursor_x = min(len(label) + len(text), width - 2)
+            cursor_x = min(len(label) + cur_off, width - 2)
             stdscr.move(height - 1, cursor_x)
         elif p['type'] == 'save_confirm':
             line = "File exists: [t]runcate  [a]ppend  Esc=cancel"

@@ -250,3 +250,64 @@ class TestCompactPath:
 
     def test_tiny_budget_degrades_to_ellipsis(self, pb):
         assert self.C(pb, '/tmp/a.log', 2) == '……'
+
+
+class TestScrollTextWindow:
+    """A one-line input must scroll so the cursor end stays readable.
+
+    The save prompt truncated at the right edge instead, so a long path showed
+    its head and hid the file name — the part that identifies it.
+    """
+
+    def W2(self, pb, text, cursor, avail):
+        return pb.Application._scroll_text_window(text, cursor, avail)
+
+    def test_short_text_unchanged(self, pb):
+        assert self.W2(pb, 'abc', 3, 10) == ('abc', 3)
+
+    def test_exact_fit_unchanged(self, pb):
+        assert self.W2(pb, 'abcde', 5, 5) == ('abcde', 5)
+
+    def test_long_text_shows_the_tail(self, pb):
+        text = '/very/long/path/events.log'
+        visible, col = self.W2(pb, text, len(text), 15)
+        assert visible.endswith('events.log'), "the file name must be readable"
+        assert col == 15, "cursor sits at the right edge"
+
+    def test_marker_costs_one_column_of_tail(self, pb):
+        """The … occupies a column, so avail must exceed the tail to show it all."""
+        text = '/very/long/path/events.log'
+        visible, _ = self.W2(pb, text, len(text), 10)
+        assert visible == '…vents.log'   # 10 columns: marker + 9 chars
+
+    def test_scrolled_window_is_marked(self, pb):
+        visible, _ = self.W2(pb, '0123456789abcdef', 16, 8)
+        assert visible.startswith('…'), "must show that text is scrolled off"
+
+    def test_visible_never_exceeds_avail(self, pb):
+        text = '/a/b/c/d/e/f/g/events.log'
+        for avail in range(1, len(text) + 4):
+            visible, _ = self.W2(pb, text, len(text), avail)
+            assert len(visible) <= avail, f"avail={avail}"
+
+    def test_cursor_stays_inside_the_window(self, pb):
+        text = '/a/b/c/d/e/f/g/events.log'
+        for avail in range(1, len(text) + 4):
+            visible, col = self.W2(pb, text, len(text), avail)
+            assert 0 <= col <= len(visible), f"avail={avail}"
+
+    def test_never_scrolls_past_the_end(self, pb):
+        """With the cursor at the end, the last character must be visible."""
+        text = 'abcdefghij'
+        visible, _ = self.W2(pb, text, len(text), 4)
+        assert visible.endswith('j')
+
+    def test_zero_width_is_safe(self, pb):
+        assert self.W2(pb, 'abc', 3, 0) == ('', 0)
+
+    def test_cursor_mid_text_keeps_cursor_visible(self, pb):
+        """Guards the general case even though the prompt only appends today."""
+        text = '0123456789abcdefghij'
+        visible, col = self.W2(pb, text, 5, 6)
+        assert 0 <= col <= len(visible)
+        assert len(visible) <= 6
