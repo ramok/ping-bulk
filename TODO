@@ -233,7 +233,7 @@ Events [SPACE to set "seen" mark] [PgUp to scroll]                              
 # Analysed and root-caused; commits landed for the first two only.
 ################################################################################
 
-## DONE (committed 2026-08-15 / 08-16)
+## DONE (committed 2026-08-15 … 08-17)
 - [x] [SPACE] seen marker never rendered — mark_seen() appended to self.events
       but not to the _filtered_events cache that draw_events reads. (ea92d45)
 - [x] z[ / z] were documented but unbound — _handle_z_sequence had no callers.
@@ -256,6 +256,21 @@ Events [SPACE to set "seen" mark] [PgUp to scroll]                              
       legend lines are no longer over-cut. (2951235)
 - [x] CLAUDE.md corrected: the 'A toggles all-bindings' and '_mode_bindings'
       claims were both stale.
+- [x] save prompt completes paths with Tab / Shift-Tab (LCP, then cycle, popup
+      shared with the ':' line; directories keep a trailing '/'). (9f869df)
+- [x] entering a directory (e.g. '.') no longer passes the exists() check and
+      ask truncate/append about something unwritable — rejected with a reason,
+      prompt stays open. Guard sits in the single write path so ':save <dir>'
+      is covered too. (9f869df)
+- [x] save prompt scrolls to keep the end of a long path visible, leading '…'
+      marks the hidden head. (28f5456)
+- [x] ':' command line scrolls the same way — completion there was correct but
+      invisible, so Tab-cycling a long path looked inert. Window follows the
+      cursor, so Home/End move the view. (b91f27b)
+  - STILL CLIPPED: the search and filter prompts. Same one-line fix via
+    _scroll_text_window; left alone because regex queries are usually short.
+  - Note: unit tests cannot catch this class of bug — they assert on the
+    buffer, which was always right. Only integration tests see the clipping.
 
 ## STILL OPEN from this review
 - Pinned overlay rows ignore h_scroll, and max_line_w excludes them, so a
