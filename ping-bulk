@@ -1624,6 +1624,27 @@ def _config_path():
     return preferred
 
 
+def _resolve_path(path):
+    r"""Expand a leading ``~`` in a user-supplied file path.
+
+    Every command that takes a path argument (``:log``, ``:save``, ``:source``)
+    runs it through here; ``:edit`` needs no pass because it reuses the hosts
+    file path from the command line, which the shell has already expanded.
+
+    Without this, ``~`` reached :func:`open` verbatim: ``:log ~/pb.log`` raised
+    ``FileNotFoundError`` on every append, where it was swallowed by the
+    ``except OSError`` that keeps a bad log path from recursing into new events —
+    so logging silently did nothing at all.
+
+    ``$`` is deliberately *not* expanded here.  In a hosts file it has already
+    been substituted at parse time, with ``:let`` variables in scope and
+    undefined names reported; a second pass with :func:`os.path.expandvars`
+    would apply different rules to whatever survived (loop back-references are
+    intentionally left intact) and to any literal ``$`` in a file name.
+    """
+    return os.path.expanduser(path) if path else path
+
+
 def _history_path():
     """Return the XDG-compliant command history file path.
 
@@ -4457,12 +4478,18 @@ def _kiosk_validate_ssh_args(ssh_args: list) -> str | None:
 
 
 class Application:
-    def __init__(self, entries, log_file=None):
+    def __init__(self, entries, log_file=None, hosts_file=None, kiosk_mode=False):
         """Initialise the application from an ordered list of entry tuples.
 
         entries  — list of ('host', name), ('section', title), or ('cmd', text)
                    tuples, as returned by parse_hosts_file() or built from argv.
         log_file — optional path; new events are appended here in real time.
+        hosts_file — path of the active hosts file, or None when hosts came from
+                   argv.  Must be known *here* rather than assigned afterwards:
+                   the 'cmd' entries below are dispatched during this call, and
+                   both _kiosk_allow_path() and :edit read it.
+        kiosk_mode — same reasoning: assigning it after construction left every
+                   path check inert for the startup commands in the hosts file.
         self.monitors — PingMonitor instances only (used for stats/threading).
         self.entries  — ordered display list mixing PingMonitor and SectionLabel.
 
@@ -4507,9 +4534,9 @@ class Application:
         self._mux_from_binding = False  # True while executing commands from a key binding
         self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
         self.terminal_emulator = 'auto'  # X terminal emulator name ('auto' or binary)
-        self.kiosk_mode = False        # set True by --kiosk flag
+        self.kiosk_mode = kiosk_mode   # set by --kiosk flag
         self.startup_select = None     # host name to pre-highlight at startup (--select)
-        self.hosts_file = None         # path of the active hosts file (for :edit)
+        self.hosts_file = hosts_file   # path of the active hosts file (for :edit)
         self._monitoring_started = False  # set True once start_monitoring() is called
         self._key_trie = _KeyTrie()
         self._key_seq = []        # accumulated key codes for multi-key lookup
@@ -4536,9 +4563,14 @@ class Application:
         # each probe is a fresh SSH connection, so a short interval is costly.
         self.clock_interval = 30.0
         self._register_default_bindings()
-        self._load_config()         # apply config-file settings (before hosts-file commands)
-        if log_file is not None:    # command-line -l/--log-file always overrides config
+        # -l/--log-file wins over a ':log' in either the config file or the hosts
+        # file.  Applied *before* _load_config() so that _cmd_log can see the flag
+        # and decline; assigning it afterwards only overrode the config, leaving a
+        # hosts-file ':log' to silently beat the command line.
+        self._log_file_from_cli = log_file is not None
+        if log_file is not None:
             self.log_file = log_file
+        self._load_config()         # apply config-file settings (before hosts-file commands)
         if not os.path.exists(_config_path()):
             self._create_default_config()
         self.prompt = None        # None = no prompt; dict = prompt is open (see _open_prompt_*)
@@ -7839,6 +7871,9 @@ class Application:
                 rest = rest[len(flag):].strip()
                 break
         if rest:
+            # Resolve before the kiosk check: realpath('~/x') would otherwise be
+            # taken as cwd-relative and the verdict computed on the wrong path.
+            rest = _resolve_path(rest)
             if self.kiosk_mode and not self._kiosk_allow_path(rest, 'save'):
                 return
             self._save_log_to(rest, append=False, follow=follow)
@@ -7856,6 +7891,7 @@ class Application:
         Returns False without writing when *filename* is a directory — it
         exists, so an exists() check alone would wave it through.
         """
+        filename = _resolve_path(filename)
         if os.path.isdir(filename):
             self.add_event("save",
                 f"error: '{filename}' is a directory — give a file name")
@@ -7962,7 +7998,7 @@ class Application:
                 self._prompt_complete(p, backward=True)
                 return
             if key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
-                filename = ''.join(p['chars']).strip()
+                filename = _resolve_path(''.join(p['chars']).strip())
                 if filename:
                     if self.kiosk_mode and not self._kiosk_allow_path(filename, 'save'):
                         self.prompt = None
@@ -8681,7 +8717,7 @@ class Application:
             self.add_event("cmd", "source: missing file argument")
             return
 
-        filename = args.strip()
+        filename = _resolve_path(args.strip())
 
         if self.kiosk_mode and not getattr(self, '_loading_file', False):
             if not self._kiosk_allow_path(filename, 'source'):
@@ -9551,12 +9587,21 @@ class Application:
                         self.add_event("log", "logging is already off")
                 self.log_file = None
             else:
-                if self.kiosk_mode and not self._kiosk_allow_path(args, 'log'):
+                # A startup ':log' (config or hosts file) yields to -l/--log-file.
+                # Typing ':log' interactively always wins — monitoring is running
+                # by then, so the flag no longer has a claim.
+                if self._log_file_from_cli and not self._monitoring_started:
+                    self.add_event("log",
+                        f"log file set on the command line ({self.log_file}); "
+                        f"keeping it over ':log {args}'", level=LEVEL_INFO)
+                    return
+                path = _resolve_path(args)
+                if self.kiosk_mode and not self._kiosk_allow_path(path, 'log'):
                     return
                 old = self.log_file
-                self.log_file = args
-                if self._monitoring_started and old != args:
-                    self.add_event("log", f"logging to: {args}")
+                self.log_file = path
+                if self._monitoring_started and old != path:
+                    self.add_event("log", f"logging to: {path}")
         else:
             if self.log_file:
                 self.add_event("log", f"active log file: {self.log_file}")
@@ -11475,9 +11520,10 @@ def main(stdscr, args):
         print(f"{_PROG_NAME}: no hosts to monitor", file=sys.stderr)
         return
 
-    app = Application(entries, log_file=args.log_file)
-    app.hosts_file = args.file[-1] if args.file else None
-    app.kiosk_mode = bool(args.kiosk)
+    app = Application(entries,
+                      log_file=args.log_file,
+                      hosts_file=args.file[-1] if args.file else None,
+                      kiosk_mode=bool(args.kiosk))
     app.startup_select = args.select_host or None
 
     # Resolve log level: --log-level base, then +verbose/-quiet offset

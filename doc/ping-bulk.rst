@@ -75,7 +75,9 @@ OPTIONS
 
 ``-l LOGFILE``, ``--log-file LOGFILE``
     Append every event-log entry to *LOGFILE* in real time.
-    Overrides any ``:log`` setting in the config file.
+    Overrides any ``:log`` setting in the config file **or** in the hosts
+    file; typing ``:log`` interactively still takes effect.
+    A leading ``~`` is expanded.
 
 ``--dns MODE``
     Set the DNS display mode at startup.
@@ -350,7 +352,7 @@ Event log
     +------------+--------------------------------------------------------+
     | Mode       | Effect                                                 |
     +============+========================================================+
-    | ``all``    | Hosts take the space they need, the log gets the rest   |
+    | ``all``    | Hosts take the space they need, the log gets the rest  |
     +------------+--------------------------------------------------------+
     | ``ping``   | Host list only — the event log is hidden               |
     +------------+--------------------------------------------------------+
@@ -407,7 +409,12 @@ Event log
     With no argument, print the active log file path (or report that
     logging is off).  With a file path, stream *future* events to that
     file — it does not write the already-buffered log; use ``:save`` for
-    that.  With ``off``, disable streaming.
+    that.  With ``off``, disable streaming.  A leading ``~`` is expanded.
+
+    A ``:log`` in the config file or the hosts file yields to
+    ``-l``/``--log-file`` on the command line, and the skipped path is
+    reported at ``info`` log level.  Typing ``:log`` interactively always
+    takes effect.
 
 ``:set log-size <n>``
     Set the maximum number of lines kept in the in-memory event log.
@@ -1212,6 +1219,8 @@ Security features in kiosk mode:
 - ``:log`` and ``:source`` paths are restricted to ``/tmp/``,
   ``~/.local/state/ping-bulk/``, ``/etc/ping-bulk/``, and the directory
   containing the hosts file.  Symlinks are resolved before the check.
+  The restriction covers the startup commands in the hosts file as well
+  as those typed interactively.
 - Every ``:cmd`` dispatch is logged to syslog (``LOG_NOTICE``,
   facility ``DAEMON``) for auditing.
 - ``:q`` / ``q`` quit is not disabled, but ``Restart=always`` in the
