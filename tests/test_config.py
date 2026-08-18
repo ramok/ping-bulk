@@ -1019,3 +1019,33 @@ class TestLateGraceSetting:
     def test_config_round_trip(self, pb, tmp_path):
         app, _ = self._app(pb, tmp_path, config=':set late-grace 2\n')
         assert app.late_grace == 2.0
+
+
+class TestConfigOverridesDefaults:
+    """A config value must survive Application.__init__.
+
+    autofold, autofold-delay and clock-interval were initialised *below* the
+    _load_config() call, so the value the config had just set was immediately
+    overwritten by the default — these settings never worked from a config file,
+    only interactively.
+    """
+
+    def _app(self, pb, tmp_path, config):
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        with open(cfg, 'w') as f:
+            f.write(config)
+        with patch.object(pb, '_config_path', return_value=cfg):
+            return pb.Application([('host', '127.0.0.1')])
+
+    def test_autofold_delay_survives_load(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, ':set autofold-delay 60\n')
+        assert app.autofold_delay == 60.0
+
+    def test_autofold_survives_load(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, ':set autofold on\n')
+        assert app.autofold is True
+
+    def test_clock_interval_survives_load(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, ':set clock-interval 120\n')
+        assert app.clock_interval == 120.0

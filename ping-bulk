@@ -4441,6 +4441,13 @@ class Application:
         # (ping interval + late_grace), so 1 s tolerates replies up to ~2 s.
         # Must be set before _load_config, or the default overwrites the config.
         self.late_grace = 1.0
+        # Autofold: auto fold/unfold sections based on host liveness
+        self.autofold = False             # disabled by default
+        self.autofold_delay = 30.0        # seconds before re-folding a recovered section
+        # Remote-clock probe: poll interval (seconds) for hosts that answer -T.
+        # Default 30 s — clock skew drifts slowly, and for remote-ping hosts
+        # each probe is a fresh SSH connection, so a short interval is costly.
+        self.clock_interval = 30.0
         self._register_default_bindings()
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
@@ -4483,13 +4490,6 @@ class Application:
         self._search_auto_unfolded = set()    # sections auto-unfolded by search
         # Help overlay search: save scroll position so ESC can restore it
         self._help_search_pre_scroll = 0
-        # Autofold: auto fold/unfold sections based on host liveness
-        self.autofold = False             # disabled by default
-        self.autofold_delay = 30.0        # seconds before re-folding a recovered section
-        # Remote-clock probe: poll interval (seconds) for hosts that answer -T.
-        # Default 30 s — clock skew drifts slowly, and for remote-ping hosts
-        # each probe is a fresh SSH connection, so a short interval is costly.
-        self.clock_interval = 30.0
         self.stale_attr = curses.A_DIM    # replaced by gray pair in run()
         self._autofold_ts: dict = {}      # id(SectionLabel) -> timestamp when all hosts went alive
         self.running = True
