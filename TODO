@@ -272,6 +272,50 @@ Events [SPACE to set "seen" mark] [PgUp to scroll]                              
   - Note: unit tests cannot catch this class of bug — they assert on the
     buffer, which was always right. Only integration tests see the clipping.
 
+## Late-ICMP fix (2026-08-18) — see doc/report-late-icmp-x-pattern.md
+
+- [x] DONE option A, preventive variant. 'ping -O' means "no answer yet", so a
+      '-O' line now parks the icmp_seq in Monitor._pending instead of counting a
+      loss. The probe resolves exactly once: _record_reply (late answer, cell
+      drawn 'x' yellow) or _expire_pending (write-off after :set late-grace,
+      default 1s, driven by the existing 0.5s state loop).
+      Fixed: X.X.X. bar, Loss% 50%->0%, tx double-count, badge flapping,
+      '-  -' Up/Down columns, greyed stats, clock-probe re-arm churn.
+      Verified with a fake `ping` on PATH emitting the report's exact pair:
+        before  .X.X.X.  Loss 50.0%  RX 13 TX 26 XX 13  Up/Down '-'
+        after   xxxxxxx  Loss  0.0%  RX 13 TX 13 XX  0  Up/Down 14s
+      Cost accepted: a genuinely dead host is written off ~late-grace later
+      (X at ~2s instead of ~1s; the logged event was already delayed 3s).
+
+- [x] Fixed in passing: autofold, autofold-delay, clock-interval and late-grace
+      were all initialised BELOW the _load_config() call, so a value set in the
+      config file was immediately overwritten by the default — those three
+      settings had never worked from a config file. Moved above it, next to the
+      existing "must be set before _load_config" block. 4 regression tests.
+
+- [ ] NOT done: option B, per-host monitor ping options
+      (`:ping-options *-cam* -i 2`). Deliberately deferred — it hides the
+      condition A now reports. If picked up, these bite:
+        - SshPingMonitor._STALE_SECS = 2.0 synthesises a lost ping when the SSH
+          pipe is quiet >2s ("slightly above the 1s ping interval"). With -i 2
+          that fires on EVERY probe; _STALE_SECS must derive from the effective
+          interval.
+        - history-size is documented as "24h at 1 ping/s"; a per-host -i
+          silently breaks that window for those hosts.
+        - a runtime change only takes effect on the next Popen, which today
+          happens only on subprocess exit or :edit — needs a monitor-restart
+          path that does not exist.
+        - do the rules lookup LAZILY inside _build_ping_cmd: monitors are
+          constructed during the entry loop but threads start afterwards, so a
+          lazy lookup is order-independent while an eager one would force
+          :ping-options to precede the host lines.
+
+- [ ] Still open from the report's §"Secondary observation": rtime/drift show
+      no-rt for those cams. Most likely genuine lack of ICMP-timestamp support
+      rather than a window miss (the probe uses -W 2, ample for 1.2s). The flap
+      that re-armed probing on every DOWN->UP is gone now, so revisit only if
+      no-rt persists on a host known to answer -T.
+
 ## STILL OPEN from this review
 - Pinned overlay rows ignore h_scroll, and max_line_w excludes them, so a
   header wider than the box cannot be scrolled into view. It now degrades at
