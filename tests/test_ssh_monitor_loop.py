@@ -110,7 +110,7 @@ class TestSshPingMonitorSuccessLine:
                 _run_ping(m)
         assert m.rx_count == 2
 
-    def test_no_answer_line_increments_xx_count(self, pb):
+    def test_no_answer_line_defers_until_expiry(self, pb):
         m = _ssh_monitor(pb)
         proc = _make_fake_proc(
             [
@@ -123,6 +123,11 @@ class TestSshPingMonitorSuccessLine:
         with patch('subprocess.Popen', return_value=proc):
             with patch('select.select', side_effect=sel_returns):
                 _run_ping(m)
+        assert m.xx_count == 0, "outstanding, not yet lost"
+        # SshPingMonitor discards ping's '-D' timestamp and stamps local receipt
+        # time, so expiry must be measured against the real clock, not the
+        # fixture's epoch.  (PingMonitor honours '-D' and behaves differently.)
+        m._expire_pending(time.time() + 2.0, 1.0)
         assert m.xx_count == 1
 
     def test_records_latency_in_welford(self, pb):

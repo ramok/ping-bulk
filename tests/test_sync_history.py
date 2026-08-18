@@ -178,3 +178,42 @@ class TestSyncHistoryGetHistoryString:
             f"  A (ts=999.1): {sa!r}\n"
             f"  B (ts=999.9): {sb!r}"
         )
+
+
+class TestSyncHistoryLateCell:
+    """Late cells must bucket by their own timestamp like any other reply.
+
+    Appending a late reply (the old behaviour) put it in the same second as the
+    'X' it belonged to, and sync mode is last-write-wins — so the timeout was
+    silently erased there while the positional view showed both. One cell per
+    probe removes that disagreement.
+    """
+
+    def _monitor(self, pb, cells):
+        m = pb.PingMonitor('10.0.0.1')
+        with m.lock:
+            for val, ts in cells:
+                m.history.append(val)
+                m.history_times.append(ts)
+        return m
+
+    def test_late_cell_renders_as_x_in_its_bucket(self, pb):
+        # bucket = int(end_time) - int(ts), so a cell one second back is index 1.
+        m = self._monitor(pb, [(-1206.0, 1700000005.4)])
+        out = m.get_history_string(length=3, mode='success', sync=True,
+                                   end_time=1700000006.0)
+        assert out[1] == 'x', out
+
+    def test_late_cell_does_not_overwrite_its_neighbour(self, pb):
+        """Consecutive probes occupy distinct seconds, so both survive."""
+        m = self._monitor(pb, [(-1206.0, 1700000004.2),
+                               (-1207.0, 1700000005.2)])
+        out = m.get_history_string(length=3, mode='success', sync=True,
+                                   end_time=1700000006.0)
+        assert out[1] == 'x' and out[2] == 'x', out
+
+    def test_lost_and_late_stay_distinguishable(self, pb):
+        m = self._monitor(pb, [(None, 1700000004.0), (-1206.0, 1700000005.0)])
+        out = m.get_history_string(length=3, mode='success', sync=True,
+                                   end_time=1700000006.0)
+        assert out[1] == 'x' and out[2] == 'X', out

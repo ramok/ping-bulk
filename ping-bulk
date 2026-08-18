@@ -335,6 +335,10 @@ SET_PARAMS = [
              ['5', '15', '30', '60', '120'],
              'seconds to wait before auto-folding a recovered section (default 30)',
              getter=lambda app: str(int(app.autofold_delay))),
+    SetParam('late-grace', '_cmd_late_grace',
+             ['0', '0.5', '1', '2', '5'],
+             "grace after ping's '-O' line before a probe counts as lost (default 1)",
+             getter=lambda app: f"{app.late_grace:g}"),
     SetParam('clock-interval', '_cmd_clock_interval',
              ['5', '10', '30', '60', '120'],
              'seconds between remote-clock (drift/rtime) probes for hosts that answer -T (default 30)',
@@ -695,10 +699,10 @@ def _join_help_fragments(*groups):
 
 _HELP_LEGEND = [
     "  Ping history  ([H] cycle: success / rtt / scaled)",
-    "  Symbols:  [X:red = timeout]          [?:brightred = process error]     \\[' ' = no data in sync mode]",
+    "  Symbols:  [X:red = lost]             [x:yellow = late reply]           [?:brightred = process error]     \\[' ' = no data in sync mode]",
     "  RTT time: [green:green fast (<50 ms)]  [yellow:yellow slow (≥50 ms)]  [magenta:magenta ≥100 ms]",
     "  Ping history modes:",
-    "     success   [.:green = reply] ",
+    "     success   [.:green = reply]  [x:yellow = reply after the probe interval (see :set late-grace)] ",
     "     rtt       integer ms per ping:  [3:green = 3 ms]     [57:yellow = 57 ms]",
     "     scaled    0–9 in 10 ms steps:   [0:green = 0–40 ms]  [5:yellow = 50–90 ms]  [>:magenta = ≥100 ms]",
 ]
@@ -1772,23 +1776,56 @@ def _select_target_ts(hops):
     return target
 
 
+_ICMP_SEQ_RE = re.compile(r'icmp_seq=(\d+)')
+
+
+def _parse_icmp_seq(line):
+    """Return the icmp_seq of a ping output *line*, or None if absent.
+
+    Both the reply line and the 'no answer yet for icmp_seq=N' line carry it,
+    which is what lets a late reply be matched to the probe '-O' already
+    flagged.  Matching on seq rather than the '-D' timestamp is deliberate:
+    SshPingMonitor discards that timestamp and stamps local receipt time, so a
+    timestamp-keyed pairing would behave differently for remote hosts.
+    """
+    m = _ICMP_SEQ_RE.search(line)
+    return int(m.group(1)) if m else None
+
+
+def _hist_is_late(val):
+    """True when *val* is a history cell for a late reply (stored as -latency)."""
+    return isinstance(val, float) and val < 0
+
+
+def _hist_rtt(val):
+    """Return the RTT in ms carried by a successful history cell, late or not."""
+    return abs(val)
+
+
 def _history_char(val, mode):
     """Convert a raw history value (float ms, None, or 'ERR') to a single display character.
 
-    success — '.' for any successful ping, 'X' for timeout, '?' for process error
-    rtt     — last digit of int(ms) for success, 'X' for timeout, '?' for process error
-    scaled  — digit 0-9 mapping 10 ms buckets (0=<10ms … 9=90+ms), 'X' for timeout,
-              '?' for process error
+    success — '.' for a reply, 'x' for a reply that arrived after the '-O'
+              deadline, 'X' for a lost probe, '?' for process error
+    rtt     — last digit of int(ms) for a reply, 'X' for a lost probe, '?' for error
+    scaled  — digit 0-9 by RTT bucket, 'X' for a lost probe, '?' for error
+
+    Late cells keep their measured RTT (negative-encoded), so rtt/scaled show the
+    real number; only 'success' mode distinguishes them, backed by colour.
     """
     if val == 'ERR':
         return '?'
     if val is None:
         return 'X'
+    late = _hist_is_late(val)
+    val = _hist_rtt(val)
     if mode == 'rtt':
         return str(int(round(val)))[-1]
     if mode == 'scaled':
         scaled = round(val / 100 * 9)
         return '>' if scaled > 9 else str(scaled)
+    if late:
+        return 'x'
     return '.'  # 'success' mode
 
 
@@ -1816,6 +1853,12 @@ class Monitor(ABC):
         self._down_pending_ts = None  # set when host first goes DOWN; cleared when logged or recovered
         self._pending_uptime = None   # uptime duration (sec) captured at UP→DOWN transition
         self.ping_count = 0     # total pings ever sent (never capped, unlike history deque)
+        # Probes announced by 'ping -O' as unanswered, keyed icmp_seq → wall ts.
+        # '-O' means "no answer *yet*" — its deadline is the ping interval, not
+        # -W — so a host slower than the interval reports every probe here and
+        # then answers it.  Nothing is counted until the reply lands (late) or
+        # _expire_pending() writes the probe off as genuinely lost.
+        self._pending = {}
         self.running = True
         self.paused = False
         self._pause_event = threading.Event()
@@ -1887,6 +1930,80 @@ class Monitor(ABC):
             self._lat_min = v
         if v > self._lat_max:
             self._lat_max = v
+
+    # ── Probe bookkeeping ─────────────────────────────────────────────────────
+    # 'ping -O' prints "no answer yet for icmp_seq=N" when no reply arrived by
+    # the time the next request went out, so its deadline is the ping interval
+    # (1 s) rather than -W.  A host whose RTT exceeds the interval therefore
+    # emits BOTH a '-O' line and a 'time=' line for every single probe.  Counting
+    # the '-O' line immediately made one probe register as a failure *and* a
+    # success: 50 % loss on a host losing nothing, a doubled tx, and an `alive`
+    # that oscillated once a second — which is what flapped the section badge,
+    # blanked the Up/Down column and greyed the stats.
+    #
+    # So a '-O' line only parks the seq in self._pending.  The probe is resolved
+    # exactly once, either by _record_reply (late answer) or _expire_pending
+    # (genuinely lost).  Keeping `alive` untouched in between is the point: its
+    # readers act per draw frame with no grace, so nothing retroactive could
+    # have un-drawn those frames.
+
+    def _record_reply(self, latency, ts, seq=None):
+        """Record a successful reply of *latency* ms stamped *ts*.
+
+        A reply for a seq still sitting in _pending is *late* — it answers a
+        probe that '-O' already flagged.  It counts as the one success that
+        probe was always going to be, and its cell is marked late so the display
+        can say "reachable but slower than the probe interval".
+        """
+        with self.lock:
+            late = seq is not None and self._pending.pop(seq, None) is not None
+            self.latency = latency
+            self.alive = True
+            # Late cells carry -latency: it keeps the history union at
+            # float|None|'ERR' so every existing `is None` / == 'ERR' check
+            # still holds, while preserving the RTT for the rtt/scaled views.
+            self.history.append(-latency if late else latency)
+            self.history_times.append(ts)
+            self.rx_count += 1
+            self._record_latency(latency)
+        self.ping_count += 1
+
+    def _record_no_answer(self, ts, seq=None):
+        """Handle a 'ping -O' line: park *seq* as outstanding, decide nothing.
+
+        Without a usable seq there is nothing to reconcile against later, so the
+        probe is written off immediately — the pre-existing behaviour.  Failing
+        closed matters more than pairing here: a parse change upstream must never
+        silently stop reporting losses.
+        """
+        if seq is None:
+            self._record_loss(ts)
+            return
+        with self.lock:
+            self._pending[seq] = ts
+
+    def _record_loss(self, ts):
+        """Record one genuinely lost probe."""
+        with self.lock:
+            self.alive = False
+            self.latency = None
+            self.history.append(None)
+            self.history_times.append(ts)
+            self.xx_count += 1
+        self.ping_count += 1
+
+    def _expire_pending(self, now, grace):
+        """Write off outstanding probes unanswered for longer than *grace*.
+
+        Called from the 0.5 s state loop.  This is the only place an ICMP probe
+        becomes a loss, so `alive` goes False once per probe at most.
+        """
+        with self.lock:
+            stale = [s for s, ts in self._pending.items() if now - ts >= grace]
+            for s in stale:
+                del self._pending[s]
+        for _ in stale:
+            self._record_loss(now)
 
     @property
     def lat_avg(self):
@@ -1966,7 +2083,7 @@ class Monitor(ABC):
                         elif val == "ERR":
                             cell = "?" * num_w + " "
                         else:
-                            capped = min(int(round(val)), 10 ** num_w - 1)
+                            capped = min(int(round(_hist_rtt(val))), 10 ** num_w - 1)
                             cell = f"{capped:>{num_w}} "
                     else:
                         cell = _history_char(val, mode)
@@ -1991,7 +2108,7 @@ class Monitor(ABC):
                         elif val == "ERR":
                             cell = "?" * num_w + " "
                         else:
-                            capped = min(int(round(val)), 10**num_w - 1)
+                            capped = min(int(round(_hist_rtt(val))), 10**num_w - 1)
                             cell = f"{capped:>{num_w}} "
                     else:
                         cell = _history_char(val, mode)
@@ -2105,25 +2222,12 @@ class PingMonitor(Monitor):
                         latency = float(line.split('time=')[1].split()[0])
                     except (IndexError, ValueError):
                         continue
-                    with self.lock:
-                        self.latency = latency
-                        self.alive = True
-                        self.history.append(latency)
-                        self.history_times.append(ping_ts)
-                        self.rx_count += 1
-                        self._record_latency(latency)
-                    self.ping_count += 1
+                    self._record_reply(latency, ping_ts, _parse_icmp_seq(line))
                     got_output = True
                     backoff = 1  # reset on any successful output
                 elif 'no answer yet' in line:
-                    # '-O' timeout line — one per missed icmp_seq
-                    with self.lock:
-                        self.alive = False
-                        self.latency = None
-                        self.history.append(None)
-                        self.history_times.append(ping_ts)
-                        self.xx_count += 1
-                    self.ping_count += 1
+                    # '-O' line — the probe is outstanding, not yet lost
+                    self._record_no_answer(ping_ts, _parse_icmp_seq(line))
                     got_output = True
                     backoff = 1  # reset on any output
 
@@ -2571,14 +2675,8 @@ class SshPingMonitor(Monitor):
                     if got_output:
                         # We had live output before; SSH link appears frozen.
                         # Synthesise a lost ping so history advances correctly.
-                        ping_ts = time.time()
-                        with self.lock:
-                            self.alive = False
-                            self.latency = None
-                            self.history.append(None)
-                            self.history_times.append(ping_ts)
-                            self.xx_count += 1
-                        self.ping_count += 1
+                        # No seq to reconcile against, so this counts at once.
+                        self._record_loss(time.time())
                     # Also check if the process has already exited.
                     if self._proc.poll() is not None:
                         break
@@ -2601,24 +2699,12 @@ class SshPingMonitor(Monitor):
                         latency = float(line.split("time=")[1].split()[0])
                     except (IndexError, ValueError):
                         continue
-                    with self.lock:
-                        self.latency = latency
-                        self.alive = True
-                        self.history.append(latency)
-                        self.history_times.append(ping_ts)
-                        self.rx_count += 1
-                        self._record_latency(latency)
-                    self.ping_count += 1
+                    self._record_reply(latency, ping_ts, _parse_icmp_seq(line))
                     got_output = True
                     backoff = 1
                 elif "no answer yet" in line:
-                    with self.lock:
-                        self.alive = False
-                        self.latency = None
-                        self.history.append(None)
-                        self.history_times.append(ping_ts)
-                        self.xx_count += 1
-                    self.ping_count += 1
+                    # '-O' line — the probe is outstanding, not yet lost
+                    self._record_no_answer(ping_ts, _parse_icmp_seq(line))
                     got_output = True
                     backoff = 1
 
@@ -4350,6 +4436,11 @@ class Application:
         self._filter_query   = ''    # '' = inactive; regex pattern when active
         self._filter_visible = set() # entry indices visible under current filter
         self._filter_visible_monitors = set()  # monitor entry indices matching filter (for banner count)
+        # Grace after ping's '-O' line before a probe counts as lost.  Bounds the
+        # RTT that reads as "late" rather than "down": a probe is written off at
+        # (ping interval + late_grace), so 1 s tolerates replies up to ~2 s.
+        # Must be set before _load_config, or the default overwrites the config.
+        self.late_grace = 1.0
         self._register_default_bindings()
         self._load_config()         # apply config-file settings (before hosts-file commands)
         if log_file is not None:    # command-line -l/--log-file always overrides config
@@ -4600,6 +4691,8 @@ class Application:
                     f.write("# :log\n")
                 if self.multikey_timeout != 0:
                     f.write(f":set multikey-timeout {self.multikey_timeout}\n")
+                if self.late_grace != 1.0:
+                    f.write(f":set late-grace {self.late_grace:g}\n")
                 # Per-program option rules
                 for prog, rules in self.prog_options.items():
                     for pattern, opts in rules:
@@ -4957,8 +5050,16 @@ class Application:
 
         while self.running:
             now = time.monotonic()
+            # Separate wall clock: _pending is stamped from ping's '-D' prefix
+            # (epoch seconds), so it must not be compared against monotonic.
+            wall_now = time.time()
             clock_enabled = self._clock_enabled()
             for monitor in self.monitors:
+                # Resolve probes that '-O' flagged and nothing ever answered.
+                # Done before reading .alive so an expired probe is observed in
+                # this same pass, keeping the down transition prompt.
+                monitor._expire_pending(wall_now, self.late_grace)
+
                 # Log a fatal process error exactly once, as soon as it is detected.
                 if monitor.error is not None and not monitor.error_logged:
                     monitor.error_logged = True
@@ -6314,12 +6415,16 @@ class Application:
     def _worst_history_char(chars):
         """Return the worst character from a list of per-monitor history chars.
 
-        Priority (worst first): '?' (process error) > 'X' (timeout) > '.' (ok) > ' ' (no data).
+        Priority (worst first): '?' (process error) > 'X' (lost) > 'x' (late
+        reply) > '.' (ok) > ' ' (no data).  A late reply ranks above a clean one
+        because it is worth surfacing in a folded section, but below a real loss.
         """
         if '?' in chars:
             return '?'
         if 'X' in chars:
             return 'X'
+        if 'x' in chars:
+            return 'x'
         if '.' in chars:
             return '.'
         return ' '
@@ -6377,7 +6482,9 @@ class Application:
             for i in range(length):
                 chars = [row[i] for row in per_monitor]
                 with_data = [c for c in chars if c != ' ']
-                ok = sum(1 for c in with_data if c == '.')
+                # A late reply ('x') is still a reply — counting it as not-ok
+                # would drag a folded section red for a merely-slow host.
+                ok = sum(1 for c in with_data if c in '.x')
                 slot_ok_ratios.append(ok / len(with_data) if with_data else 1.0)
 
         return badge_parts, history, slot_ok_ratios
@@ -7179,6 +7286,8 @@ class Application:
                                 attr = curses.color_pair(2) | row_attr
                         elif char == '?':
                             attr = curses.color_pair(2) | curses.A_BOLD | row_attr
+                        elif char == 'x':
+                            attr = curses.color_pair(3) | row_attr   # yellow — late reply
                         elif char == '.':
                             attr = curses.color_pair(1) | row_attr
                         else:
@@ -7271,6 +7380,8 @@ class Application:
                         stdscr.addstr(row, col, char, curses.color_pair(2) | curses.A_BOLD | row_attr)  # bright red — process error
                     elif char == '.':
                         stdscr.addstr(row, col, char, curses.color_pair(1) | row_attr)  # green
+                    elif char == 'x':
+                        stdscr.addstr(row, col, char, curses.color_pair(3) | row_attr)  # yellow — late reply
                     elif char in '01234':
                         stdscr.addstr(row, col, char, curses.color_pair(1) | row_attr)  # green
                     elif char in '56789':
@@ -8925,6 +9036,9 @@ class Application:
             m.alive       = snap['alive']
             m.down_since  = snap['down_since']
             m.up_since    = snap['up_since']
+            # Outstanding probes belong to the subprocess being replaced; their
+            # seqs mean nothing to the new one, so start with none pending.
+            m._pending.clear()
 
     def _edit_reload_inplace(self, hosts_file):
         """In-process reload: snapshot history, clear monitors, re-source, restore."""
@@ -9458,6 +9572,24 @@ class Application:
             return
         state = 'on' if self.autofold else 'off'
         self.add_event("autofold", f"autofold {state}")
+
+    def _cmd_late_grace(self, args=''):
+        """Set how long an unanswered probe waits before counting as lost."""
+        val = args.strip()
+        if not val:
+            self.add_event("cmd", f"late-grace: {self.late_grace:g}")
+            return
+        try:
+            secs = float(val)
+            if secs < 0:
+                raise ValueError
+        except ValueError:
+            self.add_event("cmd", f"late-grace: invalid value '{val}'; "
+                           "expected non-negative number of seconds")
+            return
+        self.late_grace = secs
+        if self._monitoring_started:
+            self.add_event("cmd", f"late-grace: {secs:g}")
 
     def _cmd_autofold_delay(self, args=''):
         """Set the autofold recovery delay in seconds."""

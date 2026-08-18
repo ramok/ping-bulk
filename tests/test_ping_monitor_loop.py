@@ -132,7 +132,12 @@ class TestPingMonitorSuccessLine:
 
 class TestPingMonitorTimeoutLine:
 
-    def test_no_answer_sets_alive_false(self, pb):
+    def test_no_answer_alone_does_not_mark_down(self, pb):
+        """'-O' means "no answer yet" — the probe is outstanding, not lost.
+
+        Deciding at once is what made a host slower than the ping interval
+        oscillate between up and down every second.
+        """
         m = pb.PingMonitor('10.0.0.1')
         lines = [
             '[1700000000.0] no answer yet for icmp_seq=1\n',
@@ -140,7 +145,22 @@ class TestPingMonitorTimeoutLine:
         proc = _make_fake_proc(lines, stderr_text=_FATAL_STDERR)
         with patch('subprocess.Popen', return_value=proc):
             _run_ping(m)
+        assert m.alive is None, "must not be marked down before the grace expires"
+        assert m.xx_count == 0
+        assert None not in m.history, "no timeout cell yet"
+        assert 1 in m._pending
+
+    def test_expired_probe_sets_alive_false(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        lines = [
+            '[1700000000.0] no answer yet for icmp_seq=1\n',
+        ]
+        proc = _make_fake_proc(lines, stderr_text=_FATAL_STDERR)
+        with patch('subprocess.Popen', return_value=proc):
+            _run_ping(m)
+        m._expire_pending(1700000001.5, 1.0)
         assert m.alive is False
+        assert m._pending == {}
 
     def test_no_answer_sets_latency_none(self, pb):
         m = pb.PingMonitor('10.0.0.1')
@@ -152,7 +172,7 @@ class TestPingMonitorTimeoutLine:
             _run_ping(m)
         assert m.latency is None
 
-    def test_no_answer_increments_xx_count(self, pb):
+    def test_expired_probes_increment_xx_count(self, pb):
         m = pb.PingMonitor('10.0.0.1')
         lines = [
             '[1700000000.0] no answer yet for icmp_seq=1\n',
@@ -161,9 +181,12 @@ class TestPingMonitorTimeoutLine:
         proc = _make_fake_proc(lines, stderr_text=_FATAL_STDERR)
         with patch('subprocess.Popen', return_value=proc):
             _run_ping(m)
+        assert m.xx_count == 0, "nothing counted while the probes are outstanding"
+        m._expire_pending(1700000002.5, 1.0)
         assert m.xx_count == 2
+        assert m.ping_count == 2, "each probe counted once, not twice"
 
-    def test_no_answer_appends_none_to_history(self, pb):
+    def test_expired_probe_appends_none_to_history(self, pb):
         m = pb.PingMonitor('10.0.0.1')
         lines = [
             '[1700000000.0] no answer yet for icmp_seq=1\n',
@@ -171,6 +194,19 @@ class TestPingMonitorTimeoutLine:
         proc = _make_fake_proc(lines, stderr_text=_FATAL_STDERR)
         with patch('subprocess.Popen', return_value=proc):
             _run_ping(m)
+        assert None not in m.history, "no cell until the probe is written off"
+        m._expire_pending(1700000001.5, 1.0)
+        assert None in m.history
+
+    def test_no_seq_falls_back_to_immediate_loss(self, pb):
+        """Without a seq there is nothing to reconcile later, so fail closed."""
+        m = pb.PingMonitor('10.0.0.1')
+        lines = ['[1700000000.0] no answer yet\n']
+        proc = _make_fake_proc(lines, stderr_text=_FATAL_STDERR)
+        with patch('subprocess.Popen', return_value=proc):
+            _run_ping(m)
+        assert m.alive is False
+        assert m.xx_count == 1
         assert None in m.history
 
 
@@ -330,7 +366,126 @@ class TestPingMonitorStopWhileRunning:
         proc = _make_fake_proc(lines, stderr_text=_FATAL_STDERR)
         with patch('subprocess.Popen', return_value=proc):
             _run_ping(m)
-        hist = list(m.history)
-        assert hist[:3] == [2.0, None, 3.0]
+        # seq 2 is still outstanding: its cell appears only once written off.
+        assert list(m.history)[:2] == [2.0, 3.0]
         assert m.rx_count == 2
+        assert m.xx_count == 0
+        m._expire_pending(1700000003.5, 1.0)
+        assert None in m.history
         assert m.xx_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Late replies — a host whose RTT exceeds the ping interval
+# ---------------------------------------------------------------------------
+
+class TestLateReply:
+    """`ping -O` reports "no answer yet" once the interval elapses, so a host
+    slower than the interval emits BOTH lines for every probe.  Counting them
+    independently made one probe register as a failure *and* a success: 50 %
+    loss on a host losing nothing, doubled tx, and a 1 Hz up/down oscillation.
+    """
+
+    # One probe, answered 206 ms after the '-O' deadline.
+    LATE_PAIR = [
+        '[1700000001.000] no answer yet for icmp_seq=7\n',
+        '[1700000001.206] 64 bytes from 10.0.0.1: icmp_seq=7 ttl=63 time=1206 ms\n',
+    ]
+
+    def _run(self, pb, lines):
+        m = pb.PingMonitor('10.0.0.1')
+        proc = _make_fake_proc(lines, stderr_text=_FATAL_STDERR)
+        with patch('subprocess.Popen', return_value=proc):
+            _run_ping(m)
+        return m
+
+    def test_late_reply_yields_one_cell(self, pb):
+        m = self._run(pb, self.LATE_PAIR)
+        cells = [v for v in m.history if v != 'ERR']
+        assert len(cells) == 1, f"one probe must leave one cell, got {cells}"
+
+    def test_late_cell_is_marked_late(self, pb):
+        m = self._run(pb, self.LATE_PAIR)
+        cell = [v for v in m.history if v != 'ERR'][0]
+        assert pb._hist_is_late(cell)
+        assert pb._hist_rtt(cell) == 1206.0, "the measured RTT must survive"
+
+    def test_late_reply_counts_as_success_not_loss(self, pb):
+        m = self._run(pb, self.LATE_PAIR)
+        assert m.rx_count == 1
+        assert m.xx_count == 0
+
+    def test_no_double_count_of_tx(self, pb):
+        """ping_count was incremented by BOTH lines for a single probe."""
+        m = self._run(pb, self.LATE_PAIR)
+        assert m.ping_count == 1
+
+    def test_loss_percent_is_zero(self, pb):
+        """Loss% is xx/(rx+xx) — a zero-loss host used to report 50 %."""
+        m = self._run(pb, self.LATE_PAIR * 4)
+        assert m.xx_count == 0
+        assert m.rx_count == 4
+        loss = m.xx_count / (m.rx_count + m.xx_count) * 100
+        assert loss == 0.0
+
+    def test_alive_never_goes_false(self, pb):
+        """The flapping regression: `alive` must not dip between the two lines."""
+        m = self._run(pb, self.LATE_PAIR * 3)
+        assert m.alive is True
+        assert m._pending == {}, "every probe was answered; none left outstanding"
+
+    def test_latency_reflects_the_late_reply(self, pb):
+        m = self._run(pb, self.LATE_PAIR)
+        assert m.latency == 1206.0
+
+    def test_late_rtt_feeds_the_stats(self, pb):
+        m = self._run(pb, self.LATE_PAIR)
+        assert m.lat_avg == 1206.0
+
+    def test_success_mode_renders_lowercase_x(self, pb):
+        m = self._run(pb, self.LATE_PAIR)
+        assert pb._history_char(-1206.0, 'success') == 'x'
+        assert pb._history_char(1206.0, 'success') == '.'
+
+    def test_rtt_mode_shows_the_number_not_a_glyph(self, pb):
+        """Late cells keep their RTT, so rtt/scaled still read as measurements."""
+        assert pb._history_char(-1206.0, 'rtt') == pb._history_char(1206.0, 'rtt')
+        assert pb._history_char(-42.0, 'scaled') == pb._history_char(42.0, 'scaled')
+
+    def test_wide_cell_renders_magnitude(self, pb):
+        """The wide-cell path formats int(round(val)); a negative would break it."""
+        m = pb.PingMonitor('10.0.0.1')
+        with m.lock:
+            m.history.append(-1206.0)
+            m.history_times.append(1700000001.0)
+        out = m.get_history_string(length=1, mode='rtt', cell_width=5)
+        assert '1206' in out, out
+        assert '-' not in out
+
+    def test_on_time_reply_is_not_marked_late(self, pb):
+        m = self._run(pb, [
+            '[1700000000.0] 64 bytes from 10.0.0.1: icmp_seq=1 ttl=64 time=2.0 ms\n',
+        ])
+        cell = [v for v in m.history if v != 'ERR'][0]
+        assert not pb._hist_is_late(cell)
+        assert cell == 2.0
+
+    def test_unrelated_seq_does_not_clear_a_pending_probe(self, pb):
+        """A reply for seq 9 must not resolve an outstanding seq 7."""
+        m = self._run(pb, [
+            '[1700000001.0] no answer yet for icmp_seq=7\n',
+            '[1700000002.0] 64 bytes from 10.0.0.1: icmp_seq=9 ttl=64 time=3.0 ms\n',
+        ])
+        assert 7 in m._pending
+        cells = [v for v in m.history if v != 'ERR']
+        assert cells == [3.0], "seq 9 lands on time; seq 7 is still outstanding"
+
+
+class TestWorstHistoryCharLate:
+
+    def test_late_ranks_between_lost_and_ok(self, pb):
+        w = pb.Application._worst_history_char
+        assert w(['.', 'x']) == 'x'
+        assert w(['x', 'X']) == 'X'
+        assert w(['x', '?']) == '?'
+        assert w(['.', '.']) == '.'

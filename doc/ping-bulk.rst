@@ -534,6 +534,27 @@ Key bindings
 ``:bind-key``
     List all user-defined key bindings in the event log.
 
+``:set late-grace <seconds>``
+    How long a probe reported unanswered by ``ping -O`` may still be
+    answered before it counts as lost.  Default: ``1``.
+
+    **Late replies.**  ``ping -O`` prints ``no answer yet for icmp_seq=N``
+    as soon as the *next* request goes out, so its deadline is the ping
+    interval (1 s) — not ``-W``.  A host whose RTT exceeds that interval
+    therefore has every probe reported unanswered and then answered a
+    moment later.  ping-bulk pairs the two by ``icmp_seq``: such a probe
+    is a single reply, drawn ``x`` (yellow) instead of ``.``, counted as
+    one success, and it never marks the host down.
+
+    A probe still unanswered *late-grace* seconds after the ``-O`` line is
+    written off as genuinely lost — drawn ``X``, counted in ``XX``, and the
+    host goes down.  So the effective tolerance is the ping interval plus
+    this value: the default catches replies up to about 2 s.
+
+    Raising it tolerates slower hosts but delays down-detection by the same
+    amount; lowering it detects outages sooner at the cost of drawing very
+    slow hosts as down.  Saved by ``:save-config`` when not the default.
+
 ``:set multikey-timeout <ms>``
     Set the multi-key timeout in milliseconds (0–2000).
     Default: ``0`` (wait forever for the next key in a multi-key sequence).
@@ -1228,8 +1249,9 @@ non-zero:
     Hosts with at least one successful reply (``alive = True``).
 
 ``N↓`` (red)
-    Hosts that last received a timeout or "no answer" reply
-    (``alive = False``).
+    Hosts whose last probe was written off as lost (``alive = False``).
+    A probe that ``ping -O`` reported as unanswered is *not* counted here
+    until the ``late-grace`` window expires — see **Late replies** below.
 
 ``N-`` (yellow)
     Hosts that have not yet received any reply — either because they

@@ -963,3 +963,59 @@ class TestSettingsOverlay:
             app._help_search_jump(+1)
             # Cursor is still a valid param index
             assert 0 <= app.settings_cursor < len(pb.SET_PARAMS)
+
+
+class TestLateGraceSetting:
+    """`:set late-grace` bounds how long an unanswered probe may still arrive."""
+
+    def _app(self, pb, tmp_path, config=''):
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        with open(cfg, 'w') as f:
+            f.write(config)
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app = pb.Application([('host', '127.0.0.1')])
+        return app, cfg
+
+    def test_default_is_one_second(self, pb, tmp_path):
+        app, _ = self._app(pb, tmp_path)
+        assert app.late_grace == 1.0
+
+    def test_set_accepts_a_float(self, pb, tmp_path):
+        app, _ = self._app(pb, tmp_path)
+        app._dispatch_cmd(':set late-grace 2.5')
+        assert app.late_grace == 2.5
+
+    def test_zero_is_allowed(self, pb, tmp_path):
+        """0 restores the old behaviour: a '-O' line is an immediate loss."""
+        app, _ = self._app(pb, tmp_path)
+        app._dispatch_cmd(':set late-grace 0')
+        assert app.late_grace == 0.0
+
+    def test_negative_is_rejected(self, pb, tmp_path):
+        app, _ = self._app(pb, tmp_path)
+        app._dispatch_cmd(':set late-grace -1')
+        assert app.late_grace == 1.0
+        assert any('invalid value' in e.text for e in app.events)
+
+    def test_garbage_is_rejected(self, pb, tmp_path):
+        app, _ = self._app(pb, tmp_path)
+        app._dispatch_cmd(':set late-grace soon')
+        assert app.late_grace == 1.0
+
+    def test_default_not_written_to_config(self, pb, tmp_path):
+        app, cfg = self._app(pb, tmp_path)
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app._save_config()
+        assert 'late-grace' not in open(cfg).read()
+
+    def test_non_default_is_written(self, pb, tmp_path):
+        app, cfg = self._app(pb, tmp_path)
+        app._dispatch_cmd(':set late-grace 3')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app._save_config()
+        assert ':set late-grace 3' in open(cfg).read()
+
+    def test_config_round_trip(self, pb, tmp_path):
+        app, _ = self._app(pb, tmp_path, config=':set late-grace 2\n')
+        assert app.late_grace == 2.0
