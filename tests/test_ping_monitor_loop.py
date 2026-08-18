@@ -749,3 +749,142 @@ class TestStaleLossAndPending:
         m._record_no_answer(1001.0, 2)
         m._record_stale_loss(time.time())
         assert list(m._pending) == [2], "the oldest outstanding probe goes first"
+
+
+class TestStaleWatchdog:
+    """A wedged child must be killed, not merely reported forever.
+
+    Reporting losses makes a stuck child visible, but nothing ends it: poll()
+    stays None, so the loop would emit a loss every window for days.  The
+    watchdog terminates it so the backoff loop can start a fresh one.
+    """
+
+    def _wedged(self, pb, windows_to_wait):
+        """Start a monitor whose child talks once, then goes silent forever."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._STALE_SECS = 0.1
+        proc = FakeProc(close=False)
+        t = threading.Thread(target=m.ping, daemon=True)
+        return m, proc, t
+
+    def test_wedged_child_is_terminated(self, pb):
+        m, proc, t = self._wedged(pb, 3)
+        with patch('subprocess.Popen', return_value=proc):
+            t.start()
+            proc.feed_stdout('[1700000000.0] 64 bytes from 10.0.0.1: '
+                             'icmp_seq=1 ttl=64 time=1.0 ms\n')
+            deadline = time.time() + 5.0
+            while not proc.terminated and time.time() < deadline:
+                time.sleep(0.02)
+            m.running = False
+            t.join(5.0)
+        assert proc.terminated, "a silent child should have been signalled"
+
+    def test_termination_needs_the_configured_number_of_windows(self, pb):
+        """One quiet window is normal jitter, not a wedge."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._STALE_SECS = 0.5
+        m._STALE_MAX_WINDOWS = 100          # effectively never, within the test
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            proc.feed_stdout('[1700000000.0] 64 bytes from 10.0.0.1: '
+                             'icmp_seq=1 ttl=64 time=1.0 ms\n')
+            deadline = time.time() + 2.0
+            while m.xx_count < 1 and time.time() < deadline:
+                time.sleep(0.02)
+            assert m.xx_count >= 1, "should be recording losses"
+            assert not proc.terminated, "must not kill before the limit"
+            m.running = False
+            t.join(5.0)
+        proc.cleanup()
+
+    def test_silent_child_that_never_spoke_is_left_alone(self, pb):
+        """A slow ssh connect produces no output yet — killing it would loop."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._STALE_SECS = 0.1
+        m._STALE_MAX_WINDOWS = 1
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            time.sleep(0.8)                 # many windows, still no output
+            assert not proc.terminated, "a child that never spoke must be given time"
+            assert None not in m.history, "and must not be counted as loss"
+            m.running = False
+            t.join(5.0)
+        proc.cleanup()
+
+    def test_output_resets_the_counter(self, pb):
+        """Intermittent output must not accumulate towards a kill."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._STALE_SECS = 0.1
+        m._STALE_MAX_WINDOWS = 4
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            for i in range(6):
+                proc.feed_stdout(f'[17000000{i:02d}.0] 64 bytes from 10.0.0.1: '
+                                 f'icmp_seq={i + 1} ttl=64 time=1.0 ms\n')
+                time.sleep(0.25)            # ~2 windows between replies
+            assert not proc.terminated, (
+                "a host answering every other window is slow, not wedged")
+            m.running = False
+            t.join(5.0)
+        proc.cleanup()
+
+    def test_restart_after_termination(self, pb):
+        """The point of killing it: a fresh child gets started."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._STALE_SECS = 0.1
+        made = []
+        fed = set()
+
+        def fake_popen(*a, **kw):
+            p = FakeProc(close=False)
+            made.append(p)
+            return p
+
+        with patch('subprocess.Popen', side_effect=fake_popen):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            deadline = time.time() + 10.0
+            while len(made) < 2 and time.time() < deadline:
+                # Each child speaks exactly once, then stays silent so the
+                # watchdog has something to detect.
+                if made and id(made[-1]) not in fed:
+                    fed.add(id(made[-1]))
+                    try:
+                        made[-1].feed_stdout(
+                            '[1700000000.0] 64 bytes from 10.0.0.1: '
+                            'icmp_seq=1 ttl=64 time=1.0 ms\n')
+                    except OSError:
+                        pass
+                time.sleep(0.05)
+            m.running = False
+            t.join(5.0)
+        for p in made:
+            p.cleanup()
+        assert made[0].terminated, "the first child should have been killed"
+        assert len(made) >= 2, f"expected a respawn, got {len(made)} child(ren)"
+
+    def test_watchdog_reports_itself(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._STALE_SECS = 0.1
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            proc.feed_stdout('[1700000000.0] 64 bytes from 10.0.0.1: '
+                             'icmp_seq=1 ttl=64 time=1.0 ms\n')
+            deadline = time.time() + 5.0
+            while not proc.terminated and time.time() < deadline:
+                time.sleep(0.02)
+            m.running = False
+            t.join(5.0)
+        notices = m.take_new_stderr()
+        assert any('restarting ping' in n for n in notices), notices
+        # and it is available to explain a down transition
+        assert 'restarting ping' in (m.recent_stderr() or '')

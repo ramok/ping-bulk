@@ -2213,6 +2213,10 @@ class SubprocessMonitor(Monitor):
     # the host reads as down instead of freezing at its last value.  Slightly
     # above the 1 s ping interval so normal jitter never trips it.
     _STALE_SECS = 2.0
+    # Consecutive empty windows before the child is presumed wedged and killed.
+    # Only counted once it has produced output, so a slow ssh connect is never
+    # mistaken for a hang.
+    _STALE_MAX_WINDOWS = 3
     # Whether ping's '-D' timestamp prefix can be trusted as the send time.
     # False over ssh: the stamp is written on the remote side, and we only know
     # when the line reached us.
@@ -2317,7 +2321,16 @@ class SubprocessMonitor(Monitor):
 
             if not self.running:
                 break
-            self._proc.wait()
+            # Bounded: the watchdog above may have just signalled the child, and
+            # an unbounded wait here would trade one hang for another.
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired, ProcessLookupError):
+                    pass
 
             # Only a run that never produced a single result line can be fatal.
             # A run that worked and then exited may have written anything to
@@ -2353,6 +2366,7 @@ class SubprocessMonitor(Monitor):
         buf = {'out': b'', 'err': b''}
         open_fds = set(fds)
         got_output = False
+        stale = 0            # consecutive empty select windows, for the watchdog
 
         while self.running:
             if not open_fds:
@@ -2364,7 +2378,20 @@ class SubprocessMonitor(Monitor):
                 # not reported as packet loss.
                 if got_output:
                     self._record_stale_loss(time.time())
+                    stale += 1
                 if self._proc.poll() is not None:
+                    break
+                if got_output and stale >= self._STALE_MAX_WINDOWS:
+                    # Reporting a stuck child as losses is honest but never ends:
+                    # nothing else terminates it, so it would sit there for days.
+                    # Kill it and let the backoff loop start a fresh one.
+                    silent = self._STALE_SECS * stale
+                    self._note_stderr(
+                        f'{_PROG_NAME}: no output for {silent:.0f}s — restarting ping')
+                    try:
+                        self._proc.terminate()
+                    except (OSError, ProcessLookupError):
+                        pass
                     break
                 continue
             if not self.running:
@@ -2381,6 +2408,7 @@ class SubprocessMonitor(Monitor):
                 if not chunk:                 # EOF on this pipe
                     open_fds.discard(fd)
                     continue
+                stale = 0                     # the child is talking again
                 buf[which] += chunk
                 while b'\n' in buf[which]:
                     raw, buf[which] = buf[which].split(b'\n', 1)

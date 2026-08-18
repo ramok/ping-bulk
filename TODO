@@ -316,6 +316,46 @@ Events [SPACE to set "seen" mark] [PgUp to scroll]                              
       that re-armed probing on every DOWN->UP is gone now, so revisit only if
       no-rt persists on a host known to answer -T.
 
+## Wedged ping / stderr deadlock (2026-08-18)
+
+- [x] DONE root cause: both monitors read only stdout and drained stderr after
+      the loop — i.e. never, for a process started without -w.  The child filled
+      the stderr pipe (8 KiB here, ~200 per-probe error lines, ~3.5 min), blocked
+      in write(2,...), stopped pinging AND stopped writing stdout while the parent
+      waited on stdout.  strace on the NAS showed  write(2, "ping: ", 6.
+      Symptom: frozen row; in sync-history mode, one blank per second.
+- [x] Both loops hoisted into SubprocessMonitor: select() on BOTH pipes, raw
+      os.read + own line assembly (select cannot see a line already buffered in a
+      TextIOWrapper — the ssh path had that latent bug).  PortMonitor unaffected.
+- [x] Local path gained the staleness detection it never had, so a stuck child
+      shows as losses rather than freezing.
+- [x] Watchdog: after _STALE_MAX_WINDOWS (3) silent windows the child is
+      terminated and respawned; logs "ping-bulk: no output for Ns — restarting
+      ping" once, and that text becomes the reason on the host-down event.
+      Gated on prior output so a slow ssh connect is not cut short.
+      Verified live: ...XXX...XXX...XXX... cycle, RX climbing 3->7->12 instead of
+      freezing, exactly one child alive after 45s of cycles (no leak/zombies).
+- [x] Fatal classification stays post-exit AND only for a run that produced no
+      result line.  'network is unreachable' is in _FATAL_PING_ERRORS but ping
+      prints it per probe while working; condemning a host for it is permanent
+      because self.error has no reset path.  A review caught that my first cut
+      still got this wrong.
+- [x] Also fixed: stale-window loss now consumes an outstanding icmp_seq, else
+      _expire_pending counted the same probe twice and inflated Loss%.
+- [x] Test harness reworked to real os.pipe() pairs.  The old MagicMock harness
+      used fatal stderr as the loop terminator, so no test ever exercised a live
+      stderr stream — which is why this survived 1600 tests.  The flood test
+      times out against the old code.
+
+- [ ] STILL OPEN: monitor.error is a one-way trapdoor — 6 setters, no reset
+      anywhere.  Not needed while classification stays post-exit, but it is the
+      reason the safe fix had to be conservative.
+- [ ] STILL OPEN: _edit_reload_inplace calls t.join(timeout=0), a no-op; old
+      threads are abandoned and rely on running=False + terminate().
+- [ ] STILL OPEN: a child that never produces any output (e.g. ssh hanging on
+      connect) is not watchdogged — deliberately, to avoid killing a slow
+      connect.  A separate, longer first-output deadline would close it.
+
 ## STILL OPEN from this review
 - Pinned overlay rows ignore h_scroll, and max_line_w excludes them, so a
   header wider than the box cannot be scrolled into view. It now degrades at

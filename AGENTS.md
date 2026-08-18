@@ -104,8 +104,13 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
   is in `_FATAL_PING_ERRORS`, but ping prints it *per probe* while continuing to
   run — classifying mid-stream would permanently kill a host over a transient
   route flap, and `self.error` has no reset path anywhere.
+- **A silent child is killed, not just reported.** After `_STALE_MAX_WINDOWS`
+  empty read windows the child is terminated so the backoff loop replaces it —
+  a stuck process neither exits nor speaks, so nothing else would ever end that
+  state. Gated on having seen output first, or a slow SSH connect would be cut
+  short in a loop.
 - Subclasses override only `_build_ping_cmd()`, `_is_fatal_error()`, and the class
-  attributes `_STALE_SECS` / `_trust_ping_timestamp`.
+  attributes `_STALE_SECS` / `_STALE_MAX_WINDOWS` / `_trust_ping_timestamp`.
 
 ### Method Categorization
 

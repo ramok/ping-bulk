@@ -1537,6 +1537,13 @@ EVENT LOG
   ``ping: sendmsg: Network is unreachable``).  Such a message can repeat for
   every probe, so each distinct text is reported **once** per host rather than
   once per second.
+- ``ping-bulk: no output for Ns — restarting ping``.  A ``ping`` that has been
+  answering and then goes completely silent is presumed stuck: the missed
+  probes are recorded as losses, and after a few silent intervals the process
+  is terminated and a fresh one started.  Nothing else would end that state —
+  a stuck child neither exits nor speaks — so without this the host would stay
+  frozen at its last reading indefinitely.  A process that has not produced any
+  output *yet* is left alone, so a slow SSH connection is never cut short.
 
 Each line is prefixed with an ISO 8601 timestamp including timezone
 offset::
