@@ -1870,6 +1870,9 @@ class Monitor(ABC):
         # and to explain a down transition.  Bounded: a per-probe error can
         # repeat every second for days.
         self._stderr_lines = deque(maxlen=self._STDERR_KEEP)
+        self._seen_stderr = set()   # message texts already surfaced, to log once each
+        self._new_stderr = []       # first-time messages awaiting the event log
+        self.last_stderr = None     # (text, wall ts) of the most recent stderr line
         self._proc = None          # active Popen handle for the persistent ping subprocess
         self.resolv_static = False # True when a :resolv static mapping overrides DNS
         # ── Remote-clock probe state ('ping -T tsandaddr') ────────────────────
@@ -1935,9 +1938,29 @@ class Monitor(ABC):
         if v > self._lat_max:
             self._lat_max = v
 
+    # Beyond this age a stderr message is not offered as the reason for a down
+    # transition — an hour-old warning should not be pinned on a fresh outage.
+    _STDERR_REASON_MAX_AGE = 30.0
     # How many recent stderr lines to keep for post-exit classification.  Bounded
     # because a per-probe error can repeat every second for days.
     _STDERR_KEEP = 20
+    # Ceiling on how many distinct stderr texts are remembered per monitor.
+    _SEEN_STDERR_MAX = 100
+
+    def recent_stderr(self, now=None):
+        """Return the last stderr line if recent enough to explain a state change."""
+        now = time.time() if now is None else now
+        with self.lock:
+            if not self.last_stderr:
+                return None
+            text, ts = self.last_stderr
+        return text if now - ts <= self._STDERR_REASON_MAX_AGE else None
+
+    def take_new_stderr(self):
+        """Pop stderr messages seen for the first time, for the event log."""
+        with self.lock:
+            out, self._new_stderr = self._new_stderr, []
+        return out
 
     # ── Probe bookkeeping ─────────────────────────────────────────────────────
     # 'ping -O' prints "no answer yet for icmp_seq=N" when no reply arrived by
@@ -2237,6 +2260,19 @@ class SubprocessMonitor(Monitor):
             return
         with self.lock:
             self._stderr_lines.append(line)
+            self.last_stderr = (line, time.time())
+            # Capped: this process is expected to run for days, and a message
+            # carrying a varying detail would otherwise grow the set without
+            # bound.  Past the cap we stop reporting new texts rather than stop
+            # monitoring — the first hundred have said enough.
+            fresh = (line not in self._seen_stderr
+                     and len(self._seen_stderr) < self._SEEN_STDERR_MAX)
+            if fresh:
+                self._seen_stderr.add(line)
+                # Queued rather than logged here: a Monitor has no route to the
+                # event log, and the state loop already visits every monitor.
+                self._new_stderr.append(line)
+        return fresh
 
     def ping(self):
         """Run the child process, restarting it with backoff on unexpected exit.
@@ -5083,6 +5119,13 @@ class Application:
                 # this same pass, keeping the down transition prompt.
                 monitor._expire_pending(wall_now, self.late_grace)
 
+                # Surface each distinct stderr message once.  A per-probe error
+                # repeats every second for as long as it lasts, so logging every
+                # occurrence would bury everything else.
+                for text in monitor.take_new_stderr():
+                    self.add_event(monitor.get_display_name(dns_mode='off'),
+                                   text, level=LEVEL_NORMAL)
+
                 # Log a fatal process error exactly once, as soon as it is detected.
                 if monitor.error is not None and not monitor.error_logged:
                     monitor.error_logged = True
@@ -5143,6 +5186,11 @@ class Application:
                         if monitor._pending_uptime is not None:
                             msg += f".    Up time:   {self._format_downtime(monitor._pending_uptime)}"
                             monitor._pending_uptime = None
+                        reason = monitor.recent_stderr(wall_now)
+                        if reason:
+                            # Say why, when the child told us.  Without this the
+                            # only way to learn the cause was strace.
+                            msg += f"  ({reason})"
                         self.add_event(display_name, msg)
 
                 # Remote-clock probe dispatch: when the Drift stat is shown,

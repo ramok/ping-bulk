@@ -313,3 +313,61 @@ class TestCheckStateChanges:
         assert m.last_state is False
         texts = [e.text for e in app.events]
         assert not any("host down" in t for t in texts)
+
+
+class TestStderrDiagnostics:
+    """A per-probe ping error should be stated once, and explain a down event.
+
+    Before this, a route flap showed only as lost probes with no stated cause —
+    the reason the field diagnosis needed strace.
+    """
+
+    def test_first_occurrence_is_queued(self, pb, tmp_path):
+        m = pb.PingMonitor('10.0.0.1')
+        assert m._note_stderr('ping: sendmsg: Network is unreachable') is True
+        assert m.take_new_stderr() == ['ping: sendmsg: Network is unreachable']
+
+    def test_repeat_is_not_queued_again(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        for _ in range(50):
+            m._note_stderr('ping: sendmsg: Network is unreachable')
+        assert len(m.take_new_stderr()) == 1, "a flood must be reported once"
+
+    def test_distinct_messages_each_reported(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_stderr('ping: sendmsg: Network is unreachable')
+        m._note_stderr('ping: local error: Message too long')
+        assert len(m.take_new_stderr()) == 2
+
+    def test_take_drains(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_stderr('ping: something')
+        assert m.take_new_stderr()
+        assert m.take_new_stderr() == [], "already reported"
+
+    def test_blank_lines_ignored(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_stderr('   ')
+        assert m.take_new_stderr() == []
+
+    def test_recent_stderr_offered_as_reason(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_stderr('ping: sendmsg: Network is unreachable')
+        assert m.recent_stderr() == 'ping: sendmsg: Network is unreachable'
+
+    def test_stale_stderr_not_offered_as_reason(self, pb):
+        """An old warning must not be blamed for a fresh outage."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_stderr('ping: sendmsg: Network is unreachable')
+        assert m.recent_stderr(time.time() + 3600) is None
+
+    def test_no_stderr_no_reason(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        assert m.recent_stderr() is None
+
+    def test_seen_set_is_capped(self, pb):
+        """Runs last for days; varying message text must not grow memory."""
+        m = pb.PingMonitor('10.0.0.1')
+        for i in range(m._SEEN_STDERR_MAX + 50):
+            m._note_stderr(f'ping: transient failure #{i}')
+        assert len(m._seen_stderr) <= m._SEEN_STDERR_MAX

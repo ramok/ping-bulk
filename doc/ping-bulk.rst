@@ -1533,12 +1533,21 @@ EVENT LOG
 - Host recovers (first successful ping after being down), including
   total downtime.
 - Fatal process errors (DNS resolution failure, permission denied, …).
+- Diagnostic messages written by ``ping`` itself (e.g.
+  ``ping: sendmsg: Network is unreachable``).  Such a message can repeat for
+  every probe, so each distinct text is reported **once** per host rather than
+  once per second.
 
 Each line is prefixed with an ISO 8601 timestamp including timezone
 offset::
 
     2026-03-20T14:05:32+0200   192.168.1.1   host down
     2026-03-20T14:06:10+0200   192.168.1.1   host recover. Down time: 38 sec
+
+When ``ping`` reported a reason shortly before the host went down, that reason
+is appended to the *host down* line, so the log says why and not merely that::
+
+    2026-03-20T14:05:32+0200   192.168.1.1   host down.    Up time:   3600 sec (60 min 0 sec)  (ping: sendmsg: Network is unreachable)
 
 The log is scrollable in the UI (``↑``/``↓``/``PgUp``/``PgDn``) and
 can be streamed to a file with ``-l``/``--log-file`` or ``:log``.

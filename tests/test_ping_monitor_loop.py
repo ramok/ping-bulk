@@ -550,6 +550,7 @@ class TestStderrIsDrained:
             proc.cleanup()
             t.join(5.0)
         assert len(m._stderr_lines) <= 20, "the kept-lines buffer must stay bounded"
+        assert m.last_stderr is not None
 
     def test_transient_error_does_not_set_fatal_error(self, pb):
         """'network is unreachable' is in _FATAL_PING_ERRORS, but ping prints it
