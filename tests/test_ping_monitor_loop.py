@@ -22,6 +22,8 @@ import threading
 import time
 from unittest.mock import patch, MagicMock
 
+from proc_helper import FakeProc
+
 import pytest
 
 
@@ -30,14 +32,14 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _make_fake_proc(stdout_lines, stderr_text=''):
-    """Return a MagicMock that mimics a Popen object."""
-    proc = MagicMock()
-    # stdout is iterated line-by-line in ping()
-    proc.stdout = iter(stdout_lines)
-    proc.stderr.read.return_value = stderr_text
-    proc.wait.return_value = None
-    proc.poll.return_value = None
-    return proc
+    """Return a Popen stand-in backed by real pipes.
+
+    The loop selects on both pipes and reads raw fds, so a MagicMock will not do
+    — it has no fileno().  Closing the write ends gives EOF, which is what ends
+    one iteration of the loop; a fatal stderr_text then stops it for good, as
+    before.
+    """
+    return FakeProc(stdout_lines=stdout_lines, stderr_text=stderr_text)
 
 
 _FATAL_STDERR = 'ping: name or service not known\n'
@@ -336,24 +338,29 @@ class TestPingMonitorNonFatalRetry:
 class TestPingMonitorStopWhileRunning:
 
     def test_stop_flag_exits_loop(self, pb):
-        """Setting running=False mid-loop causes ping() to exit cleanly."""
+        """running=False makes ping() exit without consuming further output."""
         m = pb.PingMonitor('10.0.0.1')
-
-        def slow_stdout():
-            yield '[1700000000.0] 64 bytes from 10.0.0.1: icmp_seq=1 ttl=64 time=1.0 ms\n'
-            m.running = False
-            yield '[1700000001.0] 64 bytes from 10.0.0.1: icmp_seq=2 ttl=64 time=2.0 ms\n'
-
-        proc = MagicMock()
-        proc.stdout = slow_stdout()
-        proc.stderr.read.return_value = ''
-        proc.wait.return_value = None
+        proc = FakeProc(close=False)          # keep the pipes open
 
         with patch('subprocess.Popen', return_value=proc):
-            _run_ping(m, timeout=5.0)
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            proc.feed_stdout('[1700000000.0] 64 bytes from 10.0.0.1: '
+                             'icmp_seq=1 ttl=64 time=1.0 ms\n')
+            deadline = time.time() + 5.0
+            while len(m.history) < 1 and time.time() < deadline:
+                time.sleep(0.01)
+            assert len(m.history) == 1, "first line should be consumed"
 
-        # Should only have one history entry (second line not processed)
-        assert len(m.history) == 1
+            m.running = False
+            # Arriving after the stop flag: the loop must bail rather than parse it.
+            proc.feed_stdout('[1700000001.0] 64 bytes from 10.0.0.1: '
+                             'icmp_seq=2 ttl=64 time=2.0 ms\n')
+            t.join(5.0)
+
+        assert not t.is_alive(), "ping() should have exited"
+        assert len(m.history) == 1, "output after running=False must be ignored"
+        proc.cleanup()
 
     def test_mixed_success_then_timeout(self, pb):
         """History tracks both success and timeout lines correctly."""
@@ -489,3 +496,255 @@ class TestWorstHistoryCharLate:
         assert w(['x', 'X']) == 'X'
         assert w(['x', '?']) == '?'
         assert w(['.', '.']) == '.'
+
+
+# ---------------------------------------------------------------------------
+# The deadlock: a child that fills the stderr pipe
+# ---------------------------------------------------------------------------
+
+class TestStderrIsDrained:
+    """ping must not be able to block writing to stderr.
+
+    The loop used to read only stdout and drain stderr afterwards — which for a
+    process that never exits means never.  Once the pipe filled, the child blocked
+    in write(2, ...), stopped sending ICMP and stopped writing stdout, while the
+    parent sat waiting on stdout.  Nothing recovered; the row simply froze.
+    """
+
+    def test_stderr_flood_does_not_stall_stdout(self, pb):
+        """The load-bearing test: >1 pipeful of stderr while stdout keeps flowing."""
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            # 256 KiB is many times any pipe capacity (8-64 KiB), so this writer
+            # can only finish if someone is reading fd 2.
+            writer = proc.flood_stderr(256 * 1024)
+            deadline = time.time() + 10.0
+            seq = 0
+            while time.time() < deadline and m.rx_count < 5:
+                seq += 1
+                proc.feed_stdout(f'[{time.time():.6f}] 64 bytes from 10.0.0.1: '
+                                 f'icmp_seq={seq} ttl=64 time=1.0 ms\n')
+                time.sleep(0.05)
+            m.running = False
+            proc.cleanup()
+            t.join(5.0)
+        writer.join(2.0)
+        assert m.rx_count >= 5, (
+            f"stdout stalled while stderr filled — only {m.rx_count} replies parsed")
+        assert not writer.is_alive(), "the stderr writer never unblocked"
+
+    def test_flood_is_recorded_but_bounded(self, pb):
+        """A day-long flood must not accumulate without limit."""
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            for i in range(200):
+                proc.feed_stderr(f'ping: sendmsg: error number {i}\n')
+            time.sleep(0.5)
+            m.running = False
+            proc.cleanup()
+            t.join(5.0)
+        assert len(m._stderr_lines) <= 20, "the kept-lines buffer must stay bounded"
+
+    def test_transient_error_does_not_set_fatal_error(self, pb):
+        """'network is unreachable' is in _FATAL_PING_ERRORS, but ping prints it
+        per probe while continuing to run.  Treating that as fatal mid-stream
+        would kill the host permanently — self.error has no reset path."""
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            for _ in range(5):
+                proc.feed_stderr('ping: sendmsg: Network is unreachable\n')
+            proc.feed_stdout('[1700000000.0] 64 bytes from 10.0.0.1: '
+                             'icmp_seq=1 ttl=64 time=1.0 ms\n')
+            deadline = time.time() + 5.0
+            while m.rx_count < 1 and time.time() < deadline:
+                time.sleep(0.01)
+            m.running = False
+            proc.cleanup()
+            t.join(5.0)
+        assert m.error is None, "a transient per-probe error must not be fatal"
+        assert m.alive is True, "the host is answering, so it is up"
+
+    def test_fatal_error_still_detected_after_exit(self, pb):
+        """Classification still happens, just only once the child has exited."""
+        m = pb.PingMonitor('10.0.0.1')
+        proc = _make_fake_proc([], stderr_text='ping: name or service not known\n')
+        with patch('subprocess.Popen', return_value=proc):
+            _run_ping(m)
+        assert m.error is not None
+        assert 'not known' in m.error.lower()
+
+    def test_line_split_across_reads_is_reassembled(self, pb):
+        """A reply arriving in two chunks must still parse as one probe.
+
+        This is why the loop reads raw fds and assembles lines itself: select()
+        cannot see a line already sitting in a TextIOWrapper buffer.
+        """
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            proc.feed_stdout('[1700000000.0] 64 bytes from 10.0.0.1: icmp_')
+            time.sleep(0.2)                      # force a separate os.read
+            proc.feed_stdout('seq=1 ttl=64 time=7.5 ms\n')
+            deadline = time.time() + 5.0
+            while m.rx_count < 1 and time.time() < deadline:
+                time.sleep(0.01)
+            m.running = False
+            proc.cleanup()
+            t.join(5.0)
+        assert m.rx_count == 1
+        assert m.latency == pytest.approx(7.5)
+
+    def test_local_path_records_loss_when_output_stops(self, pb):
+        """The local loop had no staleness detection at all — a wedged child just
+        froze the row.  It now records losses like the ssh path does."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._STALE_SECS = 0.1
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            proc.feed_stdout('[1700000000.0] 64 bytes from 10.0.0.1: '
+                             'icmp_seq=1 ttl=64 time=1.0 ms\n')
+            deadline = time.time() + 5.0
+            while m.rx_count < 1 and time.time() < deadline:
+                time.sleep(0.01)
+            deadline = time.time() + 5.0
+            while None not in m.history and time.time() < deadline:
+                time.sleep(0.01)
+            m.running = False
+            proc.cleanup()
+            t.join(5.0)
+        assert None in m.history, "a stuck child should show as losses, not a freeze"
+
+    def test_pipes_are_closed_between_restarts(self, pb):
+        """Two fds per respawn would leak over a multi-day run."""
+        import os as _os
+        m = pb.PingMonitor('10.0.0.1')
+        made = []
+
+        def fake_popen(*a, **kw):
+            p = FakeProc(stdout_lines=[], stderr_text='')   # immediate EOF
+            made.append(p)
+            return p
+
+        before = len(_os.listdir('/proc/self/fd'))
+        with patch('subprocess.Popen', side_effect=fake_popen):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            deadline = time.time() + 6.0
+            while len(made) < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            m.running = False
+            t.join(5.0)
+        after = len(_os.listdir('/proc/self/fd'))
+        assert len(made) >= 2, "expected the child to be respawned"
+        assert after - before <= 2, (
+            f"fds grew by {after - before} across {len(made)} respawns")
+
+
+class TestFatalClassification:
+    """Only a run that never worked can be fatal.
+
+    stderr accumulated by a *working* child must not condemn it: ping writes
+    per-probe failures there while continuing to run, and self.error has no reset
+    path — so misclassifying once kills the row for the process lifetime.
+    """
+
+    def test_working_run_then_exit_is_not_fatal(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(close=False)
+        with patch('subprocess.Popen', return_value=proc):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            proc.feed_stdout('[1700000000.0] 64 bytes from 10.0.0.1: '
+                             'icmp_seq=1 ttl=64 time=1.0 ms\n')
+            deadline = time.time() + 5.0
+            while m.rx_count < 1 and time.time() < deadline:
+                time.sleep(0.01)
+            # A transient per-probe error, then the child exits for its own reasons.
+            proc.feed_stderr('ping: sendmsg: Network is unreachable\n')
+            time.sleep(0.2)
+            proc.close_child_side()
+            time.sleep(0.5)
+            m.running = False
+            t.join(5.0)
+        assert m.error is None, "a run that delivered replies must not be fatal"
+        assert 'ERR' not in m.history
+
+    def test_run_with_no_output_is_fatal(self, pb):
+        """A structural failure produces no result line at all — that is fatal."""
+        m = pb.PingMonitor('10.0.0.1')
+        proc = _make_fake_proc([], stderr_text='ping: name or service not known\n')
+        with patch('subprocess.Popen', return_value=proc):
+            _run_ping(m)
+        assert m.error is not None
+        assert 'ERR' in m.history
+
+    def test_stderr_does_not_carry_across_restarts(self, pb):
+        """Run 2 must be judged on its own output, not run 1's leftovers."""
+        m = pb.PingMonitor('10.0.0.1')
+        procs = [
+            # run 1: works, and emits a scary-but-transient line
+            FakeProc(stdout_lines=['[1700000000.0] 64 bytes from 10.0.0.1: '
+                                   'icmp_seq=1 ttl=64 time=1.0 ms\n'],
+                     stderr_text='ping: sendmsg: Network is unreachable\n'),
+            # run 2: silent and clean — must not inherit run 1's stderr
+            FakeProc(stdout_lines=[], stderr_text=''),
+        ]
+        idx = [0]
+
+        def fake_popen(*a, **kw):
+            idx[0] += 1
+            if idx[0] <= len(procs):
+                return procs[idx[0] - 1]
+            return FakeProc(stdout_lines=[], stderr_text='')   # fresh, never reused
+
+        with patch('subprocess.Popen', side_effect=fake_popen):
+            t = threading.Thread(target=m.ping, daemon=True)
+            t.start()
+            deadline = time.time() + 8.0
+            while idx[0] < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            m.running = False
+            t.join(5.0)
+        assert m.error is None, "run 1's stderr must not condemn run 2"
+
+
+class TestStaleLossAndPending:
+
+    def test_stale_loss_consumes_an_outstanding_probe(self, pb):
+        """Otherwise the same probe is counted twice — once by the stale window,
+        once by _expire_pending — inflating xx_count and Loss%."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._record_no_answer(time.time(), 7)
+        assert m.xx_count == 0 and 7 in m._pending
+
+        m._record_stale_loss(time.time())
+        assert m.xx_count == 1
+        assert m._pending == {}, "the outstanding probe is the missing news"
+
+        m._expire_pending(time.time() + 5, 1.0)
+        assert m.xx_count == 1, "must not be counted a second time"
+
+    def test_stale_loss_without_pending_still_counts_one(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._record_stale_loss(time.time())
+        assert m.xx_count == 1
+
+    def test_oldest_pending_is_consumed_first(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._record_no_answer(1000.0, 1)
+        m._record_no_answer(1001.0, 2)
+        m._record_stale_loss(time.time())
+        assert list(m._pending) == [2], "the oldest outstanding probe goes first"

@@ -1866,6 +1866,10 @@ class Monitor(ABC):
         self.lock = threading.Lock()
         self.error = None          # str when a fatal process-level error occurred, else None
         self.error_logged = False  # True once the error has been added to the event log
+        # Recent stderr from the child, kept for post-exit fatal classification
+        # and to explain a down transition.  Bounded: a per-probe error can
+        # repeat every second for days.
+        self._stderr_lines = deque(maxlen=self._STDERR_KEEP)
         self._proc = None          # active Popen handle for the persistent ping subprocess
         self.resolv_static = False # True when a :resolv static mapping overrides DNS
         # ── Remote-clock probe state ('ping -T tsandaddr') ────────────────────
@@ -1931,6 +1935,10 @@ class Monitor(ABC):
         if v > self._lat_max:
             self._lat_max = v
 
+    # How many recent stderr lines to keep for post-exit classification.  Bounded
+    # because a per-probe error can repeat every second for days.
+    _STDERR_KEEP = 20
+
     # ── Probe bookkeeping ─────────────────────────────────────────────────────
     # 'ping -O' prints "no answer yet for icmp_seq=N" when no reply arrived by
     # the time the next request went out, so its deadline is the ping interval
@@ -1991,6 +1999,19 @@ class Monitor(ABC):
             self.history_times.append(ts)
             self.xx_count += 1
         self.ping_count += 1
+
+    def _record_stale_loss(self, now):
+        """Record the one loss that a stale read window represents.
+
+        If a probe is already outstanding, that probe *is* the missing news, so
+        consume it — otherwise _expire_pending would count the same probe again
+        and inflate both xx_count and Loss%.
+        """
+        with self.lock:
+            if self._pending:
+                oldest = min(self._pending, key=self._pending.get)
+                del self._pending[oldest]
+        self._record_loss(now)
 
     def _expire_pending(self, now, grace):
         """Write off outstanding probes unanswered for longer than *grace*.
@@ -2145,32 +2166,84 @@ class Monitor(ABC):
         pass
 
 
-class PingMonitor(Monitor):
-    def _build_ping_cmd(self):
-        """Return the command list used to launch the ping subprocess.
+class SubprocessMonitor(Monitor):
+    """A Monitor that reads ping results from a long-lived child process.
 
-        Subclasses override this to run ping over a different transport
-        (e.g. SSH).  The default implementation runs the local system ping
-        with '-O' (report unanswered probes) and '-D' (Unix-timestamp prefix).
+    Shared by PingMonitor (local ping) and SshPingMonitor (ping over ssh); the
+    two used to carry near-identical copies of this loop.  PortMonitor is not a
+    subclass — it has no subprocess.
 
-        When resolv_static is True a :resolv mapping has been applied, so ping
-        targets the resolved IP directly instead of the original hostname.
+    Subclasses supply only what genuinely differs: _build_ping_cmd(),
+    _is_fatal_error(), and the two class attributes below.
+
+    Both pipes are read, always.  Reading only stdout — as this loop used to —
+    lets the child fill the stderr pipe and block forever in write(2, ...): it
+    then stops sending ICMP and stops writing stdout, while the parent sits
+    waiting on stdout that will never come.  Nothing recovers from that.
+
+    Raw fds are read rather than readline(), because select() cannot see a line
+    already sitting in a TextIOWrapper's buffer — it would report "not ready"
+    while a complete line waits to be consumed.
+    """
+
+    # No output for this long means the link is stuck; synthesise a lost ping so
+    # the host reads as down instead of freezing at its last value.  Slightly
+    # above the 1 s ping interval so normal jitter never trips it.
+    _STALE_SECS = 2.0
+    # Whether ping's '-D' timestamp prefix can be trusted as the send time.
+    # False over ssh: the stamp is written on the remote side, and we only know
+    # when the line reached us.
+    _trust_ping_timestamp = True
+
+    def _handle_ping_line(self, line, now=None):
+        """Parse one stdout line from ping.  Returns True if it was a result line."""
+        now = time.time() if now is None else now
+        ping_ts = None
+        if line.startswith('['):
+            close = line.find(']')
+            if close != -1:
+                if self._trust_ping_timestamp:
+                    try:
+                        ping_ts = float(line[1:close])
+                    except ValueError:
+                        pass
+                line = line[close + 2:]  # skip past '] '
+        if ping_ts is None:
+            ping_ts = now
+
+        if 'time=' in line:
+            try:
+                latency = float(line.split('time=')[1].split()[0])
+            except (IndexError, ValueError):
+                return False
+            self._record_reply(latency, ping_ts, _parse_icmp_seq(line))
+            return True
+        if 'no answer yet' in line:
+            # '-O' line — the probe is outstanding, not yet lost
+            self._record_no_answer(ping_ts, _parse_icmp_seq(line))
+            return True
+        return False   # banner, statistics block, or a stderr line — ignored
+
+    def _note_stderr(self, line):
+        """Record a stderr line for later classification, and surface it once.
+
+        Deliberately does not classify here.  'network is unreachable' is in
+        _FATAL_PING_ERRORS, but ping prints it per probe while continuing to
+        run — treating it as fatal mid-stream would permanently kill a host over
+        a transient route flap, and self.error has no reset path anywhere.
         """
-        target = self.resolved_ip if (self.resolv_static and self.resolved_ip) else self.host
-        return ['ping', '-O', '-D', target]
+        line = line.strip()
+        if not line:
+            return
+        with self.lock:
+            self._stderr_lines.append(line)
 
     def ping(self):
-        """Continuously ping the host using a single persistent subprocess.
+        """Run the child process, restarting it with backoff on unexpected exit.
 
-        Launches 'ping -O -D <host>' once and reads its stdout line-by-line,
-        updating stats on each success ('time=') or -O timeout
-        ('no answer yet') line.  The '-D' Unix-timestamp prefix is stripped
-        before parsing.
-
-        Fatal errors (e.g. unknown host, permission denied) set self.error
-        and stop the loop permanently.  Unexpected exits are retried with
-        exponential backoff (1 s → 2 s → 4 s … capped at 30 s); the backoff
-        resets whenever any ping-result output is received.
+        Fatal errors (unknown host, ssh auth failure) set self.error and stop the
+        loop for good.  Classification happens only after the child exits: while
+        it is alive the same message may simply mean a transient failure.
         """
         backoff = 1  # seconds; doubles on each unexpected exit, capped at 30
 
@@ -2184,8 +2257,6 @@ class PingMonitor(Monitor):
                     stdin=subprocess.DEVNULL,   # never let the child read the terminal
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,  # line-buffered; iputils-ping flushes per line
                 )
             except Exception as exc:
                 self.error = str(exc)
@@ -2194,68 +2265,120 @@ class PingMonitor(Monitor):
                     self.history_times.append(time.time())
                 break
 
-            got_output = False
+            with self.lock:
+                # Per-run: classification below must not see an earlier run's text.
+                self._stderr_lines.clear()
 
-            for raw_line in self._proc.stdout:
-                if not self.running:
-                    break
+            got_output = self._read_until_exit()
+            # Close our ends now: the child is done and this loop may respawn it
+            # many times over days, so leaving them to the garbage collector
+            # leaks two fds per restart (and emits ResourceWarning).
+            for pipe in (self._proc.stdout, self._proc.stderr):
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
 
-                line = raw_line.rstrip()
-
-                # Strip the '-D' Unix-timestamp prefix: '[1234567890.123] rest';
-                # capture the timestamp for wall-clock-aligned history.
-                ping_ts = None
-                if line.startswith('['):
-                    close = line.find(']')
-                    if close != -1:
-                        try:
-                            ping_ts = float(line[1:close])
-                        except ValueError:
-                            pass
-                        line = line[close + 2:]  # skip past '] '
-                if ping_ts is None:
-                    ping_ts = time.time()
-
-                if 'time=' in line:
-                    # Successful reply — extract RTT
-                    try:
-                        latency = float(line.split('time=')[1].split()[0])
-                    except (IndexError, ValueError):
-                        continue
-                    self._record_reply(latency, ping_ts, _parse_icmp_seq(line))
-                    got_output = True
-                    backoff = 1  # reset on any successful output
-                elif 'no answer yet' in line:
-                    # '-O' line — the probe is outstanding, not yet lost
-                    self._record_no_answer(ping_ts, _parse_icmp_seq(line))
-                    got_output = True
-                    backoff = 1  # reset on any output
-
-            # Stdout closed — process has exited (or we broke out on shutdown)
             if not self.running:
                 break
-
-            # Drain stderr to check for a fatal error message
-            try:
-                stderr_text = self._proc.stderr.read()
-            except OSError:
-                stderr_text = ''
             self._proc.wait()
 
-            if self._is_fatal_error(stderr_text):
+            # Only a run that never produced a single result line can be fatal.
+            # A run that worked and then exited may have written anything to
+            # stderr in passing — 'network is unreachable' among it — and killing
+            # the host for that would be permanent, since self.error never resets.
+            with self.lock:
+                stderr_text = '\n'.join(self._stderr_lines)
+            if not got_output and self._is_fatal_error(stderr_text):
                 self.error = stderr_text.strip()
                 with self.lock:
                     self.history.append('ERR')
                     self.history_times.append(time.time())
                 break  # do not restart for fatal errors
 
-            # Unexpected (non-fatal) exit — restart after backoff
-            if not got_output:
-                # Process exited before producing any result lines;
-                # keep the current backoff penalty instead of resetting.
-                pass
+            if got_output:
+                backoff = 1
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
+
+    def _read_until_exit(self):
+        """Consume both pipes until the child exits.  Returns True if it produced
+        any ping-result line (used to decide whether to reset the backoff)."""
+        out, err = self._proc.stdout, self._proc.stderr
+        try:
+            fds = {out.fileno(): 'out', err.fileno(): 'err'}
+            for f in (out, err):
+                os.set_blocking(f.fileno(), False)
+        except (ValueError, OSError):
+            # Pipes already gone.  Report "no output" so the caller retries with
+            # backoff — an exception here would kill the thread silently, leaving
+            # the host frozen with no error to explain it.
+            return False
+        buf = {'out': b'', 'err': b''}
+        open_fds = set(fds)
+        got_output = False
+
+        while self.running:
+            if not open_fds:
+                break
+            rlist, _, _ = select.select(list(open_fds), [], [], self._STALE_SECS)
+            if not rlist:
+                # Nothing for _STALE_SECS: the link is stuck.  Only synthesise a
+                # loss once the child has proven it can talk, so a slow start is
+                # not reported as packet loss.
+                if got_output:
+                    self._record_stale_loss(time.time())
+                if self._proc.poll() is not None:
+                    break
+                continue
+            if not self.running:
+                break        # shutting down: do not consume further output
+            for fd in rlist:
+                which = fds[fd]
+                try:
+                    chunk = os.read(fd, 65536)
+                except (BlockingIOError, InterruptedError):
+                    continue
+                except OSError:
+                    open_fds.discard(fd)
+                    continue
+                if not chunk:                 # EOF on this pipe
+                    open_fds.discard(fd)
+                    continue
+                buf[which] += chunk
+                while b'\n' in buf[which]:
+                    raw, buf[which] = buf[which].split(b'\n', 1)
+                    line = raw.decode('utf-8', 'replace').rstrip('\r')
+                    if which == 'err':
+                        self._note_stderr(line)
+                    elif self._handle_ping_line(line):
+                        got_output = True
+            if not open_fds and self._proc.poll() is not None:
+                break
+        # A trailing fragment without a newline is still worth parsing.
+        for which in ('out', 'err'):
+            if buf[which]:
+                line = buf[which].decode('utf-8', 'replace').rstrip('\r')
+                if which == 'err':
+                    self._note_stderr(line)
+                elif self._handle_ping_line(line):
+                    got_output = True
+        return got_output
+
+
+class PingMonitor(SubprocessMonitor):
+    def _build_ping_cmd(self):
+        """Return the command list used to launch the ping subprocess.
+
+        Subclasses override this to run ping over a different transport
+        (e.g. SSH).  The default implementation runs the local system ping
+        with '-O' (report unanswered probes) and '-D' (Unix-timestamp prefix).
+
+        When resolv_static is True a :resolv mapping has been applied, so ping
+        targets the resolved IP directly instead of the original hostname.
+        """
+        target = self.resolved_ip if (self.resolv_static and self.resolved_ip) else self.host
+        return ['ping', '-O', '-D', target]
 
     @staticmethod
     def _is_fatal_error(stderr_text):
@@ -2412,7 +2535,7 @@ class PortMonitor(Monitor):
             time.sleep(sleep_time)
 
 
-class SshPingMonitor(Monitor):
+class SshPingMonitor(SubprocessMonitor):
     """A PingMonitor that runs ping remotely over an SSH connection.
 
     Connects to the remote host using 'ssh -o BatchMode=yes' (no interactive
@@ -2612,6 +2735,11 @@ class SshPingMonitor(Monitor):
 
         return " → ".join(display_parts)
 
+    # ping's '-D' stamp is written on the remote side; we only know when the line
+    # reached us, so record local receipt time instead.  (This is also why late
+    # replies are paired by icmp_seq rather than by timestamp.)
+    _trust_ping_timestamp = False
+
     def _build_ping_cmd(self):
         """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
         #return ['ssh', '-o', 'ControlMaster=no', '-o', 'BatchMode=yes'] + self._ssh_args + [
@@ -2624,111 +2752,6 @@ class SshPingMonitor(Monitor):
         """Return True if stderr_text contains a known non-retryable SSH or ping error."""
         text = stderr_text.lower()
         return any(pattern in text for pattern in _FATAL_SSH_ERRORS + _FATAL_PING_ERRORS)
-
-    def ping(self):
-        """Continuously ping the host using a single persistent subprocess.
-
-        Launches the remote ping command and reads its stdout line-by-line,
-        updating stats on each success ('time=') or -O timeout
-        ('no answer yet') line.  The '-D' Unix-timestamp prefix is stripped
-        before parsing.
-
-        Uses select() with a short timeout so that if the SSH subprocess
-        hangs (e.g. the jump host goes down), missing pings are recorded
-        and the host is shown as DOWN rather than staying frozen at the
-        last known state.
-        """
-        # If no output arrives within this many seconds, synthesise a lost
-        # ping.  Slightly above the 1 s ping interval so normal fluctuation
-        # never triggers it; short enough to catch a frozen SSH link quickly.
-        _STALE_SECS = 2.0
-
-        backoff = 1  # seconds; doubles on each unexpected exit, capped at 30
-
-        while self.running:
-            self._pause_event.wait()
-            if not self.running:
-                break
-            try:
-                self._proc = subprocess.Popen(
-                    self._build_ping_cmd(),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                )
-            except Exception as exc:
-                self.error = str(exc)
-                with self.lock:
-                    self.history.append("ERR")
-                    self.history_times.append(time.time())
-                break
-
-            got_output = False
-
-            while self.running:
-                rlist, _, _ = select.select([self._proc.stdout], [], [], _STALE_SECS)
-
-                if not rlist:
-                    # Timeout — no output from SSH subprocess.
-                    if got_output:
-                        # We had live output before; SSH link appears frozen.
-                        # Synthesise a lost ping so history advances correctly.
-                        # No seq to reconcile against, so this counts at once.
-                        self._record_loss(time.time())
-                    # Also check if the process has already exited.
-                    if self._proc.poll() is not None:
-                        break
-                    continue
-
-                raw_line = self._proc.stdout.readline()
-                if not raw_line:
-                    break  # EOF — process exited
-
-                line = raw_line.rstrip()
-
-                ping_ts = time.time()
-                if line.startswith("["):
-                    close = line.find("]")
-                    if close != -1:
-                        line = line[close + 2:]
-
-                if "time=" in line:
-                    try:
-                        latency = float(line.split("time=")[1].split()[0])
-                    except (IndexError, ValueError):
-                        continue
-                    self._record_reply(latency, ping_ts, _parse_icmp_seq(line))
-                    got_output = True
-                    backoff = 1
-                elif "no answer yet" in line:
-                    # '-O' line — the probe is outstanding, not yet lost
-                    self._record_no_answer(ping_ts, _parse_icmp_seq(line))
-                    got_output = True
-                    backoff = 1
-
-            if not self.running:
-                break
-
-            try:
-                stderr_text = self._proc.stderr.read()
-            except OSError:
-                stderr_text = ""
-            self._proc.wait()
-
-            if self._is_fatal_error(stderr_text):
-                self.error = stderr_text.strip()
-                with self.lock:
-                    self.history.append("ERR")
-                    self.history_times.append(time.time())
-                break
-
-            if not got_output:
-                pass
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 30)
-
 
 class SectionLabel:
     """A non-pingable display row for section headers (## / :title)."""

@@ -86,9 +86,26 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
 
 ### Structure
 - `Monitor` (ABC) - Abstract base class with common attributes and shared methods.
-- `PingMonitor(Monitor)` - Standard ICMP ping implementation using system `ping`.
+- `SubprocessMonitor(Monitor)` - Owns the Popen/read/backoff loop shared by the two
+  ping transports. `PingMonitor` and `SshPingMonitor` each used to carry a
+  near-identical copy.
+- `PingMonitor(SubprocessMonitor)` - Standard ICMP ping implementation using system `ping`.
+- `SshPingMonitor(SubprocessMonitor)` - SSH-based remote ping monitoring.
 - `PortMonitor(Monitor)` - TCP port monitoring using Python's `socket.create_connection`.
-- `SshPingMonitor(Monitor)` - SSH-based remote ping monitoring.
+  Not a `SubprocessMonitor`: it has no child process.
+
+### `SubprocessMonitor` invariants — do not regress these
+- **Both pipes are always read.** Reading only stdout lets the child fill the
+  stderr pipe and block in `write(2, …)`; it then stops pinging *and* stops
+  writing stdout, while the parent waits on stdout forever. Nothing recovers.
+- **Raw fds, not `readline()`.** `select()` cannot see a line already buffered
+  inside a `TextIOWrapper`, so the loop `os.read()`s and splits on `\n` itself.
+- **stderr is classified only after the child exits.** `'network is unreachable'`
+  is in `_FATAL_PING_ERRORS`, but ping prints it *per probe* while continuing to
+  run — classifying mid-stream would permanently kill a host over a transient
+  route flap, and `self.error` has no reset path anywhere.
+- Subclasses override only `_build_ping_cmd()`, `_is_fatal_error()`, and the class
+  attributes `_STALE_SECS` / `_trust_ping_timestamp`.
 
 ### Method Categorization
 
