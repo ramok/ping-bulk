@@ -148,6 +148,11 @@ OPTIONS
     working, loop-free configuration to someone who only needs to
     update IPs.
 
+    Variables are already substituted at this point, so a ``:log
+    $SCRIPT_DIR/…`` line is written out expanded and the dumped script
+    logs beside the *original* file rather than beside itself.  Edit that
+    line by hand if the copy should keep its own log.
+
 ``HOST ...``
     One or more host names, IP addresses, or host:port combinations to monitor.
     If a port is specified (e.g. ``example.com:443``), it will perform a TCP
@@ -927,13 +932,19 @@ Format
 
     Variables can be referenced anywhere in subsequent non-``:let`` lines
     using bare syntax (``$name``) or brace-delimited syntax (``${name}``).
-    Both forms behave identically: the variable value is substituted when
-    defined, or the **empty string** when not defined.  The brace form is
+    Both forms behave identically.  A name is resolved in three steps: the
+    ``:let`` value if one is defined, then the **environment** variable of
+    the same name, and finally the **empty string**.  The brace form is
     useful to delimit the variable name from adjacent characters::
 
         :let net 10.0.1
         ${net}.100      # → 10.0.1.100
         $net.100        # same result
+        $HOME/logs      # environment, when no :let defines HOME
+
+    Because the environment is only a fallback, a ``:let`` of the same name
+    always wins — a hosts file can therefore pin a value that would
+    otherwise vary between machines.
 
     **Brace expansion on the name** — *name* may itself use brace
     expansion to define multiple indexed variables at once::
@@ -968,6 +979,36 @@ Format
     **Loop-local scope** — a ``:let`` inside a ``:for`` body creates a
     loop-local variable.  It is visible only within that iteration and
     does not modify the outer variable store.
+
+**Predefined variables**
+
+Two variables are set automatically while a hosts *file* is being parsed:
+
+``$SCRIPT_DIR``
+    Absolute directory holding the file, without a trailing slash.
+
+``$SCRIPT_FILE``
+    Base name of the file.
+
+They let a self-executing hosts file keep its log beside itself, so the
+script and its log travel together and no ``-l`` is needed at the call
+site::
+
+    #!/usr/bin/env -S ping-bulk -f
+    :log $SCRIPT_DIR/$SCRIPT_FILE.log
+
+The path is built with ``abspath``, not ``realpath``: a script reached
+through a symlink writes beside the name that was typed, not beside the
+link target.  Both are ordinary variables, so a later ``:let`` of the same
+name overrides them, and a file pulled in with ``:source`` gets its own
+values — each file is expanded in its own parse pass.
+
+Hosts read from the command line have no file, so neither variable is
+defined there.  An undefined variable inside a ``:log``, ``:save``, or
+``:source`` path is reported as a warning, because it would silently
+truncate the path (``:log $TYPO/pb.log`` becomes ``:log /pb.log``).
+Elsewhere an empty expansion stays silent — the ``${fold$N}`` pattern
+above depends on it.
 
 ``:if VALUE in val1,val2,...``
     Open a conditional block.  The lines between ``:if`` and ``:end`` are

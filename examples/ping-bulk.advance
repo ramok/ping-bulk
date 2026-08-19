@@ -10,6 +10,24 @@
 # Run directly:  chmod +x network.hosts && ./network.hosts
 # Or:            ping-bulk -f network.hosts
 
+# -- Predefined variables: $SCRIPT_DIR / $SCRIPT_FILE ----------------------
+# Both are set automatically while a hosts *file* is parsed: the file's
+# absolute directory (no trailing slash) and its base name.  They keep a
+# self-executing script and its log together, with nothing to remember at the
+# call site (left commented out so running this example writes no files):
+# :log $SCRIPT_DIR/$SCRIPT_FILE.log
+#
+# Notes:
+#   - abspath, not realpath -- reached through a symlink, the log lands beside
+#     the name that was typed, not beside the link target.
+#   - '-l'/'--log-file' on the command line overrides this; typing :log while
+#     running still wins.
+#   - a :source'd file gets its own $SCRIPT_DIR, since each file is expanded
+#     in its own parse pass.
+#   - hosts given as arguments have no file, so neither variable is defined --
+#     an undefined variable in a :log/:save/:source path is warned about,
+#     because it would silently truncate the path.
+
 # -- :prog-options ---------------------------------------------------------
 # Map hostname globs to SSH flags injected automatically by :mux.
 # Rules are evaluated in order; last match wins.
@@ -136,8 +154,11 @@ google.com:https
 $ns1; $ns2
 
 # -- :let variables --------------------------------------------------------
-# :let defines reusable variables.  $name and ${name} are equivalent:
-# both substitute the value when defined, and are left unchanged when not.
+# :let defines reusable variables.  $name and ${name} are equivalent.  A name
+# resolves in three steps: the :let value, then the environment variable of the
+# same name, then the empty string.  So a :let always wins over the
+# environment, and a hosts file can pin a value that would otherwise differ
+# from machine to machine.
 # ${name} is mainly useful to delimit the variable name from adjacent text.
 #
 # :let name{range} value  -- indexed variables via brace expansion.

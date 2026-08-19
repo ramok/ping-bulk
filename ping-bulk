@@ -989,6 +989,12 @@ _EXAMPLE_HELP = """\
 :set ping-view scaled
 :set dns hostname
 
+# ── Event log to a file beside this script ─────────────────────────────────
+# $SCRIPT_DIR / $SCRIPT_FILE are predefined while parsing a hosts file, so the
+# script and its log travel together.  '-l' on the command line overrides this.
+# Commented out so that copying this example writes no files unasked.
+# :log $SCRIPT_DIR/$SCRIPT_FILE.log
+
 ## Infrastructure
 ### Core
 10.0.0.1
@@ -1108,6 +1114,14 @@ _DIRECTIVE_KEYWORDS = frozenset({
     'resolv', 'resolv-port', 'title', 'title2', 'title3',
     'remote-ping', 'source', 'log', 'edit', 'bind-key', 'section',
 })
+
+
+# Directives whose argument is a file path.  An undefined variable inside one
+# of these silently truncates the path — ':log $TYPO/pb.log' becomes
+# ':log /pb.log', which then either writes to the filesystem root or fails in
+# open() where the error is swallowed.  Everywhere else an empty expansion is a
+# documented idiom, so the warning is deliberately scoped to just these.
+_PATH_DIRECTIVES = frozenset({'log', 'save', 'source'})
 
 
 def _unknown_directive_warn(cmd_word):
@@ -1477,17 +1491,24 @@ def _has_backref(s):
     return bool(re.search(r'\$(?:\{\w+\}|\d|[a-zA-Z_]\w*)', s))
 
 
-def _expand_let_vars(line, variables, backrefs=None, full_str=None):
+def _expand_let_vars(line, variables, backrefs=None, full_str=None, undefined=None):
     r"""Substitute ``:let`` variable references in *line*.
 
     Recognised forms:
 
     ``$name`` / ``${name}``
-        Both forms are equivalent: substituted with the variable value when
-        defined, or the **empty string** when not defined.  ``${name}`` is
-        useful to delimit the variable name from adjacent characters.
-        Digit-only names (``$0``–``$9``) and named loop back-references are
-        left untouched so that ``_apply_backref`` can handle them later.
+        Both forms are equivalent: substituted with the ``:let`` value when
+        defined, then with the **environment** variable of the same name, and
+        finally with the **empty string**.  ``${name}`` is useful to delimit
+        the variable name from adjacent characters.  Digit-only names
+        (``$0``–``$9``) and named loop back-references are left untouched so
+        that ``_apply_backref`` can handle them later.
+
+        Expanding an unknown name to ``''`` is deliberate and idiomatic — the
+        ``:title${fold$1}`` pattern in ``examples/ping-bulk.advance`` relies on
+        it, so it must stay silent.  Pass *undefined* to collect the names that
+        resolved to nothing; the caller warns only where an empty expansion is
+        certainly a mistake (see ``_PATH_DIRECTIVES``).
 
     ``${name_$N}``
         Brace-delimited with inner digit back-references.  ``$N`` inside
@@ -1509,6 +1530,8 @@ def _expand_let_vars(line, variables, backrefs=None, full_str=None):
         ``${...}``).  ``None`` is safe — no inner substitution.
     full_str : str or None
         Full expanded string for ``$0`` inside ``${...}``.
+    undefined : set[str] or None
+        When given, every name that resolved to the empty string is added to it.
 
     Returns
     -------
@@ -1517,6 +1540,16 @@ def _expand_let_vars(line, variables, backrefs=None, full_str=None):
     """
     if '$' not in line:
         return line  # fast path: no $ at all
+
+    def _lookup(name):
+        """:let value, else environment, else '' (recorded in *undefined*)."""
+        if name in variables:
+            return variables[name]
+        if name in os.environ:
+            return os.environ[name]
+        if undefined is not None:
+            undefined.add(name)
+        return ''
 
     def _resolve_braced(m):
         expr = m.group(1)
@@ -1530,7 +1563,7 @@ def _expand_let_vars(line, variables, backrefs=None, full_str=None):
         # unchanged so that _apply_backref can resolve it after us.
         if isinstance(backrefs, dict) and expr in backrefs:
             return m.group(0)
-        return variables.get(expr, '')  # empty string if not defined
+        return _lookup(expr)
 
     def _resolve_bare(m):
         name = m.group(1)
@@ -1539,7 +1572,7 @@ def _expand_let_vars(line, variables, backrefs=None, full_str=None):
         # Named loop back-references take priority; leave them for _apply_backref.
         if isinstance(backrefs, dict) and name in backrefs:
             return m.group(0)
-        return variables.get(name, '')  # empty string if not defined
+        return _lookup(name)
 
     # First handle ${expr} (brace-delimited, may contain $N inside)
     result = re.sub(r'\$\{([^}]*)\}', _resolve_braced, line)
@@ -3215,7 +3248,19 @@ class _HostsParser:
     # ── Public entry points ───────────────────────────────────────────────
 
     def parse_file(self, filename):
-        """Open *filename* and parse it, returning a list of entry tuples."""
+        """Open *filename* and parse it, returning a list of entry tuples.
+
+        Seeds ``$SCRIPT_DIR`` / ``$SCRIPT_FILE`` so a hosts file can name paths
+        relative to itself (``:log $SCRIPT_DIR/$SCRIPT_FILE.log``) and stay
+        portable.  They are ordinary variables, so a later ``:let`` of the same
+        name overrides them, and a ``:source``d file gets its own values —
+        expansion happens in that file's own parse pass.
+
+        ``abspath``, not ``realpath``: a script reached through a symlink should
+        write beside the name that was typed, not beside the link target.
+        """
+        self.variables['SCRIPT_DIR'] = os.path.dirname(os.path.abspath(filename))
+        self.variables['SCRIPT_FILE'] = os.path.basename(filename)
         with open(filename) as f:
             return self.parse(f.read())
 
@@ -3420,12 +3465,20 @@ class _HostsParser:
                     continue
 
                 # Variable-expand the whole directive line, then re-dispatch.
-                text = _expand_let_vars(text, self.variables)
+                missing = set()
+                text = _expand_let_vars(text, self.variables, undefined=missing)
                 if not text.strip():
                     continue
                 parts = text.split(None, 1)
                 cmd_word = parts[0][1:].lower()
                 args = parts[1].strip() if len(parts) > 1 else ''
+
+                # An empty expansion inside a path is almost never intended.
+                if missing and cmd_word in _PATH_DIRECTIVES:
+                    names = ', '.join('$' + n for n in sorted(missing))
+                    entries.append(('warn',
+                        f'undefined {names} in :{cmd_word} path — '
+                        f'resolved to {args!r}'))
 
                 m_title = re.match(r'^title(\d*)([-!]*)$', cmd_word)
                 if m_title:
