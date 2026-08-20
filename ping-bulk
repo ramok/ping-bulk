@@ -4582,6 +4582,13 @@ class Application:
         self.host_scroll = 0     # number of entries to skip from top of host list
         self.highlighted_index = None  # None = no selection; int = index in self.entries
         self.log_file = None        # path to append event log, or None
+        self._log_banner_path = None  # path the session banner was written for
+        # Counted from the caller's entries rather than len(self.monitors): the
+        # first log line can be written while that list is still being filled
+        # (a config-file ':log' plus a hosts-file parse warning does it), and a
+        # banner that undercounts is worse than one that reports the request.
+        self._target_count = sum(1 for k, *_ in entries
+                                 if k in ('host', 'optional_host'))
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
         self._mux_from_binding = False  # True while executing commands from a key binding
@@ -4788,12 +4795,48 @@ class Application:
                 del self._filtered_events[:excess]
         else:
             self._filtered_events_dirty = True
-        if self.log_file:
-            try:
-                with open(self.log_file, 'a') as f:
-                    f.write(line + "\n")
-            except OSError:
-                pass  # silently ignore file write errors to avoid recursive events
+        self._append_log_line(line)
+
+    def _log_banner(self):
+        """Return the '###### log started' line that opens a logging session.
+
+        Comment-prefixed to match the headers :meth:`save_to_file` writes, so a
+        file that has been both streamed to and saved into reads consistently.
+
+        The pid matters more than it looks: two runs pointed at the same path
+        both append, and interleaved lines are otherwise indecipherable.  This is
+        easy to hit now that a hosts file can set its own log path — every
+        invocation of that script picks the same file.
+        """
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+        parts = [f"pid {os.getpid()}"]
+        if self.hosts_file:
+            parts.append(f"hosts file {self.hosts_file}")
+        parts.append(f"{self._target_count} targets")
+        return (f"# ###### log started {timestamp} — {_PROG_NAME}, "
+                + ", ".join(parts))
+
+    def _append_log_line(self, line):
+        """Append one formatted event line to the streaming log file.
+
+        Writes the session banner first, once per path.  Tracking *which* path
+        it was written for is what makes ':log a' → ':log b' → ':log a' mark each
+        resumption, and costs no extra state.
+
+        Lazy rather than written when the path is set: there is no open moment to
+        hook — every append opens the file — and a path can arrive from the
+        config file, the hosts file, '-l', ':log', or ':save --follow'.
+        """
+        if not self.log_file:
+            return
+        try:
+            with open(self.log_file, 'a') as f:
+                if self._log_banner_path != self.log_file:
+                    f.write(self._log_banner() + "\n")
+                    self._log_banner_path = self.log_file
+                f.write(line + "\n")
+        except OSError:
+            pass  # silently ignore file write errors to avoid recursive events
 
     def _load_config(self):
         """Load settings from the XDG config file, silently ignoring a missing file.
@@ -5463,12 +5506,7 @@ class Application:
                 del self._filtered_events[:excess]
         else:
             self._filtered_events_dirty = True
-        if self.log_file:
-            try:
-                with open(self.log_file, 'a') as f:
-                    f.write(line + "\n")
-            except OSError:
-                pass
+        self._append_log_line(line)
 
     # ── Fold helpers ──────────────────────────────────────────────────────────
 
@@ -9639,6 +9677,9 @@ class Application:
                     else:
                         self.add_event("log", "logging is already off")
                 self.log_file = None
+                # Forget which file was bannered, so switching logging back on —
+                # even to the same path — marks the resumption with a new banner.
+                self._log_banner_path = None
             else:
                 # A startup ':log' (config or hosts file) yields to -l/--log-file.
                 # Typing ':log' interactively always wins — monitoring is running

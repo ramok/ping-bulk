@@ -1609,6 +1609,19 @@ is appended to the *host down* line, so the log says why and not merely that::
 The log is scrollable in the UI (``↑``/``↓``/``PgUp``/``PgDn``) and
 can be streamed to a file with ``-l``/``--log-file`` or ``:log``.
 
+Each logging session opens with a banner line naming the process and what it
+is watching::
+
+    # ###### log started 2026-03-20T14:05:30+0200 — ping-bulk, pid 31337, hosts file /opt/net/pb.hosts, 47 targets
+
+The pid is there because a log path set inside a hosts file is reused by every
+run of that script: two concurrent runs append to the same file, and the
+banners are what separate them.  A banner is written once per logging session —
+switching to another file, or turning logging off and on again, starts a new
+one, so a resumed log shows where the gap was.  The ``#`` prefix matches the
+headers ``:save`` writes, keeping a file that has been both streamed to and
+saved into readable as one document.
+
 
 SSH MONITORING
 ==============

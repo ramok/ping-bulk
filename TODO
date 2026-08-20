@@ -367,6 +367,23 @@ Events [SPACE to set "seen" mark] [PgUp to scroll]                              
 - The settings-cursor highlight row draws with addstr and len(), so a settings
   line containing markup would highlight the wrong span. Not hit today.
 
+## Log-file paths / banner (2026-08-18)
+- _target_count is computed once in Application.__init__ from the caller's
+  entries, so after an :edit reload that adds or removes hosts, a later log
+  switch writes a banner with the old count. Cosmetic. Counting monitors
+  instead is not a fix: the first line can be written while that list is
+  still being filled (config-file :log + a hosts-file parse warning does it),
+  which is why the entry count was chosen.
+- --dump-simple-script writes ':log' already expanded, so a dumped script logs
+  beside the original file rather than beside itself. Documented rather than
+  fixed: $SCRIPT_DIR is gone by the time entries are dumped. Re-emitting it
+  would mean tracking provenance per entry.
+- ':log' has no way to say "beside the hosts file" at runtime — only a
+  hosts-file line can use $SCRIPT_DIR, since expansion is a parse-time step.
+  A ':log %D/x.log'-style runtime token was considered and rejected: '%'
+  tokens are expanded per host at command-build time and a log path has no
+  host, so it would need a second, incompatible expander inside _cmd_log.
+
 ## SUPERSEDED (kept for context)
 
 ### original notes

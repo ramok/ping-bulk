@@ -56,6 +56,28 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 15 (log file paths + session banner)**: `$SCRIPT_DIR` / `$SCRIPT_FILE`
+  are predefined while a hosts *file* is parsed (`abspath`, not `realpath`;
+  seeded in `_HostsParser.parse_file`, so a `:source`d file gets its own), which
+  makes `:log $SCRIPT_DIR/$SCRIPT_FILE.log` portable. `$name` now falls back to
+  the environment after `:let`. Undefined names still expand to `''` — the
+  `${fold$N}` idiom in `examples/ping-bulk.advance` depends on it — but are
+  warned about inside a `:log`/`:save`/`:source` path (`_PATH_DIRECTIVES`),
+  where the truncation is silent and harmful. New `_resolve_path()` expands a
+  leading `~` for every path command; `$` is deliberately *not* re-expanded
+  there, since parse time already did it under different rules. The streaming
+  log opens with a `# ###### log started …` banner (pid, hosts file, target
+  count), written lazily on first append and tracked per path so switching
+  files — or `:log off` then on — marks the resumption.
+  Bugs fixed: `:log ~/x.log` and `:save --follow ~/x.log` silently logged
+  nothing, because `open('~/…')` failed into the `except OSError` that exists to
+  stop error events recursing; a hosts-file `:log` silently beat `-l`
+  (`self.log_file` was assigned before the entry loop, not after); `hosts_file`
+  and `kiosk_mode` were assigned *after* `Application.__init__`, so every
+  `_kiosk_allow_path` check was inert for startup commands and `:edit` could not
+  see the file — both are constructor arguments now; the `:layout` table in
+  `doc/ping-bulk.rst` was malformed (one stray space), so `docutils` refused to
+  render that section.
 - **Phase 14 (event log + help overlay)**: Filter and search switched from
   glob/substring to case-insensitive regex (invalid patterns fall back to
   literal). `:fold close-other [regex]` / `zx` focuses one section. `:save`
