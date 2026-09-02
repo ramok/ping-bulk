@@ -3843,6 +3843,13 @@ def _flatten_sourced(entries, _seen=None):
     return out
 
 
+# Paths that --dump-simple-script treats as "write to stdout" rather than as a
+# file to create.  Naming them explicitly matters: os.chmod('/dev/stdout')
+# follows the symlink, so '--dump-simple-script /dev/stdout > out.txt' used to
+# leave out.txt executable — a side effect on a file the user only redirected
+# into.  Going through stdout skips both the chmod and the truncating open().
+_STDOUT_PATHS = frozenset({'-', '/dev/stdout', '/dev/fd/1', '/proc/self/fd/1'})
+
 # Self-executing header for --dump-simple-script: sh runs the exec line,
 # ping-bulk joins the '\'-continued lines into one comment and skips them.
 _SIMPLE_SCRIPT_HEADER = """\
@@ -11520,9 +11527,11 @@ press '?' inside the app for the full keyboard reference.\
                         help='print only the expanded host inventory ("IP  ## name" '
                              'lines and ## titles; no : commands) and exit')
     parser.add_argument('--dump-simple-script', metavar='FILE', dest='dump_simple_script',
-                        help='write a self-executing hosts script to FILE (chmod +x, '
-                             'overwrites): fully expanded like --dump-hosts but with '
-                             ': commands kept and a #!/bin/sh header')
+                        help="write a self-executing hosts script to FILE (chmod +x, "
+                             "overwrites): fully expanded like --dump-hosts but "
+                             "with : commands kept and a #!/bin/sh header; FILE of "
+                             "'-' (or /dev/stdout) writes to stdout instead, "
+                             "unchanged and not chmod'ed, so it can be piped")
     args = parser.parse_args()
 
     if args.help_full:
@@ -11555,14 +11564,19 @@ press '?' inside the app for the full keyboard reference.\
         if args.dump_simple_script:
             text, dump_warnings = _dump_simplified(entries)
             out_path = args.dump_simple_script
-            try:
-                with open(out_path, 'w') as f:
-                    f.write(_SIMPLE_SCRIPT_HEADER + text)
-                os.chmod(out_path, os.stat(out_path).st_mode | 0o111)
-            except OSError as e:
-                print(f"{_PROG_NAME}: cannot write '{out_path}': {e}", file=sys.stderr)
-                sys.exit(1)
-            print(f"{_PROG_NAME}: wrote {out_path}", file=sys.stderr)
+            if out_path in _STDOUT_PATHS:
+                # Stdout: no chmod (it may be a pipe) and no progress line, so
+                # the output can be piped or redirected without post-processing.
+                sys.stdout.write(_SIMPLE_SCRIPT_HEADER + text)
+            else:
+                try:
+                    with open(out_path, 'w') as f:
+                        f.write(_SIMPLE_SCRIPT_HEADER + text)
+                    os.chmod(out_path, os.stat(out_path).st_mode | 0o111)
+                except OSError as e:
+                    print(f"{_PROG_NAME}: cannot write '{out_path}': {e}",
+                          file=sys.stderr)
+                    sys.exit(1)
         else:
             text, dump_warnings = _dump_simplified(entries, hosts_only=True)
             print(text, end='')

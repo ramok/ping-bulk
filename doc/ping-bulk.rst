@@ -148,6 +148,23 @@ OPTIONS
     working, loop-free configuration to someone who only needs to
     update IPs.
 
+    A *FILE* of ``-`` writes to standard output instead, so the script can
+    be piped or redirected::
+
+        ping-bulk -f net.hosts --dump-simple-script - | less
+        ping-bulk -f net.hosts --dump-simple-script - > flat.hosts
+
+    ``/dev/stdout``, ``/dev/fd/1``, and ``/proc/self/fd/1`` are accepted as
+    spellings of the same thing.  They are recognised by name rather than
+    opened, because ``chmod`` on ``/dev/stdout`` follows the symlink: it
+    would make whatever standard output points at executable, including a
+    plain file the caller merely redirected into.  The executable bit is
+    therefore set only when a real file was named.
+
+    Neither form reports success, so the command is quiet in a cron job or
+    a Makefile; only real problems (parse warnings, an unwritable target)
+    reach standard error.
+
     Variables are already substituted at this point, so a ``:log
     $SCRIPT_DIR/…`` line is written out expanded and the dumped script
     logs beside the *original* file rather than beside itself.  Edit that

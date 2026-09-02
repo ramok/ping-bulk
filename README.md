@@ -187,7 +187,9 @@ options:
   --dump-simple-script FILE
                         write a self-executing hosts script to FILE (chmod +x,
                         overwrites): fully expanded like --dump-hosts but with
-                        : commands kept and a #!/bin/sh header
+                        : commands kept and a #!/bin/sh header; FILE of '-'
+                        (or /dev/stdout) writes to stdout instead, unchanged
+                        and not chmod'ed, so it can be piped
 ```
 
 Command-line options override settings from the config file
@@ -213,7 +215,9 @@ flags turn such a file into a flat, human-editable copy with every
 - `--dump-simple-script FILE` writes a runnable copy instead: the other
   directives (`:set`, `:bind-key`, `:prog-options`, …) are kept and a
   `#!/bin/sh` self-exec header is prepended, so `./FILE` starts ping-bulk
-  directly.  `FILE` is overwritten and marked executable.
+  directly.  `FILE` is overwritten and marked executable; `-` (or
+  `/dev/stdout`) writes to stdout so the script can be piped, leaving the
+  destination's permissions alone.
 
 Both flatten `:remote-ping` targets to plain hosts and splice `:source`'d
 files in, which is handy for handing a working configuration to someone who
@@ -223,6 +227,7 @@ only needs to update IPs.  Try them on the files in
 ```sh
 ping-bulk --dump-hosts -f examples/ping-bulk.advance
 ping-bulk --dump-simple-script flat.hosts -f examples/ping-bulk.advance
+ping-bulk --dump-simple-script - -f examples/ping-bulk.advance | less
 ```
 
 ## Hosts file

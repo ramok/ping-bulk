@@ -245,3 +245,100 @@ class TestDumpSimpleScript:
         result = self.gen(app_path, hosts_file, str(tmp_path / 'no-dir' / 'x'))
         assert result.returncode == 1, result.stderr
         assert 'cannot write' in result.stderr, result.stderr
+
+    def test_writing_to_a_file_is_silent(self, app_path, hosts_file, tmp_path):
+        """Nothing on stderr, so a cron or Makefile run stays quiet."""
+        out = str(tmp_path / 'gen.hosts')
+        result = self.gen(app_path, hosts_file, out)
+        assert result.stderr == '', result.stderr
+        assert result.stdout == '', result.stdout
+
+
+class TestDumpSimpleScriptToStdout:
+    """'-' as the target writes the script to stdout instead of a file."""
+
+    @pytest.fixture()
+    def hosts_file(self, tmp_path):
+        f = tmp_path / 'dump.hosts'
+        f.write_text(DUMP_INPUT)
+        return str(f)
+
+    def gen_stdout(self, app_path, hosts_file):
+        return run_app('--dump-simple-script', '-', '-f', hosts_file,
+                       app_path=app_path)
+
+    def test_script_goes_to_stdout(self, app_path, hosts_file):
+        result = self.gen_stdout(app_path, hosts_file)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith('#!/bin/sh\n'), result.stdout[:40]
+        assert ':set stats down' in result.stdout
+        assert '10.30.1.1  ## sensor1-ctrl' in result.stdout
+        assert ':for' not in result.stdout
+
+    def test_stderr_stays_clean_for_piping(self, app_path, hosts_file):
+        result = self.gen_stdout(app_path, hosts_file)
+        assert result.stderr == '', result.stderr
+
+    def test_no_file_named_dash_is_created(self, app_path, hosts_file, tmp_path):
+        result = run_app('--dump-simple-script', '-', '-f', hosts_file,
+                         app_path=app_path, cwd=str(tmp_path))
+        assert result.returncode == 0, result.stderr
+        assert not (tmp_path / '-').exists(), "'-' must not be taken literally"
+
+    def test_same_bytes_as_the_file_form(self, app_path, hosts_file, tmp_path):
+        out = tmp_path / 'gen.hosts'
+        run_app('--dump-simple-script', str(out), '-f', hosts_file,
+                app_path=app_path)
+        piped = self.gen_stdout(app_path, hosts_file)
+        assert piped.stdout == out.read_text()
+
+    @pytest.mark.parametrize('alias', ['-', '/dev/stdout', '/dev/fd/1',
+                                       '/proc/self/fd/1'])
+    def test_stdout_aliases_all_work(self, app_path, hosts_file, alias):
+        result = run_app('--dump-simple-script', alias, '-f', hosts_file,
+                         app_path=app_path)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith('#!/bin/sh\n'), result.stdout[:40]
+
+    @pytest.mark.parametrize('alias', ['-', '/dev/stdout', '/dev/fd/1',
+                                       '/proc/self/fd/1'])
+    def test_stdout_alias_does_not_chmod_the_redirect_target(
+            self, app_path, hosts_file, tmp_path, alias):
+        """os.chmod('/dev/stdout') follows the symlink to whatever stdout is.
+
+        Redirecting into a file must not silently make that file executable —
+        the user asked for a stream, not for a mode change on their file.
+        """
+        out = tmp_path / 'redirected.txt'
+        out.touch()
+        mode_before = out.stat().st_mode
+        with open(out, 'w') as fh:
+            result = subprocess.run(
+                [sys.executable, app_path, '--dump-simple-script', alias,
+                 '-f', hosts_file],
+                stdout=fh, stderr=subprocess.PIPE, text=True)
+        assert result.returncode == 0, result.stderr
+        assert out.stat().st_mode == mode_before, \
+            f'{alias} changed the mode of the redirect target'
+        assert out.read_text().startswith('#!/bin/sh\n')
+
+    def test_warnings_go_to_stderr_not_into_the_script(self, app_path, tmp_path):
+        """Silence on success must not mean silence about problems."""
+        bad = tmp_path / 'bad.hosts'
+        bad.write_text(':nosuchdirective foo\n10.0.0.1\n')
+        result = run_app('--dump-simple-script', '-', '-f', str(bad),
+                         app_path=app_path)
+        assert 'nosuchdirective' in result.stderr, result.stderr
+        assert 'nosuchdirective' not in result.stdout, \
+            'a warning must not be mixed into the piped script'
+        assert '10.0.0.1' in result.stdout
+
+    def test_piped_output_reparses_cleanly(self, app_path, hosts_file, tmp_path):
+        """A redirected script is still a valid hosts file."""
+        piped = self.gen_stdout(app_path, hosts_file)
+        rt = tmp_path / 'roundtrip.hosts'
+        rt.write_text(piped.stdout)
+        result = run_app('--dump-hosts', '-f', str(rt), app_path=app_path)
+        assert result.returncode == 0, result.stderr
+        assert '10.30.1.1  ## sensor1-ctrl' in result.stdout
+        assert result.stderr == '', result.stderr
