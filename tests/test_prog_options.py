@@ -430,3 +430,87 @@ class TestProgOptionsBlock:
         warns  = [e for e in entries if e[0] == 'warn']
         assert not errors, "unclosed :with at EOF should NOT emit an error"
         assert not warns,  "unclosed :with at EOF should NOT emit a warning"
+
+
+class TestProgOptionsForRelayedHosts:
+    """Patterns must match the target of a relayed host, not its display name.
+
+    A ':with remote-ping <relay>' host is shown as 'relay→target', which no
+    sensible glob matches, and its resolved_hostname is unset — so rules like
+    '*-router -l admin' silently never fired for anything behind a relay.
+    """
+
+    def _relayed(self, pb, app, target, alias=None, relay='gw.example.com'):
+        if alias:
+            app.hosts_map[alias] = (target, alias)
+            app.hosts_map[target] = (target, alias)
+        m = pb.SshPingMonitor([relay], target, hosts_map=app.hosts_map)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        return m
+
+    def test_pattern_matches_the_resolv_alias(self, app, pb):
+        app._cmd_prog_options('ssh *-router -l admin')
+        m = self._relayed(pb, app, '10.111.1.1', alias='tent-router')
+        disabled, opts = app._match_prog_options('ssh', *app._prog_match_names(m))
+        assert not disabled
+        assert opts == '-l admin'
+
+    def test_pattern_matches_the_target_address(self, app, pb):
+        app._cmd_prog_options('ssh 10.111.* -l dev')
+        m = self._relayed(pb, app, '10.111.1.5')
+        _, opts = app._match_prog_options('ssh', *app._prog_match_names(m))
+        assert opts == '-l dev'
+
+    def test_disable_applies_to_relayed_hosts(self, app, pb):
+        """'*-cam* --disable' must hide connect for a relayed camera too."""
+        app._cmd_prog_options('ssh *-cam* --disable')
+        m = self._relayed(pb, app, '10.123.1.20', alias='sh1-cam1')
+        disabled, _ = app._match_prog_options('ssh', *app._prog_match_names(m))
+        assert disabled
+
+    def test_composite_display_name_is_not_the_subject(self, app, pb):
+        """A rule naming the relay no longer leaks onto the hosts behind it."""
+        app._cmd_prog_options('ssh gw.example.com -l relayuser')
+        m = self._relayed(pb, app, '10.111.1.1', alias='tent-router')
+        _, opts = app._match_prog_options('ssh', *app._prog_match_names(m))
+        assert opts == '', \
+            'options for the relay must not be applied to the target'
+
+    def test_plain_monitor_still_matches_on_its_own_name(self, app, pb):
+        app._cmd_prog_options('ssh *.internal -l admin')
+        m = pb.PingMonitor('box.internal')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        _, opts = app._match_prog_options('ssh', *app._prog_match_names(m))
+        assert opts == '-l admin'
+
+    def test_plain_monitor_resolv_alias_still_matches(self, app, pb):
+        app._cmd_prog_options('ssh *-router -l admin')
+        m = pb.PingMonitor('10.0.0.1')
+        m.resolved_hostname = 'core-router'
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        _, opts = app._match_prog_options('ssh', *app._prog_match_names(m))
+        assert opts == '-l admin'
+
+    def test_non_monitor_entry_yields_empty_names(self, app, pb):
+        """SectionLabel / None must not raise, and must not match a bare name."""
+        assert app._prog_match_names(pb.SectionLabel('Group', 1, False, False)) \
+            == ('', '')
+        assert app._prog_match_names(None) == ('', '')
+
+    def test_injected_into_the_mux_command(self, app, pb):
+        """End to end: the -l lands in the actual ssh command for a relayed host."""
+        app._cmd_prog_options('ssh *-router -l admin')
+        self._relayed(pb, app, '10.111.1.1', alias='tent-router')
+        backend = MagicMock()
+        backend.is_inside.return_value = True
+        backend.available.return_value = True
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': backend}):
+            app._mux_from_binding = True
+            app._cmd_mux('ssh -J gw.example.com 10.111.1.1')
+        backend.split.assert_called_once()
+        # split(direction, command); the command is wrapped in sh -c '...'
+        launched = ' '.join(backend.split.call_args[0][1])
+        assert 'ssh -l admin -J gw.example.com 10.111.1.1' in launched, launched

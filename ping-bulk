@@ -7188,8 +7188,7 @@ class Application:
                 label = f"  ▶  {name}  [Enter details]  [p pause]  [ESC clear]"
                 if isinstance(entry, Monitor):
                     disabled, _ = self._match_prog_options(
-                        'ssh', entry.host,
-                        getattr(entry, 'resolved_hostname', None) or '')
+                        'ssh', *self._prog_match_names(entry))
                     if not disabled:
                         label += "  [c connect]"
             yield label, curses.A_REVERSE | curses.A_BOLD
@@ -9048,9 +9047,8 @@ class Application:
                      if self.highlighted_index is not None
                      and 0 <= self.highlighted_index < len(self.entries)
                      else None)
-            host = entry.host if isinstance(entry, Monitor) else None
-            resolved_hostname = entry.resolved_hostname if isinstance(entry, Monitor) else ''
-            disabled, opts = self._match_prog_options(prog, host or '', resolved_hostname or '')
+            disabled, opts = self._match_prog_options(
+                prog, *self._prog_match_names(entry))
             if disabled:
                 return
             if opts:
@@ -9221,10 +9219,34 @@ class Application:
         self.add_event("cmd",
             "with: this directive is only valid in a hosts file, not interactively")
 
+    def _prog_match_names(self, entry):
+        """Return the (name, alias) pair :prog-options patterns are matched on.
+
+        For a relayed host this must be the *target*, not ``entry.host``: that
+        display name is a composite like ``ses-wg-video→10.111.1.1``, which no
+        sensible glob matches, and ``resolved_hostname`` is unset on those
+        monitors — so rules like ``*-router -l admin`` never fired for anything
+        reached through a relay.
+
+        The target is also the right subject on the merits: the injected options
+        apply to the host being connected to, and the relay is only a ``-J`` hop
+        along the way.  A rule naming the relay therefore no longer matches the
+        hosts behind it, only the relay itself when it is monitored directly.
+        """
+        if isinstance(entry, SshPingMonitor):
+            target = entry._ping_host
+            return (target, entry._reverse_lookup_alias(target))
+        if isinstance(entry, Monitor):
+            return (entry.host, getattr(entry, 'resolved_hostname', None) or '')
+        return ('', '')
+
     def _match_prog_options(self, prog, host, resolved_hostname=''):
         """Return (disabled, opts_str) for prog + host by matching prog_options rules.
 
         Last matching rule wins. Returns (True, '') if disabled, (False, opts) otherwise.
+
+        Callers with a Monitor in hand should pass ``*self._prog_match_names(e)``
+        rather than ``e.host`` directly — see that method for why.
         """
         rules = self.prog_options.get(prog, [])
         matched_opts = ''
@@ -10997,8 +11019,7 @@ class Application:
 
         # Connect status for this host (via :prog-options ssh rules)
         conn_disabled, conn_opts = self._match_prog_options(
-            'ssh', monitor.host,
-            getattr(monitor, 'resolved_hostname', None) or '')
+            'ssh', *self._prog_match_names(monitor))
         if conn_disabled:
             lines.append(f"  Connect: disabled")
         else:

@@ -1115,6 +1115,15 @@ above depends on it.
     both the literal hostname and the resolved hostname; the **last
     match wins**.
 
+    For a host monitored through a relay (``:remote-ping`` or ``:with
+    remote-ping``) the patterns are matched against the **target** — its
+    address and its ``:resolv`` alias — not against the composite
+    ``relay→target`` display name.  So ``*-router -l admin`` applies to
+    ``tent-router`` whether it is pinged directly or through a relay.  A
+    rule naming the relay applies only when the relay itself is monitored
+    as a host, not to the hosts reached through it; the injected options
+    describe the connection endpoint, and the relay is only a ``-J`` hop.
+
     The special value ``--disable`` suppresses the launch entirely for
     matching hosts::
 
