@@ -12,6 +12,7 @@ Covers the pure helpers and the stat integration without touching the network:
                              freezes at the last probe instead of ticking
   - :set stats drift/rtime — alias parsing
   - :set clock-interval    — value parsing + validation
+  - _run_clock_probe       — no-rt verdict needs consecutive failed probes
 
 The probe subprocess itself (_clock_probe_once) is exercised against real
 hosts in the e2e/tmux tests, not here.
@@ -385,3 +386,52 @@ class TestProbeCmd:
         assert cmd == [
             'ssh', '-o', 'BatchMode=yes', '-J', 'bastion', 'user@relay',
             'ping', '-n', '-c', '1', '-W', '2', '-T', 'tsandaddr', '10.0.0.5']
+
+
+# ===========================================================================
+# _run_clock_probe — the no-rt verdict state machine
+# ===========================================================================
+
+class TestNoRtVerdict:
+    """'no-remote-time' needs _CLOCK_NO_RT_PROBES consecutive failures: each
+    probe is a single packet, so one lost packet must not permanently brand
+    a timestamp-capable host as unsupported."""
+
+    @staticmethod
+    def probe(pb, app, m, result):
+        from unittest.mock import patch
+        with patch.object(app, '_clock_probe_once', return_value=result):
+            app._run_clock_probe(m)
+
+    def test_verdict_needs_consecutive_failures(self, pb, tmp_path):
+        app = make_app(pb, tmp_path)
+        m = make_monitor(pb)
+        for i in range(pb._CLOCK_NO_RT_PROBES - 1):
+            self.probe(pb, app, m, None)
+            assert m.clock_state == 'idle', f"probe {i + 1} must not decide"
+        self.probe(pb, app, m, None)
+        assert m.clock_state == 'no-remote-time'
+
+    def test_success_resets_failure_count(self, pb, tmp_path):
+        app = make_app(pb, tmp_path)
+        m = make_monitor(pb)
+        self.probe(pb, app, m, None)
+        self.probe(pb, app, m, None)
+        self.probe(pb, app, m, 1500)          # answers on the third try
+        assert m.clock_state == 'ok'
+        assert m.clock_offset_ms == 1500
+        assert m._clock_fails == 0
+        # A later transient failure keeps 'ok' and never re-counts to no-rt.
+        for _ in range(pb._CLOCK_NO_RT_PROBES + 1):
+            self.probe(pb, app, m, None)
+        assert m.clock_state == 'ok'
+        assert m.clock_offset_ms == 1500
+
+    def test_failed_probes_schedule_retry(self, pb, tmp_path):
+        import time
+        app = make_app(pb, tmp_path)
+        m = make_monitor(pb)
+        self.probe(pb, app, m, None)
+        assert m.clock_state == 'idle'
+        assert m._clock_next_ts > time.monotonic(), \
+            "a non-final failure must schedule the next attempt"

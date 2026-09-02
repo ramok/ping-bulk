@@ -33,8 +33,10 @@ option** (`ping -T`) — the host stamps the packet with its own clock as it
 passes. No SSH login and no agent are required on the monitored host. The probe
 is separate from the liveness ping and is armed the first time a host comes up;
 hosts that answer are re-polled every `:set clock-interval` seconds (default
-30), and hosts that ping but never return a timestamp are marked `no-rt` and
-not probed again until they next recover.
+30). A host that pings but returns no usable timestamp is marked `no-rt` only
+after three consecutive failed probes (each probe is a single packet, so one
+lost packet must not be a permanent verdict) and is then not probed again
+until it next recovers.
 
 ## The NAT / overlay problem
 
