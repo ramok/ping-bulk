@@ -556,6 +556,12 @@ def _resolve_binding(bindings, ctx_keys):
 
     Most-specific context (largest matching frozenset) wins.
     ``None`` context is the fallback.
+
+    Equally specific contexts are a real collision, not a hypothetical: a
+    default guarded on ``--%d`` and a user binding guarded on ``--%h`` both
+    match a relayed host.  A user binding wins those ties, so adding a built-in
+    default can never silently take a key away from something the user wrote.
+    Insertion order decided it before, which meant defaults always won.
     """
     if not bindings:
         return None
@@ -567,7 +573,10 @@ def _resolve_binding(bindings, ctx_keys):
                 best = b
                 best_size = 0
         elif ctx <= ctx_keys:
-            if len(ctx) > best_size:
+            if len(ctx) > best_size or (
+                    len(ctx) == best_size
+                    and b.origin == 'user'
+                    and getattr(best, 'origin', None) != 'user'):
                 best = b
                 best_size = len(ctx)
     return best
@@ -5923,7 +5932,12 @@ class Application:
 
     def _register_default_bindings(self):
         """Populate the key trie with default (hardcoded) bindings."""
-        def _b(notation, *commands, context=None, hint='', desc=''):
+        def _b(notation, *commands, context=None, hint='', desc='', if_cmd=None):
+            # if_cmd mirrors ':bind-key --if-cmd': register only when the
+            # program is on PATH, so a default may reference an optional tool
+            # without the tool becoming a special case in the code.
+            if if_cmd is not None and not shutil.which(if_cmd):
+                return
             keys = _parse_key_notation(notation)
             self._key_trie.insert(keys, _Binding(
                 list(commands), key_notation=notation, origin='default',
@@ -5957,6 +5971,10 @@ class Application:
         _b('c', ':mux ssh -J %{j?%{j:,},}%d %r', context=frozenset('d'),
            desc='open SSH connection to selected host (via its relay)')
         _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
+        # No relay handling here: because this names %r and not %d, a host
+        # behind a relay runs it on that relay automatically.
+        _b('t', ':mux mtr %r', if_cmd='mtr',
+           desc='traceroute to selected host')
         _b('?', ':help bindings', hint='help:[?]', desc='open keyboard reference')
         _b('<Esc>', ':select none', desc='clear host selection')
         # Selection
@@ -6085,7 +6103,9 @@ class Application:
         expanded from the currently highlighted entry.  If a required variable
         is unavailable the keypress is silently ignored and a warning logged.
         """
-        commands, warning = self._expand_binding_commands(binding.commands)
+        used_vars = set()
+        commands, warning = self._expand_binding_commands(binding.commands,
+                                                          used=used_vars)
         if warning:
             self.add_event("bind-key", warning)
             return
@@ -6101,11 +6121,54 @@ class Application:
             }
         else:
             self._mux_from_binding = True
+            self._mux_relay_prefix = self._relay_prefix_for(used_vars)
             try:
                 for cmd in commands:
                     self._dispatch_cmd(cmd)
             finally:
                 self._mux_from_binding = False
+                self._mux_relay_prefix = None
+
+    def _relay_prefix_for(self, used_vars):
+        """Return ['ssh', '-t', ...relay] to run a command where the host lives.
+
+        A host behind a relay is reachable *only* from that relay — that is why
+        its ping runs there — so a tool aimed at it (mtr, traceroute, iperf3,
+        curl, …) has no route to it locally and must run on the relay too.
+        Returns [] when the command should run locally.
+
+        The decision is read off the variables the binding used, so it holds for
+        any program and needs no list of known tools:
+
+        * ``%h``/``%i``/``%r`` — the command names the host, so it is aimed at
+          the host and needs the relay's vantage point.
+        * ``%d`` — the binding already handles the relay itself (as the ``c``
+          binding does, jumping through it), so it is left alone.
+        * neither — the command has nothing to do with the host (``:mux man
+          ping-bulk`` from the help overlay), so it stays local.
+
+        ``-t`` is always added: these are interactive terminal tools, and their
+        UI needs a tty on the far side.
+        """
+        if not used_vars or 'd' in used_vars:
+            return []
+        if not used_vars & {'h', 'i', 'r'}:
+            return []
+        entry = (self.entries[self.highlighted_index]
+                 if self.highlighted_index is not None
+                 and 0 <= self.highlighted_index < len(self.entries)
+                 else None)
+        if not isinstance(entry, SshPingMonitor):
+            return []
+        prefix = ['ssh', '-t']
+        jumps = entry._extract_jump_hosts(entry._ssh_args)
+        if jumps:
+            # One comma-separated list: ssh keeps only the first value of a
+            # repeated option, so '-J a -J b' would silently drop b.  These
+            # hops stop *before* the relay — we log in to it, not through it.
+            prefix += ['-J', ','.join(jumps)]
+        prefix.append(entry._ssh_dest)
+        return prefix
 
     def _dispatch_mode_key(self, mode, key):
         """Dispatch a keypress in a non-normal UI mode (help/details/command).
@@ -6148,17 +6211,23 @@ class Application:
                 return ''
         return self._COND_RE.sub(replace_cond, s)
 
-    def _expand_binding_commands(self, commands):
+    def _expand_binding_commands(self, commands, used=None):
         """Expand %vars in a list of command strings.
 
         Returns ``(expanded_commands, warning_or_None)``.
         On missing required variable returns the original commands and a warning.
+
+        Pass a set as *used* to learn which variable names the templates
+        referenced.  ``_execute_binding`` uses that to decide whether a command
+        is aimed at the selected host and whether it already handles the host's
+        relay itself — see :meth:`_relay_prefix_for`.
         """
         ctx = self._binding_context()
         try:
             expanded = [self._expand_conditional(c, ctx) for c in commands]
             return ([self._BINDING_VAR_RE.sub(
-                lambda m: self._replace_var(m, ctx), c) for c in expanded], None)
+                lambda m: self._replace_var(m, ctx, used), c)
+                for c in expanded], None)
         except _BindingVarMissing as e:
             return (commands, str(e))
 
@@ -6244,12 +6313,14 @@ class Application:
         return monitors
 
     @staticmethod
-    def _replace_var(m, ctx):
+    def _replace_var(m, ctx, used=None):
         """Regex replacement callback for binding variable expansion."""
         var = m.group('var') or m.group('svar')
         sep = m.group('sep')
         if var == '%':
             return '%'
+        if used is not None:
+            used.add(var)
         value = ctx.get(var)
         if value is None:
             raise _BindingVarMissing(
@@ -9073,6 +9144,23 @@ class Application:
             if opts:
                 tokens = [prog] + shlex.split(opts) + list(tokens[1:])
 
+            # Run the command on the host's relay when it cannot be reached
+            # from here (see _relay_prefix_for).  The program's own rules were
+            # matched above against the target, which is what it acts on; the
+            # ssh rules that apply to the relay hop are matched separately,
+            # because that login lands on the relay, not on the target.
+            relay = getattr(self, '_mux_relay_prefix', None)
+            if relay:
+                relay_disabled, relay_opts = self._match_prog_options(
+                    'ssh', *self._relay_match_names(entry))
+                if relay_disabled:
+                    self.add_event("cmd",
+                        f"mux: ssh to the relay is disabled by :prog-options, "
+                        f"cannot run '{prog}' for this host")
+                    return
+                tokens = (relay[:1] + shlex.split(relay_opts) + relay[1:]
+                          + tokens) if relay_opts else relay + tokens
+
         # Kiosk whitelist: only ssh and login are permitted; X terminal not allowed
         if self.kiosk_mode:
             cmd_name = tokens[0].lower()
@@ -9258,6 +9346,19 @@ class Application:
         if isinstance(entry, Monitor):
             return (entry.host, getattr(entry, 'resolved_hostname', None) or '')
         return ('', '')
+
+    def _relay_match_names(self, entry):
+        """Return the (name, alias) pair for *entry*'s relay, for ssh rules.
+
+        The mirror of :meth:`_prog_match_names`: when a command is wrapped in an
+        ``ssh`` to the relay, that login lands on the **relay**, so its rules —
+        typically ``-l <user>`` — are the ones that apply to the wrapper.  The
+        wrapped program keeps being matched against the target it acts on.
+        """
+        if not isinstance(entry, SshPingMonitor):
+            return ('', '')
+        dest = entry._ssh_dest
+        return (dest, entry._reverse_lookup_alias(dest))
 
     def _match_prog_options(self, prog, host, resolved_hostname=''):
         """Return (disabled, opts_str) for prog + host by matching prog_options rules.

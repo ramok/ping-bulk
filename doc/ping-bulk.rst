@@ -293,6 +293,17 @@ Display
 ``C``
     Open the *clear event log* confirmation prompt.
 
+``c``
+    Open an SSH connection to the selected host in a split pane.  A host
+    behind a relay is reached by jumping through it.  See **``c`` hotkey
+    (SSH connect)** below.
+
+``t``
+    Run ``mtr`` against the selected host in a split pane.  Bound only when
+    ``mtr`` is on ``PATH``.  For a host behind a relay the trace runs *on the
+    relay*, since the host is not reachable from here — see **Commands that
+    run where the host is reachable** below.
+
 
 COMMANDS
 ========
@@ -1197,6 +1208,67 @@ Any ``:prog-options ssh`` rules that match the host are automatically
 injected by ``:mux``, so `:prog-options` is the recommended way to
 supply per-host SSH flags rather than duplicating them in every
 ``:bind-key`` definition.
+
+
+Commands that run where the host is reachable
+---------------------------------------------
+
+A host behind a relay is reachable *only* from that relay — that is why its
+``ping`` runs there.  A diagnostic tool aimed at such a host therefore has no
+route to it from here at all: ``mtr 10.123.1.8`` on the local machine does not
+reach a host that lives behind the relay, it fails or traces something else
+entirely.
+
+So when a ``:mux`` command comes from a key binding and is aimed at a relayed
+host, ping-bulk runs it on that host's relay::
+
+    :bind-key --if-cmd mtr t :mux mtr %r
+
+    # selected host is plain      → mtr <host>
+    # selected host is relayed    → ssh -t <relay> mtr <target>
+    # relayed, with -J bastion    → ssh -t -J bastion <relay> mtr <target>
+
+One binding covers both cases, and it works for any program — ``traceroute``,
+``tracepath``, ``iperf3``, ``curl``, ``nmap``.  There is no list of known tools.
+
+Whether a command is aimed at the host is decided by the variables the binding
+uses:
+
++-------------------------+-----------------------------------------------+
+| Binding uses            | Behaviour                                     |
++=========================+===============================================+
+| ``%h`` / ``%i`` / ``%r``| Names the host, so it runs on the relay       |
++-------------------------+-----------------------------------------------+
+| ``%d``                  | Already relay-aware (as ``c`` is, jumping     |
+|                         | through it) — left exactly as written         |
++-------------------------+-----------------------------------------------+
+| neither                 | Nothing to do with the host (``:mux man       |
+|                         | ping-bulk``) — stays local                    |
++-------------------------+-----------------------------------------------+
+
+``-t`` is always added, because these are interactive terminal tools and their
+display needs a tty on the far side.  The ``-J`` chain stops *before* the relay:
+the wrapper logs in **to** it, unlike ``c``, which jumps **through** it.
+
+``:prog-options`` are resolved per endpoint.  The wrapped program keeps being
+matched against the target it acts on, while the ``ssh`` rules applied to the
+wrapper are matched against the **relay**, because that login lands there::
+
+    :prog-options ssh ses-wg-video  -l admin      # the relay login
+    :prog-options ssh *-jetson      -l jetson     # the target, used by 'c'
+    :prog-options mtr *             -4
+
+    # t on a relayed jetson → ssh -l admin -t ses-wg-video mtr -4 <target>
+    # c on the same host    → ssh -l jetson -J ses-wg-video <target>
+
+If ``:prog-options ssh`` disables the relay itself there is no way in, so the
+command is refused with a message rather than run in a misleading form.
+
+Two limits worth knowing.  ``--if-cmd`` tests the **local** machine, so a tool
+present here but missing on the relay still binds the key and the pane reports
+``command not found`` from the far side; there is no remote equivalent.  And a
+tool needing extra privileges (``mtr`` wants ``CAP_NET_RAW``) may fail over SSH
+where a local run would have worked.
 
 If ping-bulk is **not** running inside a terminal multiplexer (tmux or
 screen), ``c`` offers to relaunch it inside tmux.

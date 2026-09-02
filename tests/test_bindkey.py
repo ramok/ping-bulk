@@ -14,8 +14,9 @@ so the real user config is never read or written.
 
 import curses
 import os
+import shutil
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +420,9 @@ class TestBindkeyCommand:
         assert has_children_g
 
     def test_bindkey_context_flag(self, app, pb):
-        """':bindkey --%h t :mux mtr' creates a context-aware binding."""
-        app._cmd_bindkey('--%h t :mux mtr')
-        keys = pb._parse_key_notation('t')
+        """':bindkey --%h y :mux mtr' creates a context-aware binding."""
+        app._cmd_bindkey('--%h y :mux mtr')
+        keys = pb._parse_key_notation('y')
         # Without host context → no match (no unconditional fallback)
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
@@ -1310,8 +1311,8 @@ class TestConditionalBindings:
 
     def test_if_cmd_missing_skips(self, app, pb):
         """--if-cmd with a nonexistent program → binding is skipped."""
-        app._cmd_bindkey('--if-cmd zzz_no_such_program_999 t :quit')
-        keys = pb._parse_key_notation('t')
+        app._cmd_bindkey('--if-cmd zzz_no_such_program_999 y :quit')
+        keys = pb._parse_key_notation('y')
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
 
@@ -1334,8 +1335,8 @@ class TestConditionalBindings:
     def test_if_cmd_multiple_one_fails(self, app, pb):
         """Multiple --if-cmd flags: first failure skips the binding."""
         app._cmd_bindkey(
-            '--if-cmd python3 --if-cmd zzz_no_such_program_999 t :quit')
-        keys = pb._parse_key_notation('t')
+            '--if-cmd python3 --if-cmd zzz_no_such_program_999 y :quit')
+        keys = pb._parse_key_notation('y')
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
 
@@ -1348,8 +1349,8 @@ class TestConditionalBindings:
 
     def test_if_sh_false_skips(self, app, pb):
         """--if-sh with a false condition → binding is skipped."""
-        app._cmd_bindkey('--if-sh "false" t :quit')
-        keys = pb._parse_key_notation('t')
+        app._cmd_bindkey('--if-sh "false" y :quit')
+        keys = pb._parse_key_notation('y')
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
 
@@ -1372,8 +1373,8 @@ class TestConditionalBindings:
         """--if-sh is blocked in kiosk mode."""
         app.kiosk_mode = True
         app._loading_file = True  # even during file loading
-        app._cmd_bindkey('--if-sh "true" t :quit')
-        keys = pb._parse_key_notation('t')
+        app._cmd_bindkey('--if-sh "true" y :quit')
+        keys = pb._parse_key_notation('y')
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
         matching = [e for e in app.events
@@ -1391,8 +1392,8 @@ class TestConditionalBindings:
 
     def test_if_cmd_with_context_flags(self, app, pb):
         """--if-cmd combined with --%h context flag."""
-        app._cmd_bindkey('--if-cmd python3 --%h t :quit')
-        keys = pb._parse_key_notation('t')
+        app._cmd_bindkey('--if-cmd python3 --%h y :quit')
+        keys = pb._parse_key_notation('y')
         # With no context vars, shouldn't resolve
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
@@ -1430,8 +1431,8 @@ class TestConditionalBindings:
 
     def test_if_cmd_pass_if_sh_fail(self, app, pb):
         """--if-cmd passes but --if-sh fails → binding skipped."""
-        app._cmd_bindkey('--if-cmd python3 --if-sh "false" t :quit')
-        keys = pb._parse_key_notation('t')
+        app._cmd_bindkey('--if-cmd python3 --if-sh "false" y :quit')
+        keys = pb._parse_key_notation('y')
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
 
@@ -1483,3 +1484,202 @@ class TestDefaultCBindingForRelayHosts:
         m = pb.PingMonitor('plain.example.com')
         assert self._expand_c(app, pb, m, context=set()) == \
             ':mux ssh plain.example.com'
+
+
+class TestUserBindingBeatsDefaultOnTie:
+    """An explicit user binding must win over an equally specific default.
+
+    A default guarded on --%d and a user binding guarded on --%h both match a
+    relayed host.  Insertion order used to decide, so defaults always won and
+    adding one could silently take a key away from the user's own config.
+    """
+
+    def test_user_context_binding_wins_over_default(self, app, pb):
+        app._cmd_bindkey('--%h c :mux echo mine')
+        m = pb.SshPingMonitor(['gw.example.com'], '10.0.0.1')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = set(app._binding_context().keys())
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('c'), ctx)
+        assert binding.origin == 'user'
+        assert binding.commands == [':mux echo mine']
+
+    def test_more_specific_default_still_wins(self, app, pb):
+        """Specificity is still checked first; origin only breaks ties.
+
+        'c' has a --%d default, which outranks an unguarded user binding.
+        """
+        app._cmd_bindkey('c :mux echo unguarded')
+        m = pb.SshPingMonitor(['gw.example.com'], '10.0.0.1')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = set(app._binding_context().keys())
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('c'), ctx)
+        assert binding.origin == 'default', \
+            'a --%d default is more specific than an unguarded user binding'
+
+    def test_user_binding_wins_for_plain_host_too(self, app, pb):
+        app._cmd_bindkey('--%h c :mux echo mine')
+        m = pb.PingMonitor('host.example.com')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = set(app._binding_context().keys())
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('c'), ctx)
+        assert binding.commands == [':mux echo mine']
+
+
+# ===========================================================================
+# TestRelayPrefix — running a host-directed command where the host is reachable
+# ===========================================================================
+
+class TestRelayPrefix:
+    """A host behind a relay is reachable only from that relay.
+
+    So a tool aimed at it (mtr, traceroute, iperf3, curl, …) has no route to it
+    locally and must run on the relay.  The decision is read off the variables
+    the binding used, which keeps it program-agnostic — there is no list of
+    known tools anywhere in the code.
+    """
+
+    def _relayed(self, app, pb, ssh_args=('relay',), target='10.0.0.1'):
+        m = pb.SshPingMonitor(list(ssh_args), target)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        return m
+
+    def _prefix_for(self, app, template):
+        used = set()
+        app._expand_binding_commands([template], used=used)
+        return app._relay_prefix_for(used)
+
+    # ── which commands get wrapped ───────────────────────────────────────────
+
+    def test_host_directed_command_runs_on_the_relay(self, app, pb):
+        self._relayed(app, pb)
+        assert self._prefix_for(app, ':mux mtr %r') == ['ssh', '-t', 'relay']
+
+    def test_percent_h_also_counts_as_host_directed(self, app, pb):
+        self._relayed(app, pb)
+        assert self._prefix_for(app, ':mux traceroute %h') == ['ssh', '-t', 'relay']
+
+    def test_percent_i_also_counts_as_host_directed(self, app, pb):
+        self._relayed(app, pb)
+        assert self._prefix_for(app, ':mux iperf3 -c %i') == ['ssh', '-t', 'relay']
+
+    def test_relay_aware_binding_is_left_alone(self, app, pb):
+        """A binding naming %d handles the relay itself, as 'c' does."""
+        self._relayed(app, pb)
+        assert self._prefix_for(app, ':mux ssh -J %d %r') == []
+
+    def test_command_not_about_the_host_stays_local(self, app, pb):
+        """':mux man ping-bulk' from the help overlay must not be wrapped."""
+        self._relayed(app, pb)
+        assert self._prefix_for(app, ':mux man ping-bulk') == []
+
+    def test_section_variable_only_stays_local(self, app, pb):
+        self._relayed(app, pb)
+        assert self._prefix_for(app, ':mux echo %s') == []
+
+    def test_plain_host_stays_local(self, app, pb):
+        m = pb.PingMonitor('host.example.com')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        assert self._prefix_for(app, ':mux mtr %r') == []
+
+    def test_nothing_selected_stays_local(self, app, pb):
+        app.highlighted_index = None
+        assert app._relay_prefix_for({'r'}) == []
+
+    # ── how the prefix is built ──────────────────────────────────────────────
+
+    def test_jump_hosts_precede_the_relay_in_one_list(self, app, pb):
+        """We log in *to* the relay, so the -J chain stops before it."""
+        self._relayed(app, pb, ssh_args=('-J', 'a', '-J', 'b', 'relay'))
+        assert self._prefix_for(app, ':mux mtr %r') == \
+            ['ssh', '-t', '-J', 'a,b', 'relay']
+
+    def test_tty_is_requested(self, app, pb):
+        """Interactive tools need a tty on the far side."""
+        self._relayed(app, pb)
+        assert '-t' in self._prefix_for(app, ':mux mtr %r')
+
+    # ── end to end, including :prog-options ──────────────────────────────────
+
+    def _launch(self, app, pb, template):
+        used = set()
+        cmds, warning = app._expand_binding_commands([template], used=used)
+        assert warning is None, warning
+        backend = MagicMock()
+        backend.is_inside.return_value = True
+        backend.available.return_value = True
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': backend}):
+            app._mux_from_binding = True
+            app._mux_relay_prefix = app._relay_prefix_for(used)
+            try:
+                app._cmd_mux(cmds[0][len(':mux '):])
+            finally:
+                app._mux_from_binding = False
+                app._mux_relay_prefix = None
+        if not backend.split.called:
+            return None
+        return ' '.join(backend.split.call_args[0][1])
+
+    def test_wrapped_command_is_launched(self, app, pb):
+        self._relayed(app, pb)
+        assert 'ssh -t relay mtr 10.0.0.1' in self._launch(app, pb, ':mux mtr %r')
+
+    def test_relay_gets_its_own_ssh_options_not_the_targets(self, app, pb):
+        """The login lands on the relay, so the relay's -l applies to it.
+
+        The target's own rule must not be used for the relay hop — that was the
+        bug that made a hand-written relay binding log in as the wrong user.
+        """
+        app._cmd_prog_options('ssh relay -l relayuser')
+        app._cmd_prog_options('ssh 10.0.0.* -l targetuser')
+        self._relayed(app, pb)
+        launched = self._launch(app, pb, ':mux mtr %r')
+        assert 'ssh -l relayuser -t relay' in launched, launched
+        assert 'targetuser' not in launched, launched
+
+    def test_wrapped_program_still_gets_its_own_rules(self, app, pb):
+        """The program acts on the target, so its rules match the target."""
+        app._cmd_prog_options('mtr 10.0.0.* -4')
+        self._relayed(app, pb)
+        launched = self._launch(app, pb, ':mux mtr %r')
+        assert 'mtr -4 10.0.0.1' in launched, launched
+
+    def test_disabled_program_is_not_run_at_all(self, app, pb):
+        app._cmd_prog_options('mtr 10.0.0.* --disable')
+        self._relayed(app, pb)
+        assert self._launch(app, pb, ':mux mtr %r') is None
+
+    def test_disabled_relay_ssh_refuses_and_explains(self, app, pb):
+        """No way in means no run; say so rather than launching something odd."""
+        app._cmd_prog_options('ssh relay --disable')
+        self._relayed(app, pb)
+        assert self._launch(app, pb, ':mux mtr %r') is None
+        assert any('relay is disabled' in e.text for e in app.events), \
+            [e.text for e in app.events]
+
+
+class TestDefaultTBinding:
+    """'t' is a default only when mtr is installed, via _b(if_cmd=...)."""
+
+    @pytest.mark.skipif(not shutil.which('mtr'), reason='mtr not installed')
+    def test_t_is_bound_when_mtr_present(self, app, pb):
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('t'), {'h', 'r'})
+        assert binding is not None
+        assert binding.commands == [':mux mtr %r']
+
+    def test_default_is_skipped_when_the_program_is_absent(self, app, pb):
+        """The gate is the generic _b(if_cmd=...), not a per-program check.
+
+        Re-registers the defaults with nothing on PATH: every if_cmd-gated
+        default drops out, while ungated ones such as 'q' stay.
+        """
+        fresh = pb._KeyTrie()
+        with patch.object(app, '_key_trie', fresh), \
+                patch.object(pb.shutil, 'which', return_value=None):
+            app._register_default_bindings()
+        assert fresh.resolve(pb._parse_key_notation('t'), {'h', 'r'})[0] is None
+        assert fresh.resolve(pb._parse_key_notation('q'), set())[0] is not None

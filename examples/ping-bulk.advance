@@ -311,6 +311,16 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # --hint TEXT    short label shown in the bottom bar (use [x] notation for hotkey)
 # --mode MODE    bind key in a specific UI layer: normal (default), help, details
 #
+# Host-directed commands run where the host is reachable: a host behind a relay
+# is only reachable from that relay, so ':mux mtr %r' on such a host runs
+# 'ssh -t <relay> mtr <target>' instead of tracing from here (which has no
+# route to it).  Any program works this way -- traceroute, iperf3, curl, nmap.
+# The rule is read off the variables used: %h/%i/%r means "aimed at the host"
+# (wrap it), %d means "already relay-aware" (leave it), neither means it has
+# nothing to do with the host (stay local).
+# Built-in default, bound only when mtr is installed:
+#   :bind-key --if-cmd mtr t :mux mtr %r
+#
 # Default 'c' binding (built-in, shown here for reference / override):
 #   SSH-proxied hosts (have %d):  :mux ssh -J %{j?%{j:,},}%d %r
 #   Plain hosts:                  :mux ssh %r
