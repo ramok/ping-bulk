@@ -1011,32 +1011,36 @@ class TestDefaultCBinding:
         assert warning is None
         assert cmds == [':mux ssh 10.0.0.5']
 
-    def test_c_ssh_monitor_with_jump_expands_to_mux_j_d(self, app, pb):
-        """For SshPingMonitor with jump host, 'c' expands to ':mux ssh -J <jump> <dest>'."""
+    def test_c_ssh_monitor_with_jump_chains_relay_after_jump(self, app, pb):
+        """The relay is appended to the jump chain; the monitored host is the target."""
         self._make_ssh_entry(pb, app, ['-J', 'bastion', 'user@remote'])
         binding = self._resolve_c_binding(app, pb)
         assert binding is not None
         cmds, warning = app._expand_binding_commands(binding.commands)
         assert warning is None
-        assert cmds == [':mux ssh -J bastion user@remote']
+        assert cmds == [':mux ssh -J bastion,user@remote localhost']
 
-    def test_c_ssh_monitor_no_jump_expands_to_mux_d(self, app, pb):
-        """For SshPingMonitor without jump hosts, 'c' expands to ':mux ssh <dest>'."""
+    def test_c_ssh_monitor_no_jump_jumps_via_the_relay(self, app, pb):
+        """With no extra jumps the relay itself is the only -J hop."""
         self._make_ssh_entry(pb, app, ['user@remote'])
         binding = self._resolve_c_binding(app, pb)
         assert binding is not None
         cmds, warning = app._expand_binding_commands(binding.commands)
         assert warning is None
-        assert cmds == [':mux ssh user@remote']
+        assert cmds == [':mux ssh -J user@remote localhost']
 
-    def test_c_ssh_monitor_multi_jump_expands_all(self, app, pb):
-        """For SshPingMonitor with multiple jump hosts, all -J flags appear."""
+    def test_c_ssh_monitor_multi_jump_uses_one_comma_list(self, app, pb):
+        """All hops land in a single -J list.
+
+        Repeating the flag would look right but not work: ssh keeps the first
+        value of a repeated option, so '-J gw1 -J gw2' silently ignores gw2.
+        """
         self._make_ssh_entry(pb, app, ['-J', 'gw1', '-J', 'gw2', 'user@remote'])
         binding = self._resolve_c_binding(app, pb)
         assert binding is not None
         cmds, warning = app._expand_binding_commands(binding.commands)
         assert warning is None
-        assert cmds == [':mux ssh -J gw1 -J gw2 user@remote']
+        assert cmds == [':mux ssh -J gw1,gw2,user@remote localhost']
 
     def test_c_ssh_context_guard_wins_over_fallback(self, app, pb):
         """Context-guarded --%d binding beats the plain fallback for SSH monitors."""
@@ -1430,3 +1434,52 @@ class TestConditionalBindings:
         keys = pb._parse_key_notation('t')
         binding, _ = app._key_trie.resolve(keys, set())
         assert binding is None
+
+
+# ===========================================================================
+# TestDefaultCBindingForRelayHosts — 'c' on a :remote-ping host
+# ===========================================================================
+
+class TestDefaultCBindingForRelayHosts:
+    """'c' must open a shell on the selected host, not on its relay.
+
+    ping-bulk monitors a ':with remote-ping <relay>' host by running ping on
+    the relay, so reaching the host itself means jumping through the relay.
+    The binding used to expand to 'ssh <relay>', which landed on the relay and
+    dropped the selected host from the command altogether.
+    """
+
+    def _relay_monitor(self, pb, ssh_args, ping_host):
+        return pb.SshPingMonitor(ssh_args, ping_host)
+
+    def _expand_c(self, app, pb, monitor, context={'d'}):
+        app.entries.append(monitor)
+        app.highlighted_index = len(app.entries) - 1
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('c'), context)
+        assert binding is not None, "'c' should be bound in this context"
+        cmds, warning = app._expand_binding_commands(binding.commands)
+        assert warning is None, warning
+        return cmds[0]
+
+    def test_destination_is_the_host_not_the_relay(self, app, pb):
+        m = self._relay_monitor(pb, ['ses-wg-video'], '10.111.1.1')
+        assert self._expand_c(app, pb, m) == ':mux ssh -J ses-wg-video 10.111.1.1'
+
+    def test_existing_jump_hosts_come_before_the_relay(self, app, pb):
+        m = self._relay_monitor(pb, ['-J', 'relay1', 'ses-wg-video'], '10.111.1.99')
+        assert self._expand_c(app, pb, m) == \
+            ':mux ssh -J relay1,ses-wg-video 10.111.1.99'
+
+    def test_multi_hop_uses_one_comma_separated_flag(self, app, pb):
+        """ssh keeps the first value of a repeated option, so '-J a -J b' drops b."""
+        m = self._relay_monitor(pb, ['-J', 'r1,r2', 'ses-wg-video'], '10.111.1.77')
+        expanded = self._expand_c(app, pb, m)
+        assert expanded == ':mux ssh -J r1,r2,ses-wg-video 10.111.1.77'
+        assert expanded.count('-J') == 1, \
+            "repeated -J flags are silently collapsed by ssh to the first one"
+
+    def test_plain_host_still_connects_directly(self, app, pb):
+        """A host with no relay has no %d context and uses the simple form."""
+        m = pb.PingMonitor('plain.example.com')
+        assert self._expand_c(app, pb, m, context=set()) == \
+            ':mux ssh plain.example.com'

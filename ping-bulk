@@ -5929,8 +5929,14 @@ class Application:
         _b('W', ':save', desc='write event log to a file')
         _b('l', ':layout --toggle log', desc='full-screen event log, and back')
         _b('<C-l>', ':layout', desc='cycle layout: all / ping only / log only')
-        _b('c', ':mux ssh%{j? -J %{j: -J }} %d', context=frozenset('d'),
-           desc='open SSH connection to selected host')
+        # Remote-ping host: ping runs on the relay, so a shell on the *host*
+        # means jumping through that relay — the relay becomes the last hop and
+        # %r is the destination.  Connecting to %d instead landed on the relay
+        # and dropped the selected host entirely.
+        # One comma-separated -J, never repeated flags: ssh takes the first
+        # value of a repeated option, so '-J a -J b' silently ignores b.
+        _b('c', ':mux ssh -J %{j?%{j:,},}%d %r', context=frozenset('d'),
+           desc='open SSH connection to selected host (via its relay)')
         _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
         _b('?', ':help bindings', hint='help:[?]', desc='open keyboard reference')
         _b('<Esc>', ':select none', desc='clear host selection')

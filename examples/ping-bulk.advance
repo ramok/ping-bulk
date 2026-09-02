@@ -295,12 +295,14 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 #   %%  -- literal %
 #
 # Custom separator: %{H:,} = comma-separated,  %{H:\n} = newline-separated.
-# Same syntax for lists: %{j: -J } joins jump hosts with ' -J ' between items.
+# Same syntax for lists: %{j:,} joins jump hosts with a comma -- the form
+# 'ssh -J' wants for multiple hops.  Repeating the flag ('%{j: -J }') does not
+# work: ssh takes the first value of a repeated option, so '-J a -J b' drops b.
 #
 # Conditional expansion: %{var?template}
 #   Expands 'template' when var is set, otherwise empty string.
 #   Inner % vars are also expanded.  Useful for optional SSH flags:
-#     %{j?-J %{j: -J }}  ->  "-J host1 -J host2" when jump hosts exist, "" otherwise
+#     %{j?-J %{j:,}}  ->  "-J host1,host2" when jump hosts exist, "" otherwise
 #
 # Append '...' to pre-fill the command line without executing (edit mode):
 #   :bind-key t :mux mtr %i...     -- lets user review before Enter
@@ -310,8 +312,10 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # --mode MODE    bind key in a specific UI layer: normal (default), help, details
 #
 # Default 'c' binding (built-in, shown here for reference / override):
-#   SSH-proxied hosts (have %d):  :mux ssh%{j? -J %{j: -J }} %d
+#   SSH-proxied hosts (have %d):  :mux ssh -J %{j?%{j:,},}%d %r
 #   Plain hosts:                  :mux ssh %r
+# For a remote-ping host, ping runs on the relay, so a shell on the host itself
+# goes through it: the relay is the last -J hop and %r is the destination.
 # Override example:
 #   :bind-key c :mux ssh -l admin %r
 

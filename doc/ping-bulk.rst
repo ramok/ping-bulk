@@ -632,8 +632,11 @@ Key bindings
 +-------------------+-------------------------------------------------------+
 
 Custom separator: ``%{H:,}`` for comma, ``%{H:\n}`` for newline.
-The same syntax applies to list variables: ``%{j: -J }`` joins jump
-hosts with the string `` -J `` between items.
+The same syntax applies to list variables: ``%{j:,}`` joins jump hosts
+with a comma, which is the form ``ssh -J`` expects for multiple hops.
+Note that repeating the flag instead (``%{j: -J }``) does *not* work:
+``ssh`` uses the first value of a repeated option, so ``-J a -J b``
+silently ignores ``b``.
 
 Conditional variable expansion
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -644,10 +647,10 @@ Conditional variable expansion
     expanded.  This is useful to build flags that should only appear
     when an optional value is present::
 
-        %{j?-J %{j: -J }}
+        %{j?-J %{j:,}}
 
-    When jump hosts exist this produces ``-J host1 -J host2``; when
-    there are no jump hosts it expands to nothing.
+    When jump hosts exist this produces ``-J host1,host2``; when there
+    are no jump hosts it expands to nothing.
 
 If a required variable is unavailable (e.g. ``%p`` on an ICMP host),
 the keypress is ignored and a warning is shown in the event log.
@@ -1159,11 +1162,16 @@ The default ``c`` binding behaves as follows:
 - For ``SshPingMonitor`` hosts (those that have an SSH destination
   ``%d``, e.g. hosts added via ``:remote-ping`` or ``:with remote-ping``)::
 
-      :mux ssh%{j? -J %{j: -J }} %d
+      :mux ssh -J %{j?%{j:,},}%d %r
 
-  This reconnects to the SSH gateway, automatically appending any
-  ``-J`` jump-host flags that were used in the original ``:remote-ping``
-  directive.
+  ping-bulk reaches these hosts by running ``ping`` on the relay, so a
+  shell on the host itself means jumping through that relay: the relay
+  becomes the final ``-J`` hop and the monitored host is the
+  destination.  Any jump hosts from the original ``:remote-ping``
+  directive are kept ahead of it in the same comma-separated list.  For
+  ``:with remote-ping ses-wg-video`` over ``10.111.1.1`` this runs::
+
+      ssh -J ses-wg-video 10.111.1.1
 
 - For plain ICMP/TCP hosts::
 
