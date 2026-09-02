@@ -1683,3 +1683,62 @@ class TestDefaultTBinding:
             app._register_default_bindings()
         assert fresh.resolve(pb._parse_key_notation('t'), {'h', 'r'})[0] is None
         assert fresh.resolve(pb._parse_key_notation('q'), set())[0] is not None
+
+
+# ===========================================================================
+# TestContextFlagPercentI — '--%i' was never a valid guard
+# ===========================================================================
+
+class TestContextFlagPercentI:
+    """'i' was missing from _BINDING_CONTEXT_VARS since guards were introduced.
+
+    Every other per-host variable could be guarded on, so '--%i t :mux mtr %i'
+    looked reasonable, was rejected, and the rejection sat at 'info' — below
+    the default log level.
+    """
+
+    def test_percent_i_is_accepted(self, app, pb):
+        app._cmd_bindkey('--%i y :mux mtr %i')
+        m = pb.PingMonitor('10.0.0.1')
+        m.resolved_ip = '10.0.0.1'
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = set(app._binding_context().keys())
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('y'), ctx)
+        assert binding is not None
+        assert binding.commands == [':mux mtr %i']
+
+    def test_percent_i_guard_does_not_match_without_an_ip(self, app, pb):
+        """The guard is what it says: no resolved IP means the key is inert."""
+        app._cmd_bindkey('--%i y :mux mtr %i')
+        m = pb.PingMonitor('unresolved.example.com')
+        m.resolved_ip = None
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        ctx = set(app._binding_context().keys())
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('y'), ctx)
+        assert binding is None
+
+    @pytest.mark.parametrize('flag', ['--%h', '--%i', '--%r', '--%d',
+                                      '--%s', '--%p', '--%j'])
+    def test_every_context_variable_is_guardable(self, app, pb, flag):
+        app._cmd_bindkey(f'{flag} y :quit')
+        bindings, _ = app._key_trie.lookup(pb._parse_key_notation('y'))
+        assert bindings.get('normal'), f'{flag} was rejected'
+
+    def test_unknown_flag_is_still_rejected(self, app, pb):
+        app._cmd_bindkey('--%zz y :quit')
+        bindings, _ = app._key_trie.lookup(pb._parse_key_notation('y'))
+        assert not bindings.get('normal')
+
+    def test_rejection_is_visible_at_the_default_loglevel(self, app, pb):
+        """A hosts-file line that did nothing must not be reported below it."""
+        app._monitoring_started = False
+        app._cmd_bindkey('--%zz y :quit')
+        visible = [e for e in app.events if e.level <= pb.LEVEL_NORMAL]
+        assert any('unknown context flag --%zz' in e.text for e in visible), \
+            [e.text for e in app.events]
+
+    def test_percent_i_is_offered_in_completion(self, app, pb):
+        flags = pb._CMD_MAP['bind-key'].flags
+        assert '--%i' in flags, flags

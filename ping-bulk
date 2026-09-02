@@ -377,7 +377,10 @@ class _Binding:
         return f"_Binding({ctx}{self.key_notation!r}, {edit}, {cmds!r}, {self.origin}{mode_str})"
 
 # Valid context guard variables for :bind-key --%x flags.
-_BINDING_CONTEXT_VARS = frozenset('hsrdjpHR')
+# 'i' (resolved IP) was missing from the original set and stayed missing when
+# 'r' and 'd' were added, so '--%i' was rejected while every other per-host
+# variable could be guarded on.
+_BINDING_CONTEXT_VARS = frozenset('hisrdjpHR')
 
 
 class _BindingVarMissing(Exception):
@@ -4170,10 +4173,11 @@ CMD_REGISTRY = [
     CmdDef(['bind-key'],             '_cmd_bindkey',    None,
            '[--show] [key] [command]', 'bind/query/list key bindings',
            flags=['--show', '--mode', '--desc', '--hint',
-                  '--%h', '--%s', '--%p', '--%r', '--%d', '--%j']),
+                  '--%h', '--%i', '--%s', '--%p', '--%r', '--%d', '--%j']),
     CmdDef(['unbind-key'],           '_cmd_bindkey',    None,
            '<key>',              'unbind a key binding',
-           flags=['--mode', '--%h', '--%s', '--%p', '--%r', '--%d', '--%j']),
+           flags=['--mode', '--%h', '--%i', '--%s', '--%p', '--%r',
+                    '--%d', '--%j']),
     CmdDef(['select'],           '_cmd_select',     ['up', 'down', 'first', 'last', 'none'],
            '[up|down|first|last|none]', 'navigate or clear host selection'),
     CmdDef(['details'],          '_cmd_details',    None,
@@ -4797,6 +4801,16 @@ class Application:
         """
         if level is None:
             level = _CATEGORY_LEVELS.get(category, LEVEL_QUIET)
+            # A ':cmd' event raised while a config or hosts file is being read
+            # is a rejected directive — the line the user wrote did nothing —
+            # so it must be visible at the default level rather than sitting at
+            # 'info'.  Success chatter is already suppressed during startup
+            # (those sites guard on _monitoring_started), so what arrives here
+            # before monitoring begins is the failures.  An explicit level=
+            # still wins, which is how genuinely informational startup notes
+            # (such as ':log' yielding to -l) stay at 'info'.
+            if category == 'cmd' and not self._monitoring_started:
+                level = min(level, LEVEL_NORMAL)
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
         # Use cached column width; expand if a new host name is wider.
         cat_len = len(category)
@@ -6466,7 +6480,8 @@ class Application:
                                level=LEVEL_INFO)
                 return
 
-        # Parse context flags (--%h, --%s, --%p, --%j) — only for normal mode
+        # Parse context flags (--%h, --%i, --%r, --%d, --%s, --%p, --%j)
+        # — only for normal mode
         context = None
         if bind_modes == ['normal']:
             context, args = _parse_context_flags(args)

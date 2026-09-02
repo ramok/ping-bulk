@@ -99,10 +99,34 @@ class TestCategoryLevels:
         assert e.level == pb.LEVEL_QUIET
 
     def test_cmd_event_is_info(self, pb, tmp_path):
+        """Interactive ':cmd' output sits at info.
+
+        Monitoring is started first because that is what distinguishes typed
+        output from a rejected line in a config or hosts file, which has to be
+        visible at the default level — see test_startup_cmd_rejection_visible.
+        """
         app, _ = _make_app(pb, tmp_path)
+        app._monitoring_started = True
         app.add_event('cmd', 'fold: missing action argument')
         e = list(app.events)[-1]
         assert e.level == pb.LEVEL_INFO
+
+    def test_startup_cmd_rejection_is_normal(self, pb, tmp_path):
+        """The same message from a config/hosts file is raised to normal.
+
+        The line the user wrote did nothing, so 'info' would hide the reason
+        at the default level.
+        """
+        app, _ = _make_app(pb, tmp_path)
+        assert not app._monitoring_started
+        app.add_event('cmd', 'fold: missing action argument')
+        assert list(app.events)[-1].level == pb.LEVEL_NORMAL
+
+    def test_explicit_level_still_wins_at_startup(self, pb, tmp_path):
+        """A genuinely informational startup note stays at info."""
+        app, _ = _make_app(pb, tmp_path)
+        app.add_event('cmd', 'just so you know', level=pb.LEVEL_INFO)
+        assert list(app.events)[-1].level == pb.LEVEL_INFO
 
     def test_bind_key_event_is_debug(self, pb, tmp_path):
         app, _ = _make_app(pb, tmp_path)
@@ -172,6 +196,9 @@ class TestCategoryLevels:
 class TestDrawEventsFiltering:
 
     def _add_entries(self, pb, app):
+        # As during a running session: a startup ':cmd' would be a rejected
+        # config line and is deliberately raised to NORMAL instead of INFO.
+        app._monitoring_started = True
         app.add_event('10.0.0.1', 'host down')                           # QUIET
         app.add_event('resolv', 'no monitor matched')                     # NORMAL
         app.add_event('cmd', 'fold toggled')                              # INFO
@@ -223,6 +250,7 @@ class TestDrawEventsFiltering:
     def test_switch_level_reveals_history(self, pb, tmp_path):
         """Switching loglevel up reveals previously hidden entries."""
         app, _ = _make_app(pb, tmp_path)
+        app._monitoring_started = True
         app.add_event('cmd', 'some cmd output')
         app.loglevel = pb.LEVEL_NORMAL
         assert not any('some cmd output' in t for t in self._visible(pb, app))

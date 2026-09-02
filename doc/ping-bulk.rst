@@ -478,6 +478,14 @@ Log levels
     Event lines are colour-coded: errors are shown in red, warnings in
     yellow, and debug-level lines are dimmed.
 
+    One exception to the table: a ``:command`` **rejected while a config or
+    hosts file is being read** is reported at ``normal`` rather than ``info``.
+    A line written in a file that then does nothing — an unknown setting, a bad
+    value, an unrecognised ``--%x`` guard — is a configuration error the user
+    has to see, and at the default level ``info`` would hide it.  Command
+    output typed interactively stays at ``info``, since the log is right there
+    in front of whoever typed it.
+
     The level can also be set at startup via ``--log-level`` or the
     ``-v`` / ``-q`` flags (see **OPTIONS**).
 
@@ -561,6 +569,32 @@ Key bindings
 
             :bind-key --if-sh "man -wW ping-bulk 2> /dev/null" \
                       --mode help m :mux man ping-bulk
+
+    ``--%x`` (context guard)
+        Only fire the binding when variable ``%x`` has a value for the
+        current selection.  This lets one key mean different things for
+        different kinds of host — the built-in ``c`` uses ``--%d`` to
+        treat a relayed host differently from a direct one.  Valid
+        guards are exactly the variable names listed under **Variable
+        expansion** below:
+
+            ``--%h``  ``--%i``  ``--%r``  ``--%d``  ``--%j``
+            ``--%p``  ``--%s``  ``--%H``  ``--%R``
+
+        Several may be combined; all must have a value.  Guards apply to
+        normal mode only.  An unrecognised guard is rejected and the whole
+        binding is dropped — reported at ``normal`` level, so a mistake in
+        a hosts file is visible without raising the log level::
+
+            :bind-key --if-cmd mtr --%i T :mux --no-focus mtr %i
+
+        A guard is not always needed: a binding using ``%i`` on a host with
+        no resolved IP is simply ignored, with a ``%i: no value`` warning.
+        The guard is for when a *different* binding should take over
+        instead.
+
+        More specific guards win over less specific ones, and an explicit
+        user binding wins over a built-in default of equal specificity.
 
 ``:bind-key <key>``
     Query: print what command is bound to *key* in the event log.
