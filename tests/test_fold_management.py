@@ -391,3 +391,174 @@ class TestFoldKeyBindings:
         app._cmd_fold('z]')
         assert s1.folded is False
         assert s2.folded is True
+
+
+# ===========================================================================
+# _section_has_direct_hosts / :fold --if-hosts
+# ===========================================================================
+
+class TestSectionHasDirectHosts:
+    """A grouping header owns no hosts, so folding it would hide nothing.
+
+    Its children are all section labels, and those stay on screen to keep the
+    tree navigable — only the [-]/[+] marker would change.
+    """
+
+    def test_section_with_hosts(self, pb, tmp_path):
+        sec = make_section(pb, 'has-hosts')
+        app = build_app_with_layout(pb, tmp_path,
+                                    [sec, make_monitor_alive(pb, 'h1')])
+        assert app._section_has_direct_hosts(sec) is True
+
+    def test_pure_container(self, pb, tmp_path):
+        top = make_section(pb, 'group', level=1)
+        app = build_app_with_layout(pb, tmp_path, [
+            top,
+            make_section(pb, 'child', level=2), make_monitor_alive(pb, 'h1'),
+        ])
+        assert app._section_has_direct_hosts(top) is False
+
+    def test_hosts_before_a_subsection_count(self, pb, tmp_path):
+        top = make_section(pb, 'mixed', level=1)
+        app = build_app_with_layout(pb, tmp_path, [
+            top, make_monitor_alive(pb, 'own'),
+            make_section(pb, 'child', level=2), make_monitor_alive(pb, 'h1'),
+        ])
+        assert app._section_has_direct_hosts(top) is True
+
+    def test_empty_section_at_end_of_list(self, pb, tmp_path):
+        sec = make_section(pb, 'trailing')
+        app = build_app_with_layout(pb, tmp_path, [make_monitor_alive(pb, 'h1'), sec])
+        assert app._section_has_direct_hosts(sec) is False
+
+    def test_section_not_in_entries(self, pb, tmp_path):
+        app = build_app_with_layout(pb, tmp_path, [make_monitor_alive(pb, 'h1')])
+        assert app._section_has_direct_hosts(make_section(pb, 'orphan')) is False
+
+
+class TestFoldIfHosts:
+    """':fold <action> --if-hosts' skips a section that owns no hosts."""
+
+    def _container_app(self, pb, tmp_path):
+        top = make_section(pb, 'group', level=1)
+        child = make_section(pb, 'child', level=2)
+        app = build_app_with_layout(pb, tmp_path,
+                                    [top, child, make_monitor_alive(pb, 'h1')])
+        app._monitoring_started = True
+        app.highlighted_index = app.entries.index(top)
+        return app, top, child
+
+    def test_container_is_left_alone(self, pb, tmp_path):
+        app, top, child = self._container_app(pb, tmp_path)
+        app._cmd_fold('toggle-recursive --if-hosts')
+        assert top.folded is False
+        assert child.folded is False
+
+    def test_skip_explains_itself(self, pb, tmp_path):
+        """A silent no-op would read as a broken key."""
+        app, top, _ = self._container_app(pb, tmp_path)
+        app._cmd_fold('toggle-recursive --if-hosts')
+        assert app._status_msg is not None
+        assert 'zA' in app._status_msg['text']
+        assert top.title in app._status_msg['text']
+
+    def test_section_with_hosts_still_folds(self, pb, tmp_path):
+        app, _top, child = self._container_app(pb, tmp_path)
+        app.highlighted_index = app.entries.index(child)
+        app._cmd_fold('toggle-recursive --if-hosts')
+        assert child.folded is True
+
+    def test_za_remains_unconditional(self, pb, tmp_path):
+        """zA is the documented way to fold a group deliberately."""
+        app, top, child = self._container_app(pb, tmp_path)
+        app._cmd_fold('zA')
+        assert top.folded is True
+        assert child.folded is True
+
+    def test_flag_order_does_not_matter(self, pb, tmp_path):
+        app, _top, child = self._container_app(pb, tmp_path)
+        app.highlighted_index = app.entries.index(child)
+        app._cmd_fold('--if-hosts toggle-recursive')
+        assert child.folded is True
+
+    def test_flag_is_stripped_before_action_lookup(self, pb, tmp_path):
+        """The flag must not leak into the action name and cause 'unknown action'."""
+        app, _top, child = self._container_app(pb, tmp_path)
+        app.highlighted_index = app.entries.index(child)
+        n = len(app.events)
+        app._cmd_fold('toggle-recursive --if-hosts')
+        assert not any('unknown action' in e.text for e in list(app.events)[n:])
+
+    def test_no_section_selected_is_not_skipped(self, pb, tmp_path):
+        """With a host selected the guard has nothing to say; the action no-ops."""
+        app, _top, _child = self._container_app(pb, tmp_path)
+        app.highlighted_index = len(app.entries) - 1     # the monitor
+        app._status_msg = None
+        app._cmd_fold('toggle-recursive --if-hosts')
+        assert app._status_msg is None
+
+
+class TestSpaceSkipsContainers:
+    """End to end through the Space binding."""
+
+    def _app(self, pb, tmp_path):
+        top = make_section(pb, 'group', level=1)
+        child = make_section(pb, 'child', level=2)
+        app = build_app_with_layout(pb, tmp_path,
+                                    [top, child, make_monitor_alive(pb, 'h1')])
+        app._monitoring_started = True
+        return app, top, child
+
+    def _press_space(self, app, pb, entry):
+        app.highlighted_index = app.entries.index(entry)
+        binding, _ = app._key_trie.resolve(
+            pb._parse_key_notation('<Space>'),
+            set(app._binding_context().keys()))
+        assert binding is not None
+        app._execute_binding(binding)
+
+    def test_space_skips_a_container(self, pb, tmp_path):
+        app, top, child = self._app(pb, tmp_path)
+        self._press_space(app, pb, top)
+        assert top.folded is False
+        assert child.folded is False
+
+    def test_space_folds_a_section_with_hosts(self, pb, tmp_path):
+        app, _top, child = self._app(pb, tmp_path)
+        self._press_space(app, pb, child)
+        assert child.folded is True
+
+
+class TestIfHostsOnlyGatesSectionActions:
+    """The guard must not cancel an action that is not about one section.
+
+    'close-all --if-hosts' folds the whole list; whether the cursor happens to
+    rest on a grouping header has nothing to do with it.
+    """
+
+    def _app(self, pb, tmp_path):
+        top = make_section(pb, 'group', level=1)
+        child = make_section(pb, 'child', level=2)
+        app = build_app_with_layout(pb, tmp_path,
+                                    [top, child, make_monitor_alive(pb, 'h1')])
+        app._monitoring_started = True
+        app.highlighted_index = app.entries.index(top)   # a container
+        return app, top, child
+
+    def test_close_all_still_applies(self, pb, tmp_path):
+        app, top, child = self._app(pb, tmp_path)
+        app._cmd_fold('close-all --if-hosts')
+        assert top.folded is True
+        assert child.folded is True
+
+    def test_open_all_still_applies(self, pb, tmp_path):
+        app, top, child = self._app(pb, tmp_path)
+        top.folded = child.folded = True
+        app._cmd_fold('open-all --if-hosts')
+        assert top.folded is False
+        assert child.folded is False
+
+    def test_section_action_is_still_gated(self, pb, tmp_path):
+        app, top, _child = self._app(pb, tmp_path)
+        app._cmd_fold('close-recursive --if-hosts')
+        assert top.folded is False

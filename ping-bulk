@@ -376,6 +376,11 @@ class _Binding:
         mode_str = f', mode={self.mode}' if self.mode != 'normal' else ''
         return f"_Binding({ctx}{self.key_notation!r}, {edit}, {cmds!r}, {self.origin}{mode_str})"
 
+# Fold actions that act on the highlighted section, as opposed to the whole
+# list.  ':fold --if-hosts' only makes sense for these: a global action must
+# not be cancelled because the cursor happens to sit on a grouping header.
+_SECTION_FOLD_ACTIONS = frozenset({'za', 'zA', 'zo', 'zO', 'zc', 'zC'})
+
 # Valid context guard variables for :bind-key --%x flags.
 # 'i' (resolved IP) was missing from the original set and stayed missing when
 # 'r' and 'd' were added, so '--%i' was rejected while every other per-host
@@ -733,7 +738,7 @@ _HELP_HOTKEYS = [
     "  [g][g]                (:select first)                    jump to first host",
     "  [G]                   (:select last)                     jump to last host",
     "  [Enter]               (:details)                         show detailed stats for highlighted host",
-    "  [Space]               (:seen)                            insert 'seen' marker (or :fold toggle on section)",
+    "  [Space]               (:seen)                            insert 'seen' marker (fold subtree when on a section)",
     "  [l]                   (:layout --toggle log)             full-screen event log, press again to go back",
     "  [Ctrl+L]              (:layout)                          cycle layout: all / ping only / log only",
     "  [W]                   (:save)                            write event log to a file",
@@ -766,8 +771,9 @@ _HELP_FOLDING = [
     "  [z\\]]            (:fold close-unhealthy)   fold sections where any host is down",
     "",
     "  Section folding  (highlight a section header, then press)",
-    "  [za]/[Space]    (:fold toggle)            toggle fold of highlighted section",
-    "  [zA]/[Ctrl+Spc] (:fold toggle-recursive)  toggle fold recursively",
+    "  [zA]            (:fold toggle-recursive)  toggle fold recursively",
+    "  [Space]         (… --if-hosts)            as [zA], but skips a title with no hosts of its own",
+    "  [za]/[Ctrl+Spc] (:fold toggle)            toggle fold, one level only",
     "  [zo]            (:fold open)              open (unfold) highlighted section",
     "  [zO]            (:fold open-recursive)    open section and all sub-sections",
     "  [zc]            (:fold close)             close (fold) highlighted section",
@@ -4188,7 +4194,8 @@ CMD_REGISTRY = [
             'open-all', 'close-all', 'open-level', 'close-level',
             'close-other',
             'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'zx'],
-           '<action>',            'fold action (toggle, open, close, open-all, …)'),
+           '<action> [--if-hosts]', 'fold action (toggle, open, close, open-all, …)',
+           flags=['--if-hosts']),
     CmdDef(['scroll'],           '_cmd_scroll', None,
            '<ping-history|event-history> <action>', 'scroll a named view (ping-history, event-history)'),
     CmdDef(['scroll-overlay'],   '_cmd_scroll_overlay', None,
@@ -5559,6 +5566,24 @@ class Application:
 
     # ── Fold helpers ──────────────────────────────────────────────────────────
 
+    def _section_has_direct_hosts(self, section):
+        """True when *section* owns hosts itself, rather than only sub-sections.
+
+        Folding a pure grouping header hides nothing: its children are all
+        section labels, and those stay on screen so the tree remains navigable.
+        Only the ``[-]``/``[+]`` marker would change.
+        """
+        try:
+            start = self.entries.index(section)
+        except ValueError:
+            return False
+        for entry in self.entries[start + 1:]:
+            if isinstance(entry, SectionLabel):
+                return False
+            if isinstance(entry, Monitor):
+                return True
+        return False
+
     def _section_set_fold(self, section, state, recursive=False):
         """Set the folded state of *section*, optionally recursively.
 
@@ -5724,6 +5749,23 @@ class Application:
                     self._fold_state_changed()
                     break
 
+    def _highlighted_section(self):
+        """Return the highlighted SectionLabel, or None if it is not a section."""
+        if (self.highlighted_index is None or
+                not 0 <= self.highlighted_index < len(self.entries)):
+            return None
+        entry = self.entries[self.highlighted_index]
+        return entry if isinstance(entry, SectionLabel) else None
+
+    @staticmethod
+    def _strip_fold_flag(args, flag):
+        """Remove *flag* from *args* wherever it appears; return (args, present)."""
+        tokens = args.split()
+        present = flag in tokens
+        if present:
+            tokens = [t for t in tokens if t != flag]
+        return (' '.join(tokens), present)
+
     def _do_fold_action(self, action):
         """Execute a named fold action (zo, zO, zc, zC, za, zA, zR, zM, zr, zm).
 
@@ -5731,11 +5773,7 @@ class Application:
         highlighted SectionLabel; they are silently ignored when no section is
         highlighted.  Global actions (zR/zM/zr/zm) work regardless of selection.
         """
-        entry = None
-        if (self.highlighted_index is not None and
-                0 <= self.highlighted_index < len(self.entries)):
-            entry = self.entries[self.highlighted_index]
-        section = entry if isinstance(entry, SectionLabel) else None
+        section = self._highlighted_section()
 
         if action == 'zo':
             if section:
@@ -5832,10 +5870,18 @@ class Application:
                       toggle, toggle-recursive, close-healthy, close-unhealthy,
                       close-other [pattern].
         Z-actions: za, zA, zo, zO, zc, zC, zR, zM, zr, zm, z[, z], zx.
+
+        ``--if-hosts`` restricts the action to a section that owns hosts, so a
+        grouping header whose children are all sub-sections is left alone.  It
+        is what the Space key uses: Space is recursive, and on a pure container
+        that would collapse a whole subtree from a header that has nothing of
+        its own to hide.  The z-actions stay unconditional, so ``zA`` remains
+        the way to fold such a group deliberately.
         """
         if not args:
             self.add_event("cmd", "fold: missing action argument")
             return
+        args, if_hosts = self._strip_fold_flag(args, '--if-hosts')
         # close-other accepts an optional trailing pattern argument
         parts = args.strip().split(None, 1)
         if parts[0] in ('close-other', 'zx'):
@@ -5859,10 +5905,21 @@ class Application:
         }
         action = fold_map.get(action, action)
         valid = {'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'z[', 'z]', 'zx'}
-        if action in valid:
-            self._do_fold_action(action)
-        else:
+        if action not in valid:
             self.add_event("cmd", f"fold: unknown action '{args}'")
+            return
+        # The guard is only meaningful for the section-scoped actions.  Applied
+        # to a global one it would cancel it outright — 'close-all --if-hosts'
+        # did nothing whenever a grouping header happened to be selected.
+        if if_hosts and action in _SECTION_FOLD_ACTIONS:
+            section = self._highlighted_section()
+            if section is not None and not self._section_has_direct_hosts(section):
+                self._status_msg = {
+                    'text': f"{section.title}: no hosts of its own — zA folds the group",
+                    'expires': time.monotonic() + 2.0,
+                }
+                return
+        self._do_fold_action(action)
 
     def _cmd_scroll(self, args=''):
         """Scroll a named view: :scroll <target> <action>.
@@ -6007,15 +6064,19 @@ class Application:
             self._key_trie.insert([code], _Binding(
                 [':details'], key_notation='<CR>', origin='default',
                 desc='open host details overlay'))
-        # Space — context-aware: fold when section selected, seen otherwise
-        _b('<Space>', ':fold toggle', context=frozenset('s'),
-           desc='toggle fold of highlighted section')
+        # Space — context-aware: fold when section selected, seen otherwise.
+        # Recursive (zA), because a section header is a whole subtree on screen:
+        # opening one and finding its children still closed just means pressing
+        # Space again on each.  Ctrl-Space keeps the single-level variant.
+        _b('<Space>', ':fold toggle-recursive --if-hosts',
+           context=frozenset('s'),
+           desc='toggle fold of highlighted section and its sub-sections')
         _b('<Space>', ':seen', desc="insert 'seen' marker")
         # Fold
         _b('[', ':fold-all',   desc='close (fold) ALL sections')
         _b(']', ':unfold-all', desc='open (unfold) ALL sections')
-        _b('<C-Space>', ':fold toggle-recursive',
-           desc='toggle fold of section recursively')
+        _b('<C-Space>', ':fold toggle',
+           desc='toggle fold of section, one level only')
         _fold_descs = {
             'a': 'toggle fold of highlighted section',
             'A': 'toggle fold recursively',

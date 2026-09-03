@@ -45,9 +45,10 @@ nas-old
         self.sess.kill()
 
     def test_fold_section_hides_direct_hosts_keeps_subsection_visible(self):
-        """Folding 'services' (non-recursive) hides direct hosts but keeps subsection visible.
+        """Folding 'services' hides the hosts but keeps the subsection navigable.
 
-        Model: sections are always navigable. Only direct monitors are hidden.
+        Model: sections are always navigable, so the 'extra' header stays on
+        screen; Space is recursive, so it is folded too.
         """
         # Initial state: all visible
         screen = self.sess.capture_pane()
@@ -60,9 +61,11 @@ nas-old
         self.sess.send_keys("j")
         self.sess.wait_for("(C-)SPACE fold")
 
-        # Fold services with Space (non-recursive)
+        # Fold services with Space (recursive).  Wait for the *subsection* to
+        # fold, not just the header: waiting on '[+] services' returns while
+        # the rest of the list is still being redrawn.
         self.sess.send_keys("Space")
-        self.sess.wait_for("[+] services")
+        self.sess.wait_for("[+] extra")
 
         screen = self.sess.capture_pane()
         assert "[+] services" in screen
@@ -78,12 +81,13 @@ nas-old
         assert "gitlab" not in hostname_section
         assert "docker" not in hostname_section
 
-        # Subsection 'extra' should STILL be visible (sections always navigable)
-        assert "[-] extra" in screen
+        # Subsection 'extra' should STILL be visible (sections always
+        # navigable) — folded, because Space is recursive
+        assert "[+] extra" in screen
 
-        # extra's hosts should still be visible (extra itself is not folded)
-        assert "admin" in screen
-        assert "certs" in screen
+        # extra's hosts go too, since extra was folded along with its parent
+        assert "admin" not in hostname_section
+        assert "certs" not in hostname_section
 
     def test_fold_subsection_only_hides_its_hosts(self):
         """Folding 'extra' should only hide its hosts, not the parent's direct hosts."""

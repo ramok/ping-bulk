@@ -449,10 +449,10 @@ class TestBindkeyCommand:
 
     def test_bindkey_context_unbind(self, app, pb):
         """':unbind-key --%s <Space>' unbinds only the section-context binding."""
-        # Default Space has --%s :fold toggle and fallback :seen
+        # Default Space has --%s :fold toggle-recursive --if-hosts, and :seen
         keys = pb._parse_key_notation('<Space>')
         r_section, _ = app._key_trie.resolve(keys, {'s'})
-        assert r_section.commands == [':fold toggle']
+        assert r_section.commands == [':fold toggle-recursive --if-hosts']
         # Unbind only the section context
         app._last_cmd_name = 'unbind-key'
         app._cmd_bindkey('--%s <Space>')
@@ -591,9 +591,9 @@ class TestDefaultBindings:
     def test_default_space_context_aware(self, app, pb):
         """Space has context-aware bindings: fold for sections, seen for fallback."""
         keys = pb._parse_key_notation('<Space>')
-        # Section context → fold toggle
+        # Section context → recursive fold toggle, skipping pure containers
         r, _ = app._key_trie.resolve(keys, {'s', 'H'})
-        assert r.commands == [':fold toggle']
+        assert r.commands == [':fold toggle-recursive --if-hosts']
         # No context → seen
         r, _ = app._key_trie.resolve(keys, set())
         assert r.commands == [':seen']

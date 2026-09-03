@@ -224,34 +224,60 @@ host1
         yield
         self.sess.kill()
 
-    def test_space_toggles_non_recursive(self):
-        """Space should toggle only the selected section."""
+    def test_space_toggles_recursive(self):
+        """Space folds the selected section and its sub-sections together.
+
+        A section header stands for a whole subtree on screen, so opening one
+        and finding its children still closed only means pressing Space again
+        on each of them.  Ctrl-Space is the single-level variant.
+        """
         # Navigate to A
         self.sess.send_keys("j")
         self.sess.wait_for("(C-)SPACE fold")
 
-        # Press Space
+        # Press Space.  Wait on the sub-section, not the header: waiting on
+        # '[+] A' returns while the rest of the list is still being redrawn.
         self.sess.send_keys("Space")
-        self.sess.wait_for("[+] A")
+        self.sess.wait_for("[+] B")
 
         screen = self.sess.capture_pane()
         assert "[+] A" in screen
-        # B is still visible — sections are always navigable (non-recursive fold)
-        assert "[-] B" in screen
-        # host2 (direct child of A) is hidden
+        # B stays navigable but is now folded too
+        assert "[+] B" in screen, screen
+        # both A's direct host and B's host are hidden
         lines = screen.split('\n')
         main_lines = '\n'.join(l for l in lines
-                               if 'Events' not in l and 'starts' not in l)
+                                if 'Events' not in l and 'starts' not in l)
         assert "host2" not in main_lines
+        assert "host1" not in main_lines
 
-        # host1 (under B, which is unfolded) is still visible
-        assert "host1" in screen
-
-        # Unfold again
+        # Unfold again — the whole subtree comes back
         self.sess.send_keys("Space")
         self.sess.wait_for("[-] A")
 
         screen = self.sess.capture_pane()
         assert "[-] A" in screen
-        assert "[-] B" in screen   # child section still visible
-        assert "host2" in screen   # direct hosts back
+        assert "[-] B" in screen
+        assert "host2" in screen
+        assert "host1" in screen
+
+    def test_ctrl_space_toggles_one_level_only(self):
+        """Ctrl-Space keeps the old single-level behaviour."""
+        self.sess.send_keys("j")
+        self.sess.wait_for("(C-)SPACE fold")
+
+        self.sess.send_keys("C-Space")
+        self.sess.wait_for("[+] A")
+
+        screen = self.sess.capture_pane()
+        assert "[+] A" in screen
+        # B is untouched, so it is still open
+        assert "[-] B" in screen, screen
+        lines = screen.split('\n')
+        main_lines = '\n'.join(l for l in lines
+                                if 'Events' not in l and 'starts' not in l)
+        assert "host2" not in main_lines   # A's own host is hidden
+        assert "host1" in screen           # B is open, so its host shows
+
+        self.sess.send_keys("C-Space")
+        self.sess.wait_for("[-] A")

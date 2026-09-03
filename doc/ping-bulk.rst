@@ -222,7 +222,12 @@ Navigation
     Scroll the event log up / down one page.
 
 ``Space``
-    Insert a timestamped *seen* separator into the event log.
+    With a section header selected, fold or unfold it **and its
+    sub-sections** (as ``zA``), unless that header owns no hosts of its
+    own — a pure grouping header is left alone, since folding it would
+    hide nothing that ``zA`` does not already reach.  ``Ctrl-Space``
+    toggles the selected section only (``za``).  Otherwise, insert a
+    timestamped *seen* separator into the event log.
 
 ``/``
     Open the search prompt (regex).  When a host is selected, searches
@@ -861,11 +866,19 @@ Folding
     whose title matches the regex *pat*.  Without *pat*, unfolds the section
     at the cursor.  Plain text works as a substring match.
 
+    ``--if-hosts`` makes the action apply only to a section that owns hosts,
+    leaving a header whose children are all sub-sections untouched.  Folding
+    such a header hides nothing on its own, so this keeps ``Space`` — which is
+    recursive — from collapsing a whole group from a pure container.  The
+    ``z``-actions do not take the flag and stay unconditional, which is what
+    makes ``zA`` the deliberate way to fold a group.
+
     Examples::
 
         :fold toggle
         :fold close-all
         :fold zA
+        :fold toggle-recursive --if-hosts
         :fold close-other sensor-hub-3
 
 ``:fold-all`` / ``:unfold-all``
@@ -1470,8 +1483,18 @@ bold).  A fatal-error host always shows ``??`` in its own stat column.
     Fold / unfold the section under the cursor.
 
 ``Space``
-    Toggle fold state of the section under the cursor (when a section
-    header is selected).
+    Toggle fold state of the section under the cursor and of its
+    sub-sections (when a section header is selected).  A section header
+    stands for a whole subtree on screen, so unfolding one reveals the
+    subtree rather than leaving its children closed.  Use ``Ctrl-Space``
+    to toggle just the selected section.
+
+    A header whose children are *all* sub-sections is skipped: it owns no
+    hosts, so a single-level fold would hide nothing, and a recursive one
+    would collapse a whole group from a header that has nothing of its own
+    in it.  A short message names ``zA`` as the way to fold such a group
+    on purpose.  This is ``:fold <action> --if-hosts``; the ``z``-actions
+    are unconditional.
 
 Shebang support
 ---------------
