@@ -84,6 +84,7 @@ _CATEGORY_LEVELS = {
     # shown at INFO+
     'cmd':               LEVEL_INFO,
     'config':            LEVEL_INFO,
+    'probe':             LEVEL_INFO,
     'log':               LEVEL_INFO,
     'log-size':          LEVEL_INFO,
     'history-size':      LEVEL_INFO,
@@ -379,6 +380,10 @@ class _Binding:
 # Fold actions that act on the highlighted section, as opposed to the whole
 # list.  ':fold --if-hosts' only makes sense for these: a global action must
 # not be cancelled because the cursor happens to sit on a grouping header.
+# Consecutive failed rounds before a '--on-fail give-up' probe stops polling.
+# Mirrors _CLOCK_NO_RT_PROBES: one lost round must not brand a host permanently.
+_PROBE_GIVE_UP_FAILS = 3
+
 _SECTION_FOLD_ACTIONS = frozenset({'za', 'zA', 'zo', 'zO', 'zc', 'zC'})
 
 # Valid context guard variables for :bind-key --%x flags.
@@ -1131,6 +1136,7 @@ _DIRECTIVE_KEYWORDS = frozenset({
     'if', 'elif', 'else', 'end', 'for', 'with', 'let',
     'resolv', 'resolv-port', 'title', 'title2', 'title3',
     'remote-ping', 'source', 'log', 'edit', 'bind-key', 'section',
+    'probe', 'probe-source',
 })
 
 
@@ -1908,6 +1914,71 @@ def _history_char(val, mode):
     return '.'  # 'success' mode
 
 
+class ProbeDef:
+    """Display metadata for one custom probe value, from ':probe <name> ...'.
+
+    The value itself is produced by the ':probe-source' command running on the
+    host; this only says how to show it.  ``vmin``/``vmax`` scale the history
+    strip, ``warn``/``crit`` colour every view, and ``unit`` labels the column
+    and the details overlay.
+    """
+
+    __slots__ = ('name', 'label', 'unit', 'vmin', 'vmax', 'warn', 'crit',
+                 'on_fail')
+
+    def __init__(self, name, unit='', vmin=None, vmax=None,
+                 warn=None, crit=None, on_fail='retry'):
+        self.name = name
+        # Column header: the name as written, capitalised like the built-ins.
+        self.label = name[:1].upper() + name[1:]
+        self.unit = unit
+        self.vmin = vmin
+        self.vmax = vmax
+        self.warn = warn
+        self.crit = crit
+        self.on_fail = on_fail
+
+    def __repr__(self):
+        return f"ProbeDef({self.name!r}, unit={self.unit!r})"
+
+
+class ProbeSeries:
+    """One host's readings for one probe: parallel value/time deques.
+
+    A time series rather than a single cached number, because the history strip
+    and the details sparkline both need the past — this is the one place custom
+    probes differ in shape from the remote-clock stats, which keep only the
+    latest reading.
+
+    state:
+      'idle'    — nothing read yet
+      'ok'      — last read succeeded
+      'err'     — last read failed (or the host errored)
+      'gave-up' — repeated failures, polling stopped ('--on-fail give-up')
+    """
+
+    __slots__ = ('values', 'times', 'state', 'fails')
+
+    def __init__(self, maxlen):
+        self.values = deque(maxlen=maxlen)
+        self.times = deque(maxlen=maxlen)
+        self.state = 'idle'
+        self.fails = 0
+
+    def add(self, value, ts):
+        self.values.append(value)
+        self.times.append(ts)
+        self.state = 'ok'
+        self.fails = 0
+
+    @property
+    def last(self):
+        """Most recent (value, timestamp), or (None, None) when empty."""
+        if not self.values:
+            return (None, None)
+        return (self.values[-1], self.times[-1])
+
+
 class Monitor(ABC):
     def __init__(self, host):
         self.host = host
@@ -1917,6 +1988,11 @@ class Monitor(ABC):
         self.latency = None
         self.history = deque(maxlen=100)
         self.history_times = deque(maxlen=100)  # parallel wall-clock timestamps
+        # name -> ProbeSeries, filled by the probe reader.  One generic store
+        # rather than per-value attributes: the remote-clock stats added six of
+        # those to this constructor, and custom probes would repeat that for
+        # every parameter a user defines.
+        self.probes: dict = {}
         # Latency statistics — stored as Welford online accumulators instead of a list,
         # so memory stays O(1) regardless of how long the monitor has been running.
         self._lat_count = 0           # number of successful latency samples
@@ -2270,7 +2346,122 @@ class Monitor(ABC):
         pass
 
 
-class SubprocessMonitor(Monitor):
+class _PipeReaderLoop:
+    """Read a child's stdout and stderr until it exits, without deadlocking.
+
+    Split out of SubprocessMonitor so anything owning a long-lived child gets
+    the same guarantees, which were paid for by a real hang (see AGENTS.md §9):
+
+      * Both pipes are always read.  Draining only stdout lets the child fill
+        the stderr pipe and block in write(2), after which it stops working and
+        stops talking, and the parent waits on stdout forever.
+      * Raw fds, not readline(): select() cannot see a line already sitting in
+        a TextIOWrapper buffer.
+      * A child that goes silent is killed, not merely reported — nothing else
+        ends that state.
+
+    Subclasses provide ``running``, ``_proc``, ``_STALE_SECS``,
+    ``_STALE_MAX_WINDOWS`` and the three hooks below.
+    """
+
+    _STALE_SECS = 2.0
+    _STALE_MAX_WINDOWS = 3
+    # Named in the watchdog message, so it says what is being restarted.
+    _child_label = 'child'
+
+    def _handle_stdout_line(self, line):
+        """Handle one stdout line; return True if it was a usable result."""
+        raise NotImplementedError
+
+    def _handle_stderr_line(self, line):
+        """Handle one stderr line."""
+        raise NotImplementedError
+
+    def _on_stale_window(self):
+        """Called once per _STALE_SECS window in which the child said nothing."""
+
+    def _read_until_exit(self):
+        """Consume both pipes until the child exits.  Returns True if it produced
+        any result line (used to decide whether to reset the backoff)."""
+        out, err = self._proc.stdout, self._proc.stderr
+        try:
+            fds = {out.fileno(): 'out', err.fileno(): 'err'}
+            for f in (out, err):
+                os.set_blocking(f.fileno(), False)
+        except (ValueError, OSError):
+            # Pipes already gone.  Report "no output" so the caller retries with
+            # backoff — an exception here would kill the thread silently, leaving
+            # the host frozen with no error to explain it.
+            return False
+        buf = {'out': b'', 'err': b''}
+        open_fds = set(fds)
+        got_output = False
+        stale = 0            # consecutive empty select windows, for the watchdog
+
+        while self.running:
+            if not open_fds:
+                break
+            rlist, _, _ = select.select(list(open_fds), [], [], self._STALE_SECS)
+            if not rlist:
+                # Nothing for _STALE_SECS: the link is stuck.  Only synthesise a
+                # loss once the child has proven it can talk, so a slow start is
+                # not reported as packet loss.
+                if got_output:
+                    self._on_stale_window()
+                    stale += 1
+                if self._proc.poll() is not None:
+                    break
+                if got_output and stale >= self._STALE_MAX_WINDOWS:
+                    # Reporting a stuck child as losses is honest but never ends:
+                    # nothing else terminates it, so it would sit there for days.
+                    # Kill it and let the backoff loop start a fresh one.
+                    silent = self._STALE_SECS * stale
+                    self._handle_stderr_line(
+                        f'{_PROG_NAME}: no output for {silent:.0f}s — '
+                        f'restarting {self._child_label}')
+                    try:
+                        self._proc.terminate()
+                    except (OSError, ProcessLookupError):
+                        pass
+                    break
+                continue
+            if not self.running:
+                break        # shutting down: do not consume further output
+            for fd in rlist:
+                which = fds[fd]
+                try:
+                    chunk = os.read(fd, 65536)
+                except (BlockingIOError, InterruptedError):
+                    continue
+                except OSError:
+                    open_fds.discard(fd)
+                    continue
+                if not chunk:                 # EOF on this pipe
+                    open_fds.discard(fd)
+                    continue
+                stale = 0                     # the child is talking again
+                buf[which] += chunk
+                while b'\n' in buf[which]:
+                    raw, buf[which] = buf[which].split(b'\n', 1)
+                    line = raw.decode('utf-8', 'replace').rstrip('\r')
+                    if which == 'err':
+                        self._handle_stderr_line(line)
+                    elif self._handle_stdout_line(line):
+                        got_output = True
+            if not open_fds and self._proc.poll() is not None:
+                break
+        # A trailing fragment without a newline is still worth parsing.
+        for which in ('out', 'err'):
+            if buf[which]:
+                line = buf[which].decode('utf-8', 'replace').rstrip('\r')
+                if which == 'err':
+                    self._handle_stderr_line(line)
+                elif self._handle_stdout_line(line):
+                    got_output = True
+        return got_output
+
+
+class SubprocessMonitor(_PipeReaderLoop, Monitor):
     """A Monitor that reads ping results from a long-lived child process.
 
     Shared by PingMonitor (local ping) and SshPingMonitor (ping over ssh); the
@@ -2331,6 +2522,19 @@ class SubprocessMonitor(Monitor):
             self._record_no_answer(ping_ts, _parse_icmp_seq(line))
             return True
         return False   # banner, statistics block, or a stderr line — ignored
+
+    _child_label = 'ping'
+
+    # ── _PipeReaderLoop hooks ────────────────────────────────────────────────
+    def _handle_stdout_line(self, line):
+        return self._handle_ping_line(line)
+
+    def _handle_stderr_line(self, line):
+        self._note_stderr(line)
+
+    def _on_stale_window(self):
+        # A window with no output is a probe that never came back.
+        self._record_stale_loss(time.time())
 
     def _note_stderr(self, line):
         """Record a stderr line for later classification, and surface it once.
@@ -2431,84 +2635,176 @@ class SubprocessMonitor(Monitor):
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
-    def _read_until_exit(self):
-        """Consume both pipes until the child exits.  Returns True if it produced
-        any ping-result line (used to decide whether to reset the backoff)."""
-        out, err = self._proc.stdout, self._proc.stderr
-        try:
-            fds = {out.fileno(): 'out', err.fileno(): 'err'}
-            for f in (out, err):
-                os.set_blocking(f.fileno(), False)
-        except (ValueError, OSError):
-            # Pipes already gone.  Report "no output" so the caller retries with
-            # backoff — an exception here would kill the thread silently, leaving
-            # the host frozen with no error to explain it.
-            return False
-        buf = {'out': b'', 'err': b''}
-        open_fds = set(fds)
-        got_output = False
-        stale = 0            # consecutive empty select windows, for the watchdog
+class ProbeReader(_PipeReaderLoop):
+    """Reads custom probe values from one host over a single SSH connection.
 
+    The remote command is wrapped in a loop so one connection serves every
+    reading: opening a fresh ssh per poll is what caps the remote-clock probe
+    at a 30 s interval (see Monitor.__init__).  With the connection held open
+    the interval costs nothing, so 5 s is as cheap as 60 s.
+
+    Output contract: one ``key=value`` per line, a lone ``---`` between rounds.
+    Keys with no ':probe' declaration are ignored, so a single site-wide script
+    can serve hosts that display different subsets.
+    """
+
+    _child_label = 'probe reader'
+
+    def __init__(self, monitor, source_cmd, interval, defs, retain,
+                 ssh_args=None):
+        self.monitor = monitor
+        self.source_cmd = source_cmd
+        self.interval = float(interval)
+        self.defs = defs
+        self.retain = int(retain)
+        self._ssh_args = list(ssh_args or [])
+        self.running = True
+        self._proc = None
+        self.error = None
+        # A round is one interval, so wait for several before declaring the
+        # connection stuck — one slow round is not a wedged child.
+        self._STALE_SECS = max(2.0, self.interval * 2)
+
+    # ── command ─────────────────────────────────────────────────────────────
+
+    def _build_cmd(self):
+        """ssh <host> 'while :; do <cmd>; echo ---; sleep N; done'"""
+        remote = (f"while :; do {self.source_cmd}; echo ---; "
+                  f"sleep {self.interval:g}; done")
+        return (['ssh', '-o', 'BatchMode=yes'] + self._jump_args()
+                + self._ssh_args + [self._ssh_target(), remote])
+
+    def _ssh_target(self):
+        """Where to log in: the host itself, or its relay's target."""
+        m = self.monitor
+        if isinstance(m, SshPingMonitor):
+            # Values are per host, so reach the target *through* the relay
+            # rather than reading them on the relay.
+            return m._ping_host
+        return m.resolved_ip if m.resolv_static and m.resolved_ip else m.host
+
+    def _jump_args(self):
+        """For a relayed host, jump through its relay to reach the target."""
+        m = self.monitor
+        if not isinstance(m, SshPingMonitor):
+            return []
+        hops = m._extract_jump_hosts(m._ssh_args) + [m._ssh_dest]
+        # One comma-separated -J: ssh keeps only the first value of a repeated
+        # option, so '-J a -J b' would silently drop b.
+        return ['-J', ','.join(hops)]
+
+    # ── _PipeReaderLoop hooks ───────────────────────────────────────────────
+
+    def _handle_stdout_line(self, line):
+        line = line.strip()
+        if not line or line == '---':
+            return bool(line)
+        if '=' not in line:
+            return False
+        key, _, raw = line.partition('=')
+        key = key.strip()
+        if key not in self.defs:
+            return True          # a value this host does not display
+        try:
+            value = float(raw.strip())
+        except ValueError:
+            self._mark(key, 'err')
+            return True
+        with self.monitor.lock:
+            series = self.monitor.probes.get(key)
+            if series is None:
+                series = ProbeSeries(self.retain)
+                self.monitor.probes[key] = series
+            series.add(value, time.time())
+        return True
+
+    def _handle_stderr_line(self, line):
+        if line.strip():
+            self.error = line.strip()
+
+    def _on_stale_window(self):
+        # No round arrived within several intervals: the values on screen are
+        # no longer current, so say so rather than showing a stale number.
+        for name in self.defs:
+            self._mark(name, 'err')
+
+    def _mark(self, name, state):
+        """Set a probe's state, applying the '--on-fail give-up' policy."""
+        with self.monitor.lock:
+            series = self.monitor.probes.get(name)
+            if series is None:
+                series = ProbeSeries(self.retain)
+                self.monitor.probes[name] = series
+            if state == 'err':
+                series.fails += 1
+                d = self.defs.get(name)
+                if (d is not None and d.on_fail == 'give-up'
+                        and series.fails >= _PROBE_GIVE_UP_FAILS):
+                    series.state = 'gave-up'
+                    return
+            series.state = state
+
+    def run(self):
+        """Hold the connection open, restarting it with backoff if it drops.
+
+        Mirrors SubprocessMonitor.ping(): a fatal ssh error (auth, unknown host)
+        stops for good, anything else is retried, and the pipes are closed after
+        every run because this may respawn for days.
+        """
+        backoff = 1
         while self.running:
-            if not open_fds:
+            try:
+                self._proc = subprocess.Popen(
+                    self._build_cmd(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except Exception as exc:
+                self.error = str(exc)
+                self._fail_all()
                 break
-            rlist, _, _ = select.select(list(open_fds), [], [], self._STALE_SECS)
-            if not rlist:
-                # Nothing for _STALE_SECS: the link is stuck.  Only synthesise a
-                # loss once the child has proven it can talk, so a slow start is
-                # not reported as packet loss.
-                if got_output:
-                    self._record_stale_loss(time.time())
-                    stale += 1
-                if self._proc.poll() is not None:
-                    break
-                if got_output and stale >= self._STALE_MAX_WINDOWS:
-                    # Reporting a stuck child as losses is honest but never ends:
-                    # nothing else terminates it, so it would sit there for days.
-                    # Kill it and let the backoff loop start a fresh one.
-                    silent = self._STALE_SECS * stale
-                    self._note_stderr(
-                        f'{_PROG_NAME}: no output for {silent:.0f}s — restarting ping')
-                    try:
-                        self._proc.terminate()
-                    except (OSError, ProcessLookupError):
-                        pass
-                    break
-                continue
-            if not self.running:
-                break        # shutting down: do not consume further output
-            for fd in rlist:
-                which = fds[fd]
+
+            self.error = None
+            got_output = self._read_until_exit()
+            for pipe in (self._proc.stdout, self._proc.stderr):
                 try:
-                    chunk = os.read(fd, 65536)
-                except (BlockingIOError, InterruptedError):
-                    continue
+                    pipe.close()
                 except OSError:
-                    open_fds.discard(fd)
-                    continue
-                if not chunk:                 # EOF on this pipe
-                    open_fds.discard(fd)
-                    continue
-                stale = 0                     # the child is talking again
-                buf[which] += chunk
-                while b'\n' in buf[which]:
-                    raw, buf[which] = buf[which].split(b'\n', 1)
-                    line = raw.decode('utf-8', 'replace').rstrip('\r')
-                    if which == 'err':
-                        self._note_stderr(line)
-                    elif self._handle_ping_line(line):
-                        got_output = True
-            if not open_fds and self._proc.poll() is not None:
+                    pass
+            if not self.running:
                 break
-        # A trailing fragment without a newline is still worth parsing.
-        for which in ('out', 'err'):
-            if buf[which]:
-                line = buf[which].decode('utf-8', 'replace').rstrip('\r')
-                if which == 'err':
-                    self._note_stderr(line)
-                elif self._handle_ping_line(line):
-                    got_output = True
-        return got_output
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+
+            if self.error and SshPingMonitor._is_fatal_error(self.error):
+                # No credentials or no such host: retrying cannot help.
+                self._fail_all()
+                break
+            self._fail_all()
+            if got_output:
+                backoff = 1
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    def _fail_all(self):
+        """Mark every declared probe failed, honouring '--on-fail'."""
+        for name in self.defs:
+            self._mark(name, 'err')
+
+    def stop(self):
+        self.running = False
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+            except (OSError, ProcessLookupError):
+                pass
 
 
 class PingMonitor(SubprocessMonitor):
@@ -4196,6 +4492,14 @@ CMD_REGISTRY = [
             'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'zx'],
            '<action> [--if-hosts]', 'fold action (toggle, open, close, open-all, …)',
            flags=['--if-hosts']),
+    CmdDef(['probe'],            '_cmd_probe',      None,
+           '<name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N]',
+           'declare how a probe value is displayed',
+           flags=['--unit', '--range', '--warn', '--crit', '--on-fail']),
+    CmdDef(['probe-source'],     '_cmd_probe_source', None,
+           "[--cmd '<command>'] [--interval SEC] [--retain N] | off",
+           'command run on each host that prints key=value lines',
+           flags=['--cmd', '--interval', '--retain']),
     CmdDef(['scroll'],           '_cmd_scroll', None,
            '<ping-history|event-history> <action>', 'scroll a named view (ping-history, event-history)'),
     CmdDef(['scroll-overlay'],   '_cmd_scroll_overlay', None,
@@ -4627,6 +4931,11 @@ class Application:
                                  if k in ('host', 'optional_host'))
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
+        self.probe_defs: dict = {}     # probe name → ProbeDef (':probe')
+        self.probe_readers: list = []  # one ProbeReader per host, while running
+        self.probe_source = None       # command run on each host (':probe-source')
+        self.probe_interval = 60.0     # seconds between readings
+        self.probe_retain = 1440       # samples kept per probe per host
         self._mux_from_binding = False  # True while executing commands from a key binding
         self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
         self.terminal_emulator = 'auto'  # X terminal emulator name ('auto' or binary)
@@ -5187,9 +5496,39 @@ class Application:
             thread.start()
             self.threads.append(thread)
 
+        self._start_probe_readers()
+
         # Check for state changes
         checker = threading.Thread(target=self.check_state_changes, daemon=True)
         checker.start()
+
+    def _start_probe_readers(self):
+        """Open one probe connection per host, when probes are configured.
+
+        Nothing is started unless both a source command and at least one
+        ':probe' declaration exist — an undeclared source would open a
+        connection per host to read values nothing displays.
+        """
+        if not self.probe_source or not self.probe_defs:
+            return
+        for monitor in self.monitors:
+            if isinstance(monitor, PortMonitor):
+                continue          # no shell on the far side of a TCP check
+            reader = ProbeReader(monitor, self.probe_source, self.probe_interval,
+                                 self.probe_defs, self.probe_retain)
+            self.probe_readers.append(reader)
+            t = threading.Thread(target=reader.run, daemon=True)
+            t.start()
+            self.threads.append(t)
+        self.add_event("probe",
+            f"probe: {len(self.probe_readers)} reader(s) started, "
+            f"every {self.probe_interval:g}s")
+
+    def _stop_probe_readers(self):
+        """Terminate every probe connection."""
+        for reader in self.probe_readers:
+            reader.stop()
+        self.probe_readers = []
 
     def _clock_enabled(self):
         """True when a remote-clock stat ('Drift' or 'RTime') is displayed."""
@@ -7404,10 +7743,10 @@ class Application:
         custom_start_col = all_stats_col  # same anchor as All mode
         if show_custom and self.stats_custom:
             for cname in self.stats_custom:
-                header = _STAT_HEADER.get(cname, cname)
+                header = self._stat_header(cname)
                 actual_w = len(header)
                 for m in self.monitors:
-                    val = self._compute_stat(m, cname)
+                    val = self._stat_cell(m, cname)
                     actual_w = max(actual_w, len(val.strip()))
                 hwm = self._custom_col_hwm.get(cname, 0)
                 if actual_w >= hwm:
@@ -7477,7 +7816,7 @@ class Application:
                 parts = []
                 for i, cname in enumerate(self.stats_custom):
                     w = custom_col_widths[i]
-                    header = _STAT_HEADER.get(cname, cname)
+                    header = self._stat_header(cname)
                     parts.append(f"{header:>{w}}")
                 custom_header = "  ".join(parts)
                 stdscr.addstr(start_row, custom_start_col,
@@ -7728,12 +8067,12 @@ class Application:
                 elif show_single:
                     # _compute_stat() returns '    ??' when monitor.error is set
                     stdscr.addstr(row, stat_value_col,
-                                  self._compute_stat(monitor, mode_name),
+                                  self._stat_cell(monitor, mode_name),
                                   self._stat_attr(monitor, mode_name, row_attr))
                 else:
                     # off mode — show Last latency with color; '    ??' in bright red on error
                     stdscr.addstr(row, stat_value_col,
-                                  self._compute_stat(monitor, 'Last'),
+                                  self._stat_cell(monitor, 'Last'),
                                   self._stat_attr(monitor, 'Last', row_attr))
 
             history = monitor.get_history_string(
@@ -7809,7 +8148,7 @@ class Application:
             # All-stats block flush-left after hostname
             if show_all and all_stats_col < width:
                 # ms (Last latency)
-                stdscr.addstr(row, ms_col, self._compute_stat(monitor, 'Last'),
+                stdscr.addstr(row, ms_col, self._stat_cell(monitor, 'Last'),
                               self._stat_attr(monitor, 'Last', row_attr))
                 # Up/Down
                 updown_str, is_down = Application._compute_updown(monitor)
@@ -7820,7 +8159,7 @@ class Application:
                 for i, cname in enumerate(_ALL_STATS):
                     try:
                         stdscr.addstr(row, tail_col + i * 8,
-                                      self._compute_stat(monitor, cname),
+                                      self._stat_cell(monitor, cname),
                                       self._stat_attr(monitor, cname, row_attr))
                     except curses.error:
                         pass
@@ -7835,7 +8174,7 @@ class Application:
                         if col >= safe_width:
                             break
                         w = custom_col_widths[i]
-                        val = self._compute_stat(monitor, cname)
+                        val = self._stat_cell(monitor, cname)
                         val_stripped = val.strip()
                         val_padded = f"{val_stripped:>{w}}"
                         attr = self._stat_attr(monitor, cname, row_attr)
@@ -7954,6 +8293,65 @@ class Application:
         """
         return monitor.alive is not True or monitor.error is not None
 
+    def _stat_cell(self, monitor, cname):
+        """Formatted cell for any column, built-in or user-defined probe.
+
+        _compute_stat stays a pure static function over one monitor; probe
+        columns are resolved here because they need the app's ':probe'
+        declarations.
+        """
+        probe = self._probe_def_for_label(cname)
+        if probe is not None:
+            return self._probe_cell(monitor, probe)
+        return self._compute_stat(monitor, cname)
+
+    def _probe_def_for_label(self, label):
+        """Return the ProbeDef whose column label is *label*, or None."""
+        for d in self.probe_defs.values():
+            if d.label == label:
+                return d
+        return None
+
+    @staticmethod
+    def _probe_state(monitor, name):
+        """Return (state, value) for one probe on one host."""
+        with monitor.lock:
+            series = monitor.probes.get(name)
+            if series is None:
+                return ('idle', None)
+            return (series.state, series.last[0])
+
+    def _probe_cell(self, monitor, probe):
+        """Format one probe's column cell: the value, '-', or 'err'."""
+        state, value = self._probe_state(monitor, probe.name)
+        if state in ('err', 'gave-up'):
+            return "err"
+        if value is None:
+            return "-"
+        # Trim a trailing '.0' so whole numbers do not widen the column.
+        text = f"{value:.1f}"
+        return text[:-2] if text.endswith('.0') else text
+
+    def _stat_header(self, cname):
+        """Column header for a stat label, including a probe's unit."""
+        probe = self._probe_def_for_label(cname)
+        if probe is not None:
+            return f"{probe.label},{probe.unit}" if probe.unit else probe.label
+        return _STAT_HEADER.get(cname, cname)
+
+    def _probe_attr(self, monitor, probe, row_attr):
+        """Colour a probe cell by its --warn / --crit thresholds."""
+        state, value = self._probe_state(monitor, probe.name)
+        if state in ('err', 'gave-up'):
+            return curses.color_pair(2) | row_attr
+        if value is None:
+            return self.stale_attr | row_attr
+        if probe.crit is not None and value >= probe.crit:
+            return curses.color_pair(2) | curses.A_BOLD | row_attr
+        if probe.warn is not None and value >= probe.warn:
+            return curses.color_pair(3) | row_attr
+        return curses.color_pair(1) | row_attr
+
     def _stat_attr(self, monitor, cname, row_attr):
         """Return the curses attribute for one stats cell of *monitor*.
 
@@ -7963,6 +8361,9 @@ class Application:
         """
         if monitor.error is not None:
             return curses.color_pair(2) | curses.A_BOLD | row_attr
+        probe = self._probe_def_for_label(cname)
+        if probe is not None:
+            return self._probe_attr(monitor, probe, row_attr)
         if cname == 'Down':
             _, is_down = Application._compute_updown(monitor)
             return (curses.color_pair(2) if is_down else 0) | row_attr
@@ -9397,6 +9798,156 @@ class Application:
             status = '--disable' if opts is None else f'opts={opts_str!r}'
             self.add_event("cmd", f"prog-options: '{prog}' '{pattern}' → {status}")
 
+    def _cmd_probe_source(self, args=''):
+        """:probe-source --cmd '<command>' [--interval <seconds>]
+
+        The command runs on each monitored host and prints one 'key=value' per
+        line.  A single command supplies every probe, so one round trip per
+        interval carries all of them.
+        """
+        if not args:
+            if self.probe_source:
+                self.add_event("probe",
+                    f"probe-source: {self.probe_source} "
+                    f"every {self.probe_interval:g}s")
+            else:
+                self.add_event("probe", "probe-source: not set")
+            return
+        try:
+            tokens = shlex.split(args)
+        except ValueError as e:
+            self.add_event("cmd", f"probe-source: {e}")
+            return
+        cmd = None
+        interval = self.probe_interval
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if t == '--cmd' and i + 1 < len(tokens):
+                cmd = tokens[i + 1]
+                i += 2
+            elif t == '--interval' and i + 1 < len(tokens):
+                try:
+                    interval = float(tokens[i + 1])
+                    if interval <= 0:
+                        raise ValueError
+                except ValueError:
+                    self.add_event("cmd",
+                        f"probe-source: invalid --interval {tokens[i + 1]!r} — "
+                        f"expected a positive number of seconds")
+                    return
+                i += 2
+            elif t == '--retain' and i + 1 < len(tokens):
+                try:
+                    retain = int(tokens[i + 1])
+                    if retain < 1:
+                        raise ValueError
+                except ValueError:
+                    self.add_event("cmd",
+                        f"probe-source: invalid --retain {tokens[i + 1]!r} — "
+                        f"expected a positive sample count")
+                    return
+                self.probe_retain = retain
+                i += 2
+            elif t == 'off':
+                self.probe_source = None
+                self.add_event("probe", "probe-source: disabled")
+                return
+            else:
+                self.add_event("cmd", f"probe-source: unknown argument {t!r}")
+                return
+        if cmd is None:
+            self.add_event("cmd", "probe-source: missing --cmd")
+            return
+        self.probe_source = cmd
+        self.probe_interval = interval
+        if self._monitoring_started:
+            self.add_event("probe",
+                f"probe-source: {cmd} every {interval:g}s")
+
+    def _cmd_probe(self, args=''):
+        """:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N]
+                         [--on-fail retry|give-up]
+
+        Declares how one 'key=value' emitted by :probe-source is displayed.
+        Keys with no :probe declaration are ignored, so one site-wide script can
+        serve hosts that show different subsets.
+        """
+        if not args:
+            if not self.probe_defs:
+                self.add_event("probe", "probe: no probes defined")
+                return
+            for d in self.probe_defs.values():
+                rng = (f" range {d.vmin:g}:{d.vmax:g}"
+                       if d.vmin is not None and d.vmax is not None else "")
+                th = ''.join([f" warn {d.warn:g}" if d.warn is not None else "",
+                              f" crit {d.crit:g}" if d.crit is not None else ""])
+                self.add_event("probe",
+                    f"probe: {d.name}{' ' + d.unit if d.unit else ''}"
+                    f"{rng}{th} on-fail {d.on_fail}")
+            return
+        try:
+            tokens = shlex.split(args)
+        except ValueError as e:
+            self.add_event("cmd", f"probe: {e}")
+            return
+        name = tokens[0]
+        if name.startswith('-'):
+            self.add_event("cmd", "probe: missing probe name")
+            return
+        if name.lower() in STAT_NAMES:
+            self.add_event("cmd",
+                f"probe: {name!r} is a built-in stat column — choose another name")
+            return
+        unit, vmin, vmax, warn, crit, on_fail = '', None, None, None, None, 'retry'
+        i = 1
+        while i < len(tokens):
+            t = tokens[i]
+            has_val = i + 1 < len(tokens)
+            if t == '--unit' and has_val:
+                unit = tokens[i + 1]
+                i += 2
+            elif t == '--range' and has_val:
+                spec = tokens[i + 1]
+                try:
+                    lo, hi = spec.split(':', 1)
+                    vmin, vmax = float(lo), float(hi)
+                    if vmin >= vmax:
+                        raise ValueError
+                except ValueError:
+                    self.add_event("cmd",
+                        f"probe: invalid --range {spec!r} — expected MIN:MAX "
+                        f"with MIN < MAX")
+                    return
+                i += 2
+            elif t in ('--warn', '--crit') and has_val:
+                try:
+                    val = float(tokens[i + 1])
+                except ValueError:
+                    self.add_event("cmd",
+                        f"probe: invalid {t} {tokens[i + 1]!r} — expected a number")
+                    return
+                if t == '--warn':
+                    warn = val
+                else:
+                    crit = val
+                i += 2
+            elif t == '--on-fail' and has_val:
+                val = tokens[i + 1]
+                if val not in ('retry', 'give-up'):
+                    self.add_event("cmd",
+                        f"probe: invalid --on-fail {val!r} — retry or give-up")
+                    return
+                on_fail = val
+                i += 2
+            else:
+                self.add_event("cmd", f"probe: unknown argument {t!r}")
+                return
+        self.probe_defs[name] = ProbeDef(name, unit=unit, vmin=vmin, vmax=vmax,
+                                         warn=warn, crit=crit, on_fail=on_fail)
+        if self._monitoring_started:
+            self.add_event("probe", f"probe: defined {name}")
+
     def _cmd_with(self, args=''):
         """:with is a hosts-file-only directive; cannot be used interactively."""
         self.add_event("cmd",
@@ -9682,6 +10233,13 @@ class Application:
         else:
             self.cycle_dns(1)
 
+    def _stat_label(self, token):
+        """Canonical column label for a user-typed stat name or probe name."""
+        if token in STAT_NAMES:
+            return STAT_NAMES[token]
+        probe = self.probe_defs.get(token)
+        return probe.label if probe is not None else token
+
     def _cmd_stats(self, args=''):
         """Cycle (no arg), set single-mode, or set custom comma-separated column list.
 
@@ -9709,14 +10267,15 @@ class Application:
                 self._set_stats_custom(None)
                 self.stats_mode = 0
                 return
-            unknown = [t for t in tokens if t not in STAT_NAMES]
+            unknown = [t for t in tokens
+                       if t not in STAT_NAMES and t not in self.probe_defs]
             if unknown:
-                valid = sorted(STAT_NAMES.keys())
+                valid = sorted(list(STAT_NAMES.keys()) + list(self.probe_defs))
                 self.add_event("cmd",
                     f"stats: unknown column(s): {', '.join(unknown)} — "
                     f"valid: {', '.join(valid)}")
                 return
-            self._set_stats_custom([STAT_NAMES[t] for t in tokens])
+            self._set_stats_custom([self._stat_label(t) for t in tokens])
             self.stats_mode = _CUSTOM_STATS_SENTINEL
             return
 
@@ -9726,12 +10285,13 @@ class Application:
         if arg_lower in modes_lower:
             self.stats_mode = modes_lower.index(arg_lower)
             self._set_stats_custom(None)
-        elif arg_lower in STAT_NAMES:
-            # e.g. ':set stats last' → treat as custom single-column
-            self._set_stats_custom([STAT_NAMES[arg_lower]])
+        elif arg_lower in STAT_NAMES or arg_lower in self.probe_defs:
+            # e.g. ':set stats last' or ':set stats temp' → single column
+            self._set_stats_custom([self._stat_label(arg_lower)])
             self.stats_mode = _CUSTOM_STATS_SENTINEL
         else:
-            valid = sorted(set(modes_lower) | set(STAT_NAMES.keys()))
+            valid = sorted(set(modes_lower) | set(STAT_NAMES.keys())
+                           | set(self.probe_defs))
             self.add_event("cmd",
                 f"stats: unknown mode '{args}' — "
                 f"choices: {', '.join(v for v in valid if v != 'last')}"
@@ -11687,6 +12247,7 @@ class Application:
         finally:
             for monitor in self.monitors:
                 monitor.stop()
+            self._stop_probe_readers()
 
 def _parse_args():
     """Parse command-line arguments outside of curses so errors print cleanly.
