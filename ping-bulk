@@ -1914,6 +1914,27 @@ def _history_char(val, mode):
     return '.'  # 'success' mode
 
 
+def _probe_char(value, vmin, vmax):
+    """Map a probe reading to one character, 0-9 across the declared range.
+
+    Mirrors the 'scaled' ping-history mode so the two strips read alike.  A
+    declared range rather than an observed one: auto-scaling would make the same
+    glyph mean different things on different hosts, and rescaling would rewrite
+    the meaning of cells already on screen.  Out of range clamps to '<' or '>'
+    so a clipped value still says which way it went.
+    """
+    if value is None:
+        return ' '
+    if vmin is None or vmax is None or vmax <= vmin:
+        return '?'
+    if value < vmin:
+        return '<'
+    if value > vmax:
+        return '>'
+    step = (value - vmin) / (vmax - vmin)
+    return str(min(9, int(step * 10)))
+
+
 class ProbeDef:
     """Display metadata for one custom probe value, from ':probe <name> ...'.
 
@@ -4916,6 +4937,7 @@ class Application:
         self._name_col_dirty = True      # invalidated on entry/dns/monitor changes
         self.sort_by = 'none'  # none, name, status, latency
         self.history_mode = 0  # index into HISTORY_MODES
+        self._history_probe = None  # probe column label when the strip shows one
         self.history_offset = 0  # 0 = live (newest), >0 = scrolled back
         self._visible_ping_length = 50  # updated by draw_hosts(); used for scroll step
         self.log_offset = 0      # 0 = tail mode, >0 = scrolled back in event log
@@ -5809,8 +5831,20 @@ class Application:
         current_idx = sorts.index(self.sort_by)
         self.sort_by = sorts[(current_idx + direction) % len(sorts)]
 
+    def _history_mode_name(self):
+        """Current ping-view mode: a built-in name, or a probe's column label.
+
+        ':set ping-view' accepts a probe name, which swaps the strip over to
+        that value.  The index stays the source of truth for the built-ins so
+        [H] keeps cycling them; a probe view is held separately.
+        """
+        if self._history_probe is not None:
+            return self._history_probe
+        return HISTORY_MODES[self.history_mode]
+
     def cycle_history_mode(self, direction=1):
         """Cycle through history display modes. direction=1 forward, -1 backward."""
+        self._history_probe = None   # [H] cycles the built-ins, leaving a probe view
         self.history_mode = (self.history_mode + direction) % len(HISTORY_MODES)
 
     def scroll_history(self, delta):
@@ -7779,7 +7813,7 @@ class Application:
                 stdscr.addstr(start_row, stat_col, f"{col25_label:>{stat_field_w}}", curses.A_BOLD)
 
             # Title is plain text; [H] gets hotkey highlighting via _draw_hint_text.
-            mode_name = HISTORY_MODES[self.history_mode]
+            mode_name = self._history_mode_name()
             if self._start_time is not None:
                 elapsed = time.monotonic() - self._start_time
                 hist_title = f"Ping [H]istory:{mode_name}  {_format_updown_time(elapsed)}"
@@ -7840,7 +7874,7 @@ class Application:
         safe_width = max(0, width - 1)
 
         # In rtt/scaled mode use multi-character cells; success mode uses 1 char per ping.
-        hist_mode = HISTORY_MODES[self.history_mode]
+        hist_mode = self._history_mode_name()
         if hist_mode == 'rtt':
             cell_width = self._rtt_cell_width()
         else:
@@ -8075,10 +8109,15 @@ class Application:
                                   self._stat_cell(monitor, 'Last'),
                                   self._stat_attr(monitor, 'Last', row_attr))
 
-            history = monitor.get_history_string(
-                display_count, self.history_offset, hist_mode, cell_width,
-                sync=sync, end_time=render_time
-            )
+            probe = self._probe_def_for_label(hist_mode)
+            if probe is not None:
+                history = self._probe_history_string(
+                    monitor, probe, display_count, self.history_offset)
+            else:
+                history = monitor.get_history_string(
+                    display_count, self.history_offset, hist_mode, cell_width,
+                    sync=sync, end_time=render_time
+                )
 
             # Color code the history.
             col = hist_col_effective
@@ -8292,6 +8331,88 @@ class Application:
         their normal colours, and freeze the RTime estimate.
         """
         return monitor.alive is not True or monitor.error is not None
+
+    def _probe_history_string(self, monitor, probe, length, offset=0):
+        """Render one probe's series as a strip, newest sample on the right.
+
+        One cell per sample, which is bucket-by-interval: probe readings already
+        arrive one per interval, so the strip covers ``length * interval`` of
+        real time instead of the ``length`` seconds a one-second bucket would
+        give.  Gaps are spaces rather than the previous value — a stalled probe
+        must not look like a healthy flat line.
+        """
+        with monitor.lock:
+            series = monitor.probes.get(probe.name)
+            values = list(series.values) if series else []
+        if offset:
+            values = values[:-offset] if offset < len(values) else []
+        cells = [_probe_char(v, probe.vmin, probe.vmax) for v in values[-length:]]
+        return ' ' * (length - len(cells)) + ''.join(cells)
+
+    def _probe_overlay_lines(self, monitor, inner_w):
+        """Build the details-overlay block for every probe declared on *monitor*.
+
+        One block per probe, in the same shape the overlay already uses for
+        packet, latency and clock data.  The sparkline is the reason to open the
+        overlay at all — the column already shows the current number, so what is
+        added here is trend and spread.
+        """
+        lines = []
+        for name, probe in self.probe_defs.items():
+            with monitor.lock:
+                series = monitor.probes.get(name)
+                values = list(series.values) if series else []
+                times = list(series.times) if series else []
+                state = series.state if series else 'idle'
+            if state == 'idle' and not values:
+                continue          # never read on this host: nothing to say
+
+            unit = f" ({probe.unit})" if probe.unit else ""
+            rng = (f"range {probe.vmin:g}:{probe.vmax:g}"
+                   if probe.vmin is not None and probe.vmax is not None else "")
+            head = f"  Probe: {name}{unit}"
+            if rng:
+                pad = max(1, inner_w - len(head) - len(rng) - 2)
+                head = f"{head}{' ' * pad}{rng}"
+            lines.append(head)
+
+            thresholds = "   ".join(
+                p for p in (f"warn {probe.warn:g}" if probe.warn is not None else "",
+                            f"crit {probe.crit:g}" if probe.crit is not None else "")
+                if p)
+            if state == 'gave-up':
+                # 'err' in the column; the reason belongs here, where there is
+                # room for it.
+                lines.append("    Current:     err   "
+                             "(polling stopped after repeated failures)")
+            elif state == 'err':
+                lines.append("    Current:     err")
+            else:
+                current = f"{values[-1]:.1f}" if values else "-"
+                lines.append(f"    Current:     {current}"
+                             + (f"      {thresholds}" if thresholds else ""))
+
+            if values:
+                lines.append(f"    Min / Max:   {min(values):.1f} / {max(values):.1f}"
+                             f"        Average: {sum(values) / len(values):.1f}")
+                age = int(time.time() - times[-1])
+                lines.append(f"    Last read:   {age}s ago"
+                             f"        {len(values)} sample"
+                             f"{'s' if len(values) != 1 else ''} retained")
+                spark_w = max(10, min(len(values), inner_w - 17))
+                spark = ''.join(_probe_char(v, probe.vmin, probe.vmax)
+                                for v in values[-spark_w:])
+                lines.append(f"    History:     {spark}")
+                span = times[-1] - times[-len(spark)] if len(spark) > 1 else 0
+                if span > 0:
+                    # Label the span the strip covers, so a glance says whether
+                    # this is the last hour or the last week.
+                    left = f"^ {_format_updown_time(span)}"
+                    right = "now ^"
+                    gap = max(1, len(spark) - len(left) - len(right))
+                    lines.append(f"                 {left}{' ' * gap}{right}")
+            lines.append("")
+        return lines
 
     def _stat_cell(self, monitor, cname):
         """Formatted cell for any column, built-in or user-defined probe.
@@ -10318,10 +10439,15 @@ class Application:
         if args:
             modes_lower = [m.lower() for m in HISTORY_MODES]
             if args.lower() in modes_lower:
+                self._history_probe = None
                 self.history_mode = modes_lower.index(args.lower())
+            elif args in self.probe_defs:
+                # Show a probe's series in the strip instead of ping results.
+                self._history_probe = self.probe_defs[args].label
             else:
+                choices = ' '.join(list(HISTORY_MODES) + list(self.probe_defs))
                 self.add_event("cmd",
-                    f"history: unknown mode '{args}' — choices: {' '.join(HISTORY_MODES)}")
+                    f"history: unknown mode '{args}' — choices: {choices}")
         else:
             self.cycle_history_mode(1)
 
@@ -11883,6 +12009,8 @@ class Application:
             else:
                 lines.append("    not available (no -T support or ICMP timestamp blocked)")
             lines.append("")
+
+        lines.extend(self._probe_overlay_lines(monitor, inner_w))
 
         if host_events:
             lines.append("  Recent Events:")

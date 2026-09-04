@@ -324,3 +324,141 @@ class TestProbeReadersLifecycle:
             app._start_probe_readers()
         app._stop_probe_readers()
         assert app.probe_readers == []
+
+
+# ---------------------------------------------------------------------------
+# View (b): the history strip
+# ---------------------------------------------------------------------------
+
+class TestProbeChar:
+    """Declared range, not observed: a glyph must mean the same on every host."""
+
+    @pytest.mark.parametrize('value,expect', [
+        (20, '0'), (25, '0'), (55, '5'), (89, '9'), (90, '9'),
+    ])
+    def test_maps_across_the_range(self, pb, value, expect):
+        assert pb._probe_char(value, 20, 90) == expect
+
+    def test_above_range_clamps_up(self, pb):
+        assert pb._probe_char(120, 20, 90) == '>'
+
+    def test_below_range_clamps_down(self, pb):
+        assert pb._probe_char(5, 20, 90) == '<'
+
+    def test_no_value_is_blank(self, pb):
+        assert pb._probe_char(None, 20, 90) == ' '
+
+    def test_no_declared_range_is_unknown(self, pb):
+        """Without --range there is nothing to scale against."""
+        assert pb._probe_char(50, None, None) == '?'
+
+
+class TestProbeStrip:
+
+    @pytest.fixture
+    def wired(self, app, pb):
+        app._cmd_probe('temp --range 0:100')
+        m = app.monitors[0]
+        m.probes['temp'] = s = pb.ProbeSeries(500)
+        for i, v in enumerate([0, 25, 50, 75, 100]):
+            s.add(v, time.time() - (5 - i) * 60)
+        return app, m, app.probe_defs['temp']
+
+    def test_one_cell_per_sample(self, wired):
+        app, m, probe = wired
+        assert app._probe_history_string(m, probe, 5) == '02579'
+
+    def test_short_series_is_right_aligned(self, wired):
+        """Newest on the right, as the ping strip is."""
+        app, m, probe = wired
+        assert app._probe_history_string(m, probe, 8) == '   02579'
+
+    def test_offset_scrolls_back(self, wired):
+        app, m, probe = wired
+        assert app._probe_history_string(m, probe, 3, offset=2).strip() == '025'
+
+    def test_no_series_is_blank(self, app, pb):
+        app._cmd_probe('temp --range 0:100')
+        assert app._probe_history_string(pb.PingMonitor('x'),
+                                         app.probe_defs['temp'], 4) == '    '
+
+    def test_ping_view_selects_a_probe(self, wired):
+        app, _, _ = wired
+        app._cmd_history('temp')
+        assert app._history_mode_name() == 'Temp'
+
+    def test_cycling_returns_to_the_builtins(self, wired):
+        """[H] cycles ping modes; it must not be stuck on a probe."""
+        app, _, _ = wired
+        app._cmd_history('temp')
+        app.cycle_history_mode(1)
+        assert app._history_mode_name() in ('success', 'rtt', 'scaled')
+
+    def test_builtin_mode_still_works(self, wired):
+        app, _, _ = wired
+        app._cmd_history('temp')
+        app._cmd_history('scaled')
+        assert app._history_mode_name() == 'scaled'
+
+    def test_unknown_mode_lists_probes_too(self, wired):
+        app, _, _ = wired
+        app._cmd_history('nosuch')
+        assert 'temp' in _last(app)[0]
+
+
+# ---------------------------------------------------------------------------
+# View (c): the details overlay
+# ---------------------------------------------------------------------------
+
+class TestProbeOverlay:
+
+    @pytest.fixture
+    def wired(self, app, pb):
+        app._cmd_probe('temp --unit °C --range 20:90 --warn 70 --crit 85')
+        m = app.monitors[0]
+        m.probes['temp'] = s = pb.ProbeSeries(500)
+        for i in range(10):
+            s.add(40.0 + i, time.time() - (10 - i) * 60)
+        return app, m
+
+    def _text(self, app, m):
+        return '\n'.join(app._probe_overlay_lines(m, 62))
+
+    def test_block_has_a_heading_with_unit(self, wired):
+        assert 'Probe: temp (°C)' in self._text(*wired)
+
+    def test_shows_current_and_thresholds(self, wired):
+        text = self._text(*wired)
+        assert 'Current:     49.0' in text
+        assert 'warn 70' in text and 'crit 85' in text
+
+    def test_shows_spread(self, wired):
+        text = self._text(*wired)
+        assert 'Min / Max:   40.0 / 49.0' in text
+        assert 'Average: 44.5' in text
+
+    def test_shows_a_sparkline(self, wired):
+        """The reason to open the overlay: the column already has the number."""
+        text = self._text(*wired)
+        assert 'History:' in text
+        line = [l for l in text.split('\n') if 'History:' in l][0]
+        assert any(c.isdigit() for c in line.split('History:')[1])
+
+    def test_sparkline_is_labelled_with_its_span(self, wired):
+        assert 'now ^' in self._text(*wired)
+
+    def test_unread_probe_has_no_block(self, app, pb):
+        """A probe declared but never read on this host says nothing."""
+        app._cmd_probe('temp')
+        assert app._probe_overlay_lines(pb.PingMonitor('x'), 62) == []
+
+    def test_gave_up_explains_itself(self, wired):
+        """'err' in the column; the reason belongs where there is room."""
+        app, m = wired
+        m.probes['temp'].state = 'gave-up'
+        assert 'polling stopped' in self._text(app, m)
+
+    def test_error_state_is_shown(self, wired):
+        app, m = wired
+        m.probes['temp'].state = 'err'
+        assert 'Current:     err' in self._text(app, m)

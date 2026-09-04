@@ -5,7 +5,8 @@ This note plans a mechanism for reading arbitrary values from a monitored host
 them next to the ping data. It records the options considered and why each was
 chosen, in the same spirit as `remote-clock.md`.
 
-Status: **design only**. Nothing here is implemented yet.
+Status: **implemented**, except the fixed-width strip column noted under
+view (b) — the strip is currently the full-width view mode only.
 
 ## What it should do
 
@@ -142,8 +143,14 @@ questions and share the same declarations.
 | Second row per host                   | ping and probe visible together                | doubles list height; a 47-host file stops fitting on screen |
 | **Fixed-width strip column**          | both visible; composes with multi-column stats | narrow, so little history; variable-width column logic      |
 
-Chosen: **both** — the strip column for "is anything hot", the view mode when
-one parameter deserves the whole width.
+Chosen: **view mode** first — `:set ping-view <probe>` swaps the strip over to
+that value, and `[H]` cycles back to the ping modes.  The fixed-width strip
+column is not built yet; it is the remaining piece of this view.
+
+Strip cells are coloured by position in the declared range (0-4 green, 5-9
+yellow, out of range magenta), matching the `scaled` ping mode.  The column and
+the overlay colour by `--warn`/`--crit` instead, because there a single value is
+being judged rather than a shape being read.
 
 ## View (c): details overlay
 
@@ -250,6 +257,13 @@ is exactly what kiosk mode blocks elsewhere: `:mux` permits only `ssh` and
 `login`, and `:bind-key --if-sh` is refused outright. Probes must either be
 disabled in kiosk mode or restricted to commands under `/etc/ping-bulk/`, and
 the choice belongs in `kiosk/README.md` alongside the rest of the model.
+
+## Known limitation: ';' in a source command
+
+Hosts-file lines are split on `;`, so a source command containing one is cut in
+half and its tail is parsed as a host line.  Use a script rather than an inline
+pipeline, or a command with no `;`.  Lifting this means teaching the splitter
+about quoting.
 
 ## Open questions
 

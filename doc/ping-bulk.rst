@@ -613,6 +613,39 @@ Key bindings
 ``:bind-key``
     List all user-defined key bindings in the event log.
 
+``:probe-source [--cmd 'CMD'] [--interval SEC] [--retain N] | off``
+    Command run on each monitored host that prints one ``key=value`` per
+    line.  It is wrapped in a loop on the far side and the SSH connection is
+    held open, so one connection per host serves every reading and the
+    interval is not a cost decision.  A host reached through a relay is
+    probed *through* that relay, since the values belong to the host.
+    Default interval 60 s; ``--retain`` bounds the samples kept per host.
+
+    Hosts-file lines are split on ``;``, so a command containing one is cut
+    in half — use a script rather than an inline pipeline.
+
+``:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N] [--on-fail retry|give-up]``
+    Declare how one key from ``:probe-source`` is displayed.  Keys with no
+    declaration are ignored, so a single site-wide script can serve hosts
+    that show different subsets.  ``--range`` scales the history strip,
+    ``--warn``/``--crit`` colour the column and the overlay, and ``--unit``
+    labels both.
+
+    A probe never changes host status: a host at 95 °C that answers ping is
+    still UP.  ``-`` means nothing has been read yet, ``err`` means the read
+    or the connection failed.  With ``--on-fail give-up`` polling stops after
+    three failed rounds — the behaviour ``no-rt`` has for clocks — and the
+    details overlay says so; the default keeps retrying, which costs nothing
+    while the connection is open.
+
+    The value appears in three places::
+
+        :set stats temp          # a column, latest value
+        :set ping-view temp      # the history strip, one cell per reading
+        Enter on a host          # current value, spread, and a sparkline
+
+    See ``doc/custom-probes.md`` for the design and the alternatives weighed.
+
 ``:set late-grace <seconds>``
     How long a probe reported unanswered by ``ping -O`` may still be
     answered before it counts as lost.  Default: ``1``.
