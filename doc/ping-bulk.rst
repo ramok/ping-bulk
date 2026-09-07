@@ -621,8 +621,13 @@ Key bindings
     probed *through* that relay, since the values belong to the host.
     Default interval 60 s; ``--retain`` bounds the samples kept per host.
 
-    Hosts-file lines are split on ``;``, so a command containing one is cut
-    in half — use a script rather than an inline pipeline.
+    In kiosk mode this may only be declared in the hosts file, not typed at
+    the ``:`` prompt, and the command must be an absolute path to a script
+    that is not group- or world-writable and has no writable directory on the
+    path to it.  Shell metacharacters (``;`` ``|`` ``&`` ``$`` ``>`` and
+    backticks) are refused there, since only the first token's ownership can
+    be checked.  The connection carries the same SSH isolation flags as
+    ``:mux``.
 
 ``:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N] [--on-fail retry|give-up]``
     Declare how one key from ``:probe-source`` is displayed.  Keys with no

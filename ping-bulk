@@ -13,6 +13,7 @@ import re
 import select
 import shlex
 import shutil
+import stat
 import socket
 import subprocess
 import sys
@@ -868,6 +869,13 @@ _HELP_CMDS_HOSTSFILE = [
     "                            :remote-ping user@hostname resolves hostname, preserves username",
     "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
     "",
+    "  :probe-source --cmd '<cmd>' \\[--interval SEC] \\[--retain N]",
+    "                            command run on each host printing key=value lines",
+    "                            one SSH connection per host, held open",
+    "  :probe <name> \\[--unit U] \\[--range MIN:MAX] \\[--warn N] \\[--crit N] \\[--on-fail retry|give-up]",
+    "                            declare how one key is displayed; undeclared keys ignored",
+    "                            show it: :set stats <name> | :set ping-view <name> | \\[Enter] on a host",
+    "",
     "  :with remote-ping \\[ssh-opts] <relay>      open block; host lines → :remote-ping commands",
     "  :with prog-options <prog>                   open :prog-options block; inner lines are <glob> [opts]",
     "  :end  (:done)                               close :with, :for, or :if block",
@@ -1081,6 +1089,19 @@ example.com:443
     10.31.$1.1  ## probe$1-ctrl
     :if $1 in $remote -> :end
 :end
+
+# ── Custom probes ──────────────────────────────────────────────────────────
+# One command runs on each host and prints 'key=value' lines; the SSH
+# connection is held open, so the interval costs nothing.  Keys with no :probe
+# declaration are ignored, so one script can serve hosts showing different
+# subsets.  Commented out: it would open a connection per host.
+# :probe-source --cmd '/usr/local/bin/pb-probe' --interval 60
+# :probe temp --unit °C --range 20:90 --warn 70 --crit 85
+#
+# The value shows up three ways:
+#   :set stats temp        — a column with the latest value
+#   :set ping-view temp    — the history strip, one cell per reading
+#   [Enter] on a host      — current value, spread and a sparkline
 
 # ── Key bindings ───────────────────────────────────────────────────────────
 :bind-key --desc "MTR trace" --hint "[t]race" t :mux mtr %i
@@ -2672,13 +2693,14 @@ class ProbeReader(_PipeReaderLoop):
     _child_label = 'probe reader'
 
     def __init__(self, monitor, source_cmd, interval, defs, retain,
-                 ssh_args=None):
+                 ssh_args=None, kiosk_mode=False):
         self.monitor = monitor
         self.source_cmd = source_cmd
         self.interval = float(interval)
         self.defs = defs
         self.retain = int(retain)
         self._ssh_args = list(ssh_args or [])
+        self.kiosk_mode = bool(kiosk_mode)
         self.running = True
         self._proc = None
         self.error = None
@@ -2692,7 +2714,12 @@ class ProbeReader(_PipeReaderLoop):
         """ssh <host> 'while :; do <cmd>; echo ---; sleep N; done'"""
         remote = (f"while :; do {self.source_cmd}; echo ---; "
                   f"sleep {self.interval:g}; done")
-        return (['ssh', '-o', 'BatchMode=yes'] + self._jump_args()
+        # Kiosk mode isolates ssh from the user's home directory for :mux and
+        # :remote-ping; a probe connection has to do the same or it would read
+        # ~/.ssh/config and the user's keys, which is exactly what kiosk keeps
+        # out of reach.
+        flags = _kiosk_ssh_flags() if self.kiosk_mode else []
+        return (['ssh', '-o', 'BatchMode=yes'] + flags + self._jump_args()
                 + self._ssh_args + [self._ssh_target(), remote])
 
     def _ssh_target(self):
@@ -5579,7 +5606,8 @@ class Application:
             if isinstance(monitor, PortMonitor):
                 continue          # no shell on the far side of a TCP check
             reader = ProbeReader(monitor, self.probe_source, self.probe_interval,
-                                 self.probe_defs, self.probe_retain)
+                                 self.probe_defs, self.probe_retain,
+                                 kiosk_mode=self.kiosk_mode)
             self.probe_readers.append(reader)
             t = threading.Thread(target=reader.run, daemon=True)
             t.start()
@@ -10022,6 +10050,18 @@ class Application:
         if cmd is None:
             self.add_event("cmd", "probe-source: missing --cmd")
             return
+        if self.kiosk_mode:
+            # A probe runs a command of someone's choosing on every monitored
+            # host.  In kiosk mode the console user is the adversary, so the
+            # declaration has to come from the admin-owned hosts file rather
+            # than the ':' line, and the script it names must not be rewritable.
+            if self._monitoring_started:
+                self.add_event("cmd",
+                    "probe-source: not allowed interactively in kiosk mode — "
+                    "declare it in the hosts file")
+                return
+            if not self._kiosk_probe_cmd_allowed(cmd):
+                return
         self.probe_source = cmd
         self.probe_interval = interval
         if self._monitoring_started:
@@ -10053,6 +10093,11 @@ class Application:
             tokens = shlex.split(args)
         except ValueError as e:
             self.add_event("cmd", f"probe: {e}")
+            return
+        if self.kiosk_mode and self._monitoring_started:
+            self.add_event("cmd",
+                "probe: not allowed interactively in kiosk mode — "
+                "declare it in the hosts file")
             return
         name = tokens[0]
         if name.startswith('-'):
@@ -10310,6 +10355,70 @@ class Application:
         self.add_event("cmd",
             f"{tag}kiosk mode: path not in allowed directories — {path}")
         return False
+
+    def _kiosk_probe_cmd_allowed(self, cmd: str) -> bool:
+        """Check a probe command is admin-owned before running it in kiosk mode.
+
+        The hosts file in a kiosk deployment is admin-controlled, so a probe
+        declared there is trusted — but only as far as the *file it names* is.
+        A script that anyone can rewrite is a command that anyone can choose, so
+        this verifies what ssh does for a private key and sudo for sudoers: a
+        regular file, not writable by group or other, with no
+        group/other-writable directory on the way to it (a writable parent lets
+        the file be swapped wholesale).
+
+        Only the first token is checked, so the command has to be a script
+        rather than an inline pipeline — an inline command has no file whose
+        ownership could be verified.  Returns True when allowed, and logs the
+        reason when not.
+        """
+        # Only the first token can be ownership-checked, so anything that would
+        # let the rest of the string become a second command must be refused —
+        # otherwise '/usr/bin/true; curl … | sh' passes a check on /usr/bin/true
+        # and runs whatever follows on every host.
+        bad = [c for c in ';|&`$><\n' if c in cmd]
+        if bad:
+            self.add_event("cmd",
+                f"probe: kiosk mode: {''.join(bad)!r} not allowed in the command "
+                f"— name a script, not a shell pipeline")
+            return False
+        first = cmd.split()[0] if cmd.split() else ''
+        if not first.startswith('/'):
+            self.add_event("cmd",
+                f"probe: kiosk mode needs an absolute path to a script, "
+                f"not {first!r}")
+            return False
+        path = os.path.realpath(first)
+        try:
+            st = os.stat(path)
+        except OSError as e:
+            self.add_event("cmd", f"probe: kiosk mode: cannot stat {path}: {e}")
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            self.add_event("cmd", f"probe: kiosk mode: {path} is not a regular file")
+            return False
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            self.add_event("cmd",
+                f"probe: kiosk mode: {path} is group- or world-writable")
+            return False
+        # Walk the parents: a writable directory means the file can be replaced.
+        parent = os.path.dirname(path)
+        while True:
+            try:
+                pst = os.stat(parent)
+            except OSError as e:
+                self.add_event("cmd",
+                    f"probe: kiosk mode: cannot stat {parent}: {e}")
+                return False
+            if pst.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                self.add_event("cmd",
+                    f"probe: kiosk mode: {parent} is group- or world-writable, "
+                    f"so {path} can be replaced")
+                return False
+            if parent == '/':
+                break
+            parent = os.path.dirname(parent)
+        return True
 
     def _resolve_editor(self) -> list:
         """Return [editor_binary] or [editor_binary, flags] to open a file.

@@ -10,6 +10,28 @@
 # Run directly:  chmod +x network.hosts && ./network.hosts
 # Or:            ping-bulk -f network.hosts
 
+# -- Custom probes ---------------------------------------------------------
+# Read arbitrary per-host values -- temperature, fan speed, disk use -- over a
+# single SSH connection per host that is held open, so the interval costs
+# nothing.  The command prints one 'key=value' per line; keys with no :probe
+# declaration are ignored, so one site-wide script can serve hosts that show
+# different subsets.  Left commented out: it would open a connection per host.
+#
+# :probe-source --cmd '/usr/local/bin/pb-probe' --interval 60
+# :probe temp --unit °C --range 20:90 --warn 70 --crit 85
+# :probe rpm  --unit rpm --range 0:5000 --on-fail give-up
+#
+# Each value can be shown three ways:
+#   :set stats temp        -- a column with the latest reading
+#   :set ping-view temp    -- the history strip, one cell per reading
+#   [Enter] on a host      -- current value, min/max/average and a sparkline
+#
+# '-' means nothing read yet, 'err' means the read or connection failed.
+# --range scales the strip; --warn/--crit colour every view; a probe never
+# changes host status.  In kiosk mode probes may only be declared here, not
+# typed at the ':' prompt, and the command must be an unwritable script.
+# See doc/custom-probes.md for the design.
+
 # -- Predefined variables: $SCRIPT_DIR / $SCRIPT_FILE ----------------------
 # Both are set automatically while a hosts *file* is parsed: the file's
 # absolute directory (no trailing slash) and its base name.  They keep a

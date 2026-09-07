@@ -462,3 +462,161 @@ class TestProbeOverlay:
         app, m = wired
         m.probes['temp'].state = 'err'
         assert 'Current:     err' in self._text(app, m)
+
+
+# ---------------------------------------------------------------------------
+# Kiosk mode
+# ---------------------------------------------------------------------------
+
+class TestProbeKiosk:
+    """A probe runs a chosen command on every host, so kiosk must constrain it.
+
+    The console user is the adversary there: declaration has to come from the
+    admin-owned hosts file, and the script it names must not be rewritable.
+    """
+
+    def _app(self, pb, tmp_path, started=True):
+        cfg = tmp_path / 'ping-bulk' / 'config'
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('')
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application([('host', '10.0.0.1')], kiosk_mode=True)
+        app._monitoring_started = started
+        return app
+
+    # ── interactive declaration is refused ──────────────────────────────────
+
+    def test_interactive_source_is_blocked(self, pb, tmp_path):
+        app = self._app(pb, tmp_path)
+        app._cmd_probe_source('--cmd /usr/bin/true')
+        assert app.probe_source is None
+        assert 'not allowed interactively' in _last(app)[0]
+
+    def test_interactive_probe_is_blocked(self, pb, tmp_path):
+        """Otherwise a column could be added to an admin's source."""
+        app = self._app(pb, tmp_path)
+        app._cmd_probe('temp')
+        assert app.probe_defs == {}
+        assert 'not allowed interactively' in _last(app)[0]
+
+    def test_hosts_file_declaration_is_allowed(self, pb, tmp_path):
+        """Startup dispatch is the admin-owned path."""
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe('temp')
+        app._cmd_probe_source('--cmd /usr/bin/true')
+        assert 'temp' in app.probe_defs
+        assert app.probe_source == '/usr/bin/true'
+
+    def test_not_restricted_outside_kiosk(self, pb, tmp_path):
+        cfg = tmp_path / 'ping-bulk' / 'config'
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('')
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application([('host', '10.0.0.1')])
+        app._monitoring_started = True
+        app._cmd_probe_source('--cmd /usr/bin/true')
+        assert app.probe_source == '/usr/bin/true'
+
+    # ── the command file must be admin-owned ────────────────────────────────
+
+    def test_safe_system_path_is_accepted(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source('--cmd /usr/bin/true')
+        assert app.probe_source == '/usr/bin/true'
+
+    def test_world_writable_script_is_refused(self, pb, tmp_path):
+        """A script anyone can rewrite is a command anyone can choose."""
+        script = tmp_path / 'probe.sh'
+        script.write_text('#!/bin/sh\n')
+        os.chmod(script, 0o777)
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source(f'--cmd {script}')
+        assert app.probe_source is None
+        assert 'group- or world-writable' in _last(app)[0]
+
+    def test_writable_parent_directory_is_refused(self, pb, tmp_path):
+        """A writable directory lets the file be replaced wholesale."""
+        d = tmp_path / 'open'
+        d.mkdir()
+        script = d / 'probe.sh'
+        script.write_text('#!/bin/sh\n')
+        os.chmod(script, 0o755)
+        os.chmod(d, 0o777)
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source(f'--cmd {script}')
+        assert app.probe_source is None
+        assert 'can be replaced' in _last(app)[0]
+
+    def test_inline_command_is_refused(self, pb, tmp_path):
+        """An inline pipeline has no file whose ownership could be checked."""
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source("--cmd 'echo temp=1'")
+        assert app.probe_source is None
+        assert 'absolute path' in _last(app)[0]
+
+    def test_relative_path_is_refused(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source('--cmd probe.sh')
+        assert app.probe_source is None
+        assert 'absolute path' in _last(app)[0]
+
+    def test_missing_file_is_refused(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source('--cmd /nonexistent-probe-xyz')
+        assert app.probe_source is None
+        assert 'cannot stat' in _last(app)[0]
+
+    def test_directory_is_refused(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source('--cmd /usr/bin')
+        assert app.probe_source is None
+        assert 'not a regular file' in _last(app)[0]
+
+    @pytest.mark.parametrize('cmd', [
+        '/usr/bin/true; curl x | sh',
+        '/usr/bin/true && evil',
+        '/usr/bin/true `id`',
+        '/usr/bin/true $(id)',
+        '/usr/bin/true > /etc/passwd',
+        '/usr/bin/true | tee x',
+    ])
+    def test_shell_metacharacters_are_refused(self, pb, tmp_path, cmd):
+        """Only the first token can be ownership-checked.
+
+        Without this, '/usr/bin/true; curl … | sh' passes a check on
+        /usr/bin/true and then runs whatever follows on every host.
+        """
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source(f"--cmd '{cmd}'")
+        assert app.probe_source is None
+        assert 'not allowed in the command' in _last(app)[0]
+
+    def test_plain_flags_are_still_allowed(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe_source("--cmd '/usr/bin/true --quiet'")
+        assert app.probe_source == '/usr/bin/true --quiet'
+
+    # ── the connection is isolated from the user's home ─────────────────────
+
+    def test_reader_isolates_ssh_in_kiosk(self, pb):
+        """Without this a probe would read ~/.ssh/config and the user's keys."""
+        r = pb.ProbeReader(pb.PingMonitor('10.0.0.1'), 'p', 60,
+                           {'temp': pb.ProbeDef('temp')}, retain=10,
+                           kiosk_mode=True)
+        cmd = r._build_cmd()
+        assert '-F' in cmd and cmd[cmd.index('-F') + 1] == 'none'
+        assert 'IdentityFile=none' in cmd
+        assert 'ProxyCommand=none' in cmd
+
+    def test_reader_does_not_isolate_outside_kiosk(self, pb):
+        r = pb.ProbeReader(pb.PingMonitor('10.0.0.1'), 'p', 60,
+                           {'temp': pb.ProbeDef('temp')}, retain=10)
+        assert '-F' not in r._build_cmd()
+
+    def test_readers_get_the_app_kiosk_flag(self, pb, tmp_path):
+        app = self._app(pb, tmp_path, started=False)
+        app._cmd_probe('temp')
+        app._cmd_probe_source('--cmd /usr/bin/true')
+        with patch('threading.Thread'):
+            app._start_probe_readers()
+        assert app.probe_readers and app.probe_readers[0].kiosk_mode is True

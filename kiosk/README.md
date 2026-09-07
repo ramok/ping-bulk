@@ -95,6 +95,9 @@ automatically in kiosk mode.
 | `:edit` permission | Checked — write access to the hosts file is required |
 | `:log` / `:source` paths | Restricted to `/tmp/`, `~/.local/state/ping-bulk/`, `/etc/ping-bulk/`, and the hosts-file directory |
 | Symlink traversal | Blocked — all path checks use `realpath()` |
+| `:probe` / `:probe-source` | **Interactive use blocked** — probes may only be declared in the hosts file |
+| Probe command | Checked — an absolute path to a regular file that is not group/world-writable, with no writable directory on the path to it; shell metacharacters refused |
+| Probe SSH connection | Isolated with the same flags as `:mux` (`-F none`, `IdentityFile=none`, `ProxyCommand=none`) |
 | Command audit log | Every `:cmd` dispatch is logged to syslog (`LOG_NOTICE`, facility `DAEMON`) |
 | Session lock | Optional via `lock-after-time` in `ping-bulk-kiosk.tmux.conf` |
 

@@ -252,11 +252,36 @@ is for hosts where the command genuinely does not exist.
 
 ## Kiosk mode
 
-A probe is arbitrary remote command execution declared in a hosts file, which
-is exactly what kiosk mode blocks elsewhere: `:mux` permits only `ssh` and
-`login`, and `:bind-key --if-sh` is refused outright. Probes must either be
-disabled in kiosk mode or restricted to commands under `/etc/ping-bulk/`, and
-the choice belongs in `kiosk/README.md` alongside the rest of the model.
+A probe runs a command of someone's choosing on every monitored host, and in
+kiosk mode the person at the console is the adversary. Working out where the
+hole actually was decided the design:
+
+- **The hosts file is already admin-controlled.** It lives in
+  `/etc/ping-bulk/`, `:edit` requires write access and refuses without it, and
+  `:edit` can only open the hosts file, not an arbitrary path. A probe declared
+  there is as trusted as the rest of that file.
+- **The `:` command line was wide open.** Typing `:probe-source --cmd ...` would
+  run a chosen command on every host, repeatedly, with no pane to show it.
+
+So `:probe` and `:probe-source` are refused *interactively* in kiosk mode and
+accepted only from the hosts file at startup. That closes the hole; a path
+restriction would not have, since a console user could name any file under an
+allowed directory.
+
+On top of that, the script a kiosk deployment names is verified rather than
+assumed: a regular file, not group- or world-writable, with no
+group/other-writable directory on the path to it -- a writable parent lets the
+file be swapped wholesale. This is what `ssh` does for a private key and `sudo`
+for sudoers. Only the first token can be ownership-checked, so a kiosk probe
+must be a script rather than a shell pipeline, and `;`, `|`, `&`, backticks,
+`$`, and redirections are refused outright in the command — otherwise
+`/usr/bin/true; curl … | sh` would pass a check on `/usr/bin/true` and run
+whatever follows on every host.
+
+The probe connection also carries the same SSH isolation flags as `:mux` and
+`:remote-ping` (`-F none`, `IdentityFile=none`, `ProxyCommand=none`). Without
+them a probe would read `~/.ssh/config` and the user's keys, which is precisely
+what kiosk keeps out of reach.
 
 ## Open questions
 
