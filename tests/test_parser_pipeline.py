@@ -345,3 +345,74 @@ node-$0
         assert h == ['node-node1', 'node-node2', 'node-node3']
         s = sections(result)
         assert s[0][0] == 'Group A'
+
+
+class TestSplitStatementsQuoting:
+    """';' inside quotes is data, not a statement separator.
+
+    The split happens in the lexer, before anything tokenises the line, so
+    quotes used to look protective while the line was already cut in half —
+    ``:probe-source --cmd 'a; b'`` lost its tail to a spurious host entry.
+    """
+
+    def test_plain_split_still_works(self, pb):
+        assert [x.strip() for x in pb._split_statements('host1; host2')] == \
+            ['host1', 'host2']
+
+    def test_single_quoted_semicolon_is_kept(self, pb):
+        line = ":probe-source --cmd 'echo a; echo b'"
+        assert pb._split_statements(line) == [line]
+
+    def test_double_quoted_semicolon_is_kept(self, pb):
+        line = ':probe-source --cmd "a; b; c"'
+        assert pb._split_statements(line) == [line]
+
+    def test_split_outside_quotes_around_a_quoted_part(self, pb):
+        got = [x.strip() for x in
+               pb._split_statements(":probe-source --cmd 'a; b'; host1")]
+        assert got == [":probe-source --cmd 'a; b'", 'host1']
+
+    def test_escaped_semicolon_passes_through(self, pb):
+        r"""'\;' separates the commands of a multi-command :bind-key.
+
+        _cmd_bindkey splits on that exact two-character sequence, so the lexer
+        must leave both characters intact.
+        """
+        line = r':bind-key x :set stats down \; :set dns hostname'
+        assert pb._split_statements(line) == [line]
+
+    def test_unterminated_quote_does_not_split(self, pb):
+        line = ":probe-source --cmd 'oops; tail"
+        assert pb._split_statements(line) == [line]
+
+    def test_no_semicolon_is_one_statement(self, pb):
+        assert pb._split_statements('10.0.0.1') == ['10.0.0.1']
+
+    def test_multi_command_binding_survives_a_hosts_file(self, pb):
+        """End to end: the documented example used to arrive truncated."""
+        src = r':bind-key x :set stats down \; :set dns hostname' + '\n10.0.0.1\n'
+        entries = pb._HostsParser().parse(src)
+        cmds = [e[1] for e in entries if e[0] == 'cmd']
+        assert cmds == [r':bind-key x :set stats down \; :set dns hostname']
+
+    def test_multi_command_binding_actually_registers_both(self, pb, tmp_path):
+        """The user-visible outcome: both commands land on the key.
+
+        At HEAD this bound a single ':set stats down \\' — the split cut the
+        line and left the backslash behind.
+        """
+        from unittest.mock import patch
+        cfg = tmp_path / 'ping-bulk' / 'config'
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('')
+        src = r':bind-key x :set stats down \; :set dns hostname' + '\n10.0.0.1\n'
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application(pb._HostsParser().parse(src))
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('x'), set())
+        assert binding.commands == [':set stats down', ':set dns hostname']
+
+    def test_quoted_probe_command_survives_a_hosts_file(self, pb):
+        src = ":probe-source --cmd 'echo t=1; echo r=2'\n10.0.0.1\n"
+        entries = pb._HostsParser().parse(src)
+        assert [e[0] for e in entries] == ['cmd', 'host']
+        assert entries[0][1] == ":probe-source --cmd 'echo t=1; echo r=2'"

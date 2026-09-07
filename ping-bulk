@@ -3566,6 +3566,46 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
     return entries
 
 
+def _split_statements(line):
+    r"""Split a hosts-file line into statements on ``;``, respecting quotes.
+
+    A ``;`` inside single or double quotes is data, not a separator.  Without
+    this, ``:probe-source --cmd 'a; b'`` was cut in half and its tail parsed as
+    a host line — the quotes looked protective but the split happens before
+    anything tokenises the line.
+
+    ``\;`` is passed through untouched, including the backslash: it is the
+    separator between the commands of a multi-command ``:bind-key``, and
+    ``_cmd_bindkey`` splits on that exact two-character sequence itself.
+
+    An unterminated quote yields one final segment rather than splitting on the
+    rest of the line; the command's own parser then reports the bad quoting.
+    """
+    out, buf, quote = [], [], None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == '\\' and i + 1 < len(line) and line[i + 1] == ';':
+            buf.append('\\;')
+            i += 2
+            continue
+        if quote is not None:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in ('"', "'"):
+            quote = ch
+            buf.append(ch)
+        elif ch == ';':
+            out.append(''.join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    out.append(''.join(buf))
+    return out
+
+
 class _HostsParser:
     """Lexer + callback-based parser for ping-bulk hosts files.
 
@@ -3662,9 +3702,11 @@ class _HostsParser:
            skips the whole thing as a comment.
 
         2. Split each result on ``;`` — enabling multiple statements on a
-           single physical line (e.g. ``host1; host2``).  The split happens
-           *before* inline-comment stripping, so each segment is treated as an
-           independent logical line.
+           single physical line (e.g. ``host1; host2``).  Quoted ``;`` and the
+           escaped ``\;`` binding separator are left alone; see
+           :func:`_split_statements`.  The split happens *before* inline-comment
+           stripping, so each segment is treated as an independent logical
+           line.
 
         3. Strip leading/trailing whitespace; discard blank segments.
 
@@ -3705,7 +3747,7 @@ class _HostsParser:
                 if text:
                     result.append((text, comment))
                 continue
-            for segment in raw.split(';'):
+            for segment in _split_statements(raw):
                 segment = segment.strip()
                 if not segment:
                     continue

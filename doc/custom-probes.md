@@ -258,13 +258,6 @@ is exactly what kiosk mode blocks elsewhere: `:mux` permits only `ssh` and
 disabled in kiosk mode or restricted to commands under `/etc/ping-bulk/`, and
 the choice belongs in `kiosk/README.md` alongside the rest of the model.
 
-## Known limitation: ';' in a source command
-
-Hosts-file lines are split on `;`, so a source command containing one is cut in
-half and its tail is parsed as a host line.  Use a script rather than an inline
-pipeline, or a command with no `;`.  Lifting this means teaching the splitter
-about quoting.
-
 ## Open questions
 
 - **Retention.** `history-size` defaults to 86400, meaning 24 h at one ping per
