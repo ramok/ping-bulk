@@ -732,6 +732,7 @@ def _join_help_fragments(*groups):
 _HELP_LEGEND = [
     "  Ping history  ([H] cycle: success / rtt / scaled)",
     "  Symbols:  [X:red = lost]             [x:yellow = late reply]           [?:brightred = process error]",
+    "            \\[o = lost, but expected (:no-alarm host)]",
     "            \\[_ = ping not running (starting / connecting / backoff)]     \\[' ' = no data in sync mode]",
     "  RTT time: [green:green fast (<50 ms)]  [yellow:yellow slow (≥50 ms)]  [magenta:magenta ≥100 ms]",
     "  Ping history modes:",
@@ -759,6 +760,7 @@ _HELP_HOTKEYS = [
     "  [Ctrl+L]              (:layout)                          cycle layout: all / ping only / log only",
     "  [W]                   (:save)                            write event log to a file",
     "  [X]                   (:clear)                           clear event log",
+    "  [o]                   (:no-alarm --toggle)               mark selected host: a lost reply is expected",
     "  [C]                   (:mux ssh %r ...)                  edit an SSH command before running it",
     "  [Esc]                 (:select none)                     clear host selection + return to live history",
     "  [?]                   (:help bindings)                   show key bindings (help overlay)",
@@ -883,6 +885,9 @@ _HELP_CMDS_HOSTSFILE = [
     "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
     "                            ip-pat may use brace expansion; \\N in host = brace group N",
     "                            :remote-ping user@hostname resolves hostname, preserves username",
+    "  :no-alarm <host|glob>     a lost reply is expected here: grey 'o' not red 'X',",
+    "                            counted apart in a section badge, events at info level",
+    "                            ('~host' on a host line marks that host; :with no-alarm too)",
     "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
     "                            an exact host name beats any glob, whatever the order;",
     "                            among rules of the same kind the last match wins",
@@ -1108,6 +1113,18 @@ example.com:443
     :if $1 in $remote -> :end
 :end
 
+# ── Hosts where silence is expected ────────────────────────────────────────
+# A device that is normally switched off, or one that drops ICMP: a red 'X'
+# every second and a permanently red section header is noise, not information.
+:no-alarm *-power-switch
+~10.0.3.99                 # or mark one host with a leading '~'
+# :with no-alarm            # block form, for many globs
+#     *-cam*
+# :end
+# Marked hosts draw a grey 'o' instead of a red 'X', are counted apart in the
+# section badge (8↑/1↓/1○), and log their up/down at info level.  Press [o] on
+# a selected host to toggle it; :save-config keeps it.
+
 # ── Custom probes ──────────────────────────────────────────────────────────
 # One command runs on each host and prints 'key=value' lines; the SSH
 # connection is held open, so the interval costs nothing.  Keys with no :probe
@@ -1175,7 +1192,7 @@ _DIRECTIVE_KEYWORDS = frozenset({
     'if', 'elif', 'else', 'end', 'for', 'with', 'let',
     'resolv', 'resolv-port', 'title', 'title2', 'title3',
     'remote-ping', 'source', 'log', 'edit', 'bind-key', 'section',
-    'probe', 'probe-source',
+    'probe', 'probe-source', 'no-alarm',
 })
 
 
@@ -1936,11 +1953,12 @@ def _hist_rtt(val):
     return abs(val)
 
 
-def _history_char(val, mode):
+def _history_char(val, mode, no_alarm=False):
     """Convert a raw history value (float ms, None, or 'ERR') to a single display character.
 
     success — '.' for a reply, 'x' for a reply that arrived after the '-O'
-              deadline, 'X' for a lost probe, '?' for process error
+              deadline, 'X' for a lost probe, 'o' for a lost probe on a
+              ':no-alarm' host (expected), '?' for process error
     rtt     — last digit of int(ms) for a reply, 'X' for a lost probe, '?' for error
     scaled  — digit 0-9 by RTT bucket, 'X' for a lost probe, '?' for error
 
@@ -1950,7 +1968,10 @@ def _history_char(val, mode):
     if val == 'ERR':
         return '?'
     if val is None:
-        return 'X'
+        # A distinct glyph, not just a colour: colour alone is lost in a
+        # screenshot, in a log, and to anyone colourblind — and a grey 'X'
+        # still reads as "lost" at a glance.
+        return 'o' if no_alarm else 'X'
     late = _hist_is_late(val)
     val = _hist_rtt(val)
     if mode == 'rtt':
@@ -2067,6 +2088,11 @@ class Monitor(ABC):
         # a TCP connect is immediate, so PortMonitor leaves them empty.
         self._connect_since = None
         self._connect_windows = deque(maxlen=64)
+        # True when a lost reply is expected here rather than a fault: a device
+        # that is normally switched off, or one that drops ICMP.  Presentation
+        # only — 'alive' stays factual, because it is read in ~28 places and
+        # feeds loss statistics, recovery detection and the clock probe.
+        self.no_alarm = False
         # name -> ProbeSeries, filled by the probe reader.  One generic store
         # rather than per-value attributes: the remote-clock stats added six of
         # those to this constructor, and custom probes would repeat that for
@@ -2385,14 +2411,14 @@ class Monitor(ABC):
                     if cell_width > 1:
                         num_w = cell_width - 1
                         if val is None:
-                            cell = "X" * num_w + " "
+                            cell = ("o" if self.no_alarm else "X") * num_w + " "
                         elif val == "ERR":
                             cell = "?" * num_w + " "
                         else:
                             capped = min(int(round(_hist_rtt(val))), 10 ** num_w - 1)
                             cell = f"{capped:>{num_w}} "
                     else:
-                        cell = _history_char(val, mode)
+                        cell = _history_char(val, mode, self.no_alarm)
                     result[bucket] = cell
             self._fill_connect_gaps(result, t_end, length, cell_width)
             return "".join(result)  # result[0]=newest, result[length-1]=oldest (no reversal)
@@ -2411,14 +2437,14 @@ class Monitor(ABC):
                     if cell_width > 1:
                         num_w = cell_width - 1
                         if val is None:
-                            cell = "X" * num_w + " "
+                            cell = ("o" if self.no_alarm else "X") * num_w + " "
                         elif val == "ERR":
                             cell = "?" * num_w + " "
                         else:
                             capped = min(int(round(_hist_rtt(val))), 10**num_w - 1)
                             cell = f"{capped:>{num_w}} "
                     else:
-                        cell = _history_char(val, mode)
+                        cell = _history_char(val, mode, self.no_alarm)
                 result.append(cell)
             return "".join(reversed(result))
 
@@ -3574,7 +3600,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                         if local_with_type is not None:
                             entries.append(('error',
                                 ':with cannot be nested inside another :with'))
-                        elif w_type not in ('remote-ping', 'prog-options'):
+                        elif w_type not in ('remote-ping', 'prog-options', 'no-alarm'):
                             entries.append(('error',
                                 f':with: unknown block type {w_type!r}; '
                                 f'expected remote-ping or prog-options'))
@@ -3631,10 +3657,23 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                         expanded_rule = _apply_backref(line, captures, full_str)
                         entries.append(('cmd', f':prog-options {local_with_args} {expanded_rule}'))
                         continue
-                    # Host line.  A leading '?' marks it as optional: silently skip if the
-                    # expanded name has no :resolv mapping at Application init time.
-                    optional = line.startswith('?')
-                    host_line = line[1:] if optional else line
+                    if local_with_type == 'no-alarm':
+                        entries.append(('cmd', ':no-alarm '
+                                        + _apply_backref(line, captures, full_str)))
+                        continue
+                    # Host line.  Leading markers, in any order: '?' marks it
+                    # optional (silently skipped when the expanded name has no
+                    # :resolv mapping at Application init time), '~' says a
+                    # lost reply is expected there.
+                    optional = False
+                    no_alarm_host = False
+                    host_line = line
+                    while host_line[:1] in ('?', '~'):
+                        if host_line[0] == '?':
+                            optional = True
+                        else:
+                            no_alarm_host = True
+                        host_line = host_line[1:]
                     # Split inline ## label (e.g. '10.0.$sh.{1,2} ## host$sh-cam$1')
                     _m_label = re.search(r' #{2,} ', host_line)
                     label_tmpl = host_line[_m_label.end():] if _m_label else None
@@ -3671,11 +3710,17 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                                     entries.append(('cmd', f':resolv {host} {label}'))
                                 if effective_ssh_args is not None:
                                     # '?' not supported for SSH hosts inside :for — add normally.
+                                    if no_alarm_host:
+                                        entries.append(('cmd', f':no-alarm {host}'))
                                     entries.append(('cmd', f':remote-ping {effective_ssh_args} {host}'))
                                 else:
                                     # Use the label as host entry so dns_mode='off' shows the
                                     # hostname, matching the behaviour of :resolv IP label + label.
                                     host_entry = label if (expanded_label and _is_ip(host)) else host
+                                    # The rule names what the monitor is called,
+                                    # which is the label when there is one.
+                                    if no_alarm_host:
+                                        entries.append(('cmd', f':no-alarm {host_entry}'))
                                     entries.append(('optional_host' if optional else 'host', host_entry))
                     else:
                         # No back-reference — include only on first encounter, then warn.
@@ -3700,9 +3745,13 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                                         label = _apply_backref(label_tmpl, host_captures, host)
                                         entries.append(('cmd', f':resolv {host} {label}'))
                                     if effective_ssh_args is not None:
+                                        if no_alarm_host:
+                                            entries.append(('cmd', f':no-alarm {host}'))
                                         entries.append(('cmd', f':remote-ping {effective_ssh_args} {host}'))
                                     else:
                                         host_entry = label if (label_tmpl and _is_ip(host)) else host
+                                        if no_alarm_host:
+                                            entries.append(('cmd', f':no-alarm {host_entry}'))
                                         entries.append(('optional_host' if optional else 'host', host_entry))
 
     return entries
@@ -4067,7 +4116,7 @@ class _HostsParser:
                         w_parts = args.split(None, 1)
                         w_type = w_parts[0] if w_parts else ''
                         w_args = w_parts[1].strip() if len(w_parts) > 1 else ''
-                        if w_type not in ('remote-ping', 'prog-options'):
+                        if w_type not in ('remote-ping', 'prog-options', 'no-alarm'):
                             entries.append(('error',
                                 f':with: unknown block type {w_type!r}; '
                                 f'expected remote-ping or prog-options'))
@@ -4127,6 +4176,8 @@ class _HostsParser:
                 w_type, w_args = with_stack[-1]
                 if w_type == 'prog-options':
                     entries.append(('cmd', f':prog-options {w_args} {text}'))
+                elif w_type == 'no-alarm':
+                    entries.append(('cmd', f':no-alarm {text}'))
                 else:  # remote-ping
                     entries.extend(self._parse_host(text, comment, w_args))
             else:
@@ -4267,8 +4318,17 @@ class _HostsParser:
     def _parse_host(self, line, inline_comment, ssh_args):
         """Expand *line* as a host entry, returning a list of entry tuples."""
         entries = []
-        optional = line.startswith('?')
-        host_line = line[1:] if optional else line
+        # Leading markers, in any order: '?' skips the host when it has no
+        # ':resolv' mapping, '~' says a lost reply is expected here.
+        optional = False
+        no_alarm = False
+        host_line = line
+        while host_line[:1] in ('?', '~'):
+            if host_line[0] == '?':
+                optional = True
+            else:
+                no_alarm = True
+            host_line = host_line[1:]
         # Use _expand_host_with_captures so that back-references in the
         # inline ## comment (e.g. '10.0.0.{1..4} ## host$1') are resolved
         # to the value each brace group contributed for that row.
@@ -4282,7 +4342,14 @@ class _HostsParser:
                 entries.append(('warn', f'duplicate host ignored: {host}'))
                 continue
             self.seen_hosts.add(key)
+            # '~' reuses the ':no-alarm' rule store rather than adding an entry
+            # kind, so a marked host and a glob rule share one code path.  The
+            # rule has to name what the monitor will *be called*: with an
+            # inline label on an IP the host entry becomes that label, so a
+            # rule naming the IP would never match.
             if ssh_args is not None:
+                if no_alarm:
+                    entries.append(('cmd', f':no-alarm {host}'))
                 entries.append(('cmd', f':remote-ping {ssh_args} {host}'))
                 if inline_comment and _is_ip(host):
                     resolved = _apply_backref(inline_comment, captures, host)
@@ -4291,10 +4358,14 @@ class _HostsParser:
                 if inline_comment and _is_ip(host):
                     resolved = _apply_backref(inline_comment, captures, host)
                     entries.append(('cmd', f':resolv {host} {resolved}'))
+                    if no_alarm:
+                        entries.append(('cmd', f':no-alarm {resolved}'))
                     # Use the label as the host entry so dns_mode='off' shows
                     # the hostname (same behaviour as :resolv IP label + label).
                     entries.append(('optional_host' if optional else 'host', resolved))
                 else:
+                    if no_alarm:
+                        entries.append(('cmd', f':no-alarm {host}'))
                     entries.append(('optional_host' if optional else 'host', host))
         return entries
 
@@ -4697,6 +4768,10 @@ CMD_REGISTRY = [
             'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'zx'],
            '<action> [--if-hosts]', 'fold action (toggle, open, close, open-all, …)',
            flags=['--if-hosts']),
+    CmdDef(['no-alarm'],         '_cmd_no_alarm',   None,
+           '[--remove|--toggle] <host|glob>',
+           'a lost reply is expected on these hosts (grey o, no alarm)',
+           flags=['--remove', '--toggle']),
     CmdDef(['probe'],            '_cmd_probe',      None,
            '<name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N]',
            'declare how a probe value is displayed',
@@ -5326,6 +5401,7 @@ class Application:
             or (k == 'cmd' and rest and rest[0].startswith(':remote-ping ')))
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
+        self.no_alarm_patterns: list = []  # globs from ':no-alarm'
         self.probe_defs: dict = {}     # probe name → ProbeDef (':probe')
         self.probe_readers: list = []  # one ProbeReader per host, while running
         self.probe_source = None       # command run on each host (':probe-source')
@@ -5460,6 +5536,10 @@ class Application:
                 self.add_event("hosts", f"warning: {value}")
             elif kind == 'error':
                 self.add_event("hosts", f"expansion error: {value}")
+
+        # Applied after the loop as well as inside ':no-alarm': a rule may be
+        # written after the hosts it names, and a ':for' body emits both.
+        self._apply_no_alarm()
 
     @property
     def help_scroll(self):
@@ -5658,6 +5738,8 @@ class Application:
                     f.write(f":set multikey-timeout {self.multikey_timeout}\n")
                 if self.late_grace != 1.0:
                     f.write(f":set late-grace {self.late_grace:g}\n")
+                for pattern in self.no_alarm_patterns:
+                    f.write(f":no-alarm {pattern}\n")
                 if _ssh_connect_rate != _SSH_CONNECT_RATE_DEFAULT:
                     f.write(f":set ssh-connect-rate {_ssh_connect_rate:g}\n")
                 if _ssh_monitor_flags() != _SSH_MONITOR_OPTIONS_DEFAULT:
@@ -6096,7 +6178,9 @@ class Application:
                     if current_state is True:
                         monitor.up_since = now
                         display_name = monitor.get_display_name(dns_mode='off')
-                        self.add_event(display_name, "host starts up")
+                        self.add_event(display_name, "host starts up",
+                                       level=(LEVEL_INFO if monitor.no_alarm
+                                              else None))
                     elif current_state is False:
                         monitor.down_since = now
                         monitor._down_pending_ts = now
@@ -6110,7 +6194,9 @@ class Application:
                             downtime = now - monitor.down_since
                             monitor.down_since = None
                             msg = f"host recover. Down time: {self._format_downtime(downtime)}"
-                            self.add_event(display_name, msg)
+                            self.add_event(display_name, msg,
+                                           level=(LEVEL_INFO if monitor.no_alarm
+                                                  else None))
                         # If _down_pending_ts is set but down_since is None the host
                         # recovered before the threshold — silent flicker, no log entry.
                         monitor._down_pending_ts = None
@@ -6147,7 +6233,12 @@ class Application:
                             # Say why, when the child told us.  Without this the
                             # only way to learn the cause was strace.
                             msg += f"  ({reason})"
-                        self.add_event(display_name, msg)
+                        # Still logged for a ':no-alarm' host — it is true, and
+                        # the file stays greppable — but at 'info', so it does
+                        # not fill the visible log with expected silence.
+                        self.add_event(display_name, msg,
+                                       level=(LEVEL_INFO if monitor.no_alarm
+                                              else None))
 
                 # Remote-clock probe dispatch: when the Drift stat is shown,
                 # probe up hosts that still answer -T (or haven't been tried),
@@ -6787,6 +6878,8 @@ class Application:
         # Actions
         _b('A', ':autofold', desc='toggle autofold on/off')
         _b('X', ':clear --confirm', desc='clear event log')
+        _b('o', ':no-alarm --toggle', context=frozenset('h'),
+           desc='toggle "a lost reply is expected here" on the selected host')
         # 'c' connects straight away; 'C' hands you the same command on the
         # command line to edit first — a different user, an extra -o, a port
         # forward.  Not Ctrl-Shift-C: a terminal sends byte 3 for that just as
@@ -7623,16 +7716,25 @@ class Application:
         sync/end_time are forwarded to get_history_string for wall-clock alignment.
         """
         # Badge — list of (text, color_pair_id) so each segment is coloured individually.
-        # Color ids: 1=green (up), 2=red (down), 3=yellow (unknown), 6=cyan (paused), 0=default.
+        # Color ids: 1=green (up), 2=red (down), 3=yellow (unknown),
+        # 6=cyan (paused), -1=dim (expected down), 0=default.
         paused  = sum(1 for m in monitors if m.paused)
         active  = [m for m in monitors if not m.paused]
         up      = sum(1 for m in active if m.alive is True)
-        down    = sum(1 for m in active if m.alive is False)
+        # A ':no-alarm' host that is down is counted apart from the red '↓':
+        # a normally-off power switch would otherwise hold a section header red
+        # for good, which is the noise the marker exists to remove.
+        quiet   = sum(1 for m in active if m.alive is False and m.no_alarm)
+        down    = sum(1 for m in active
+                      if m.alive is False and not m.no_alarm)
         unknown = sum(1 for m in active if m.alive is None)
         has_error = any(m.error is not None for m in monitors)
         segs = []
         if up:      segs.append((f"{up}↑",    1))
         if down:    segs.append((f"{down}↓",  2))
+        # -1 = "dim", resolved by the caller: the gray pair only exists on a
+        # terminal with 9+ colours, so it cannot be named as a pair id here.
+        if quiet:   segs.append((f"{quiet}○", -1))
         if unknown: segs.append((f"{unknown}-", 3))
         if paused:  segs.append((f"{paused}⏸", 6))
         # Build interleaved list with '/' separators between segments
@@ -8161,7 +8263,7 @@ class Application:
         # Badge width: worst case is all monitors in one section → "N↑/N↓/N-"
         n = len(self.monitors)
         has_sections = any(isinstance(e, SectionLabel) for e in self.entries)
-        max_badge_w = len(f"{n}↑/{n}↓/{n}-") if has_sections else 0
+        max_badge_w = len(f"{n}↑/{n}↓/{n}○/{n}-") if has_sections else 0
         stat_field_w = max(6, max_badge_w)
         hist_col = stat_col + stat_field_w + 1  # history starts after stat field + 1 gap
 
@@ -8442,6 +8544,8 @@ class Application:
                             break
                         if pair_id == 0:
                             attr = row_attr
+                        elif pair_id < 0:
+                            attr = self.stale_attr | row_attr
                         else:
                             attr = curses.color_pair(pair_id) | row_attr
                             if has_error and pair_id in (2, 3):
@@ -8539,7 +8643,7 @@ class Application:
                     if not content:
                         # blank padding cell
                         stdscr.addstr(row, col, cell, row_attr)
-                    elif content[0] == '_':
+                    elif content[0] in '_o':
                         stdscr.addstr(row, col, cell,
                                       self.stale_attr | row_attr)
                     elif content[0] == 'X':
@@ -8576,10 +8680,12 @@ class Application:
                         stdscr.addstr(row, col, char, curses.color_pair(3) | row_attr)  # yellow
                     elif char == '>':
                         stdscr.addstr(row, col, char, curses.color_pair(5) | row_attr)  # magenta — >100 ms
-                    elif char == '_':
-                        # No ping process was running this second (starting,
-                        # connecting, or in backoff).  Dim: it is the absence of
-                        # a probe, not the result of one.
+                    elif char in '_o':
+                        # '_' no ping process was running this second (starting,
+                        # connecting, backoff); 'o' a miss that is expected on a
+                        # ':no-alarm' host.  Dim in both cases: the absence of a
+                        # result, not a result worth reacting to.  Not yellow —
+                        # that already means "answered, slowly" here.
                         stdscr.addstr(row, col, char, self.stale_attr | row_attr)
                     else:
                         stdscr.addstr(row, col, char, row_attr)  # blank padding
@@ -10040,6 +10146,7 @@ class Application:
                             m.resolved_hostname = hostname
                             m.resolv_static = True
                         self.monitors.append(m)
+                        self._apply_no_alarm()
                         self._add_entry(m)
                         if self._monitoring_started:
                             thread = threading.Thread(target=m.ping, daemon=True)
@@ -10400,6 +10507,101 @@ class Application:
         if self._monitoring_started:
             status = '--disable' if opts is None else f'opts={opts_str!r}'
             self.add_event("cmd", f"prog-options: '{prog}' '{pattern}' → {status}")
+
+    def _selected_monitor(self):
+        """Return the highlighted Monitor, or None when it is not one."""
+        if (self.highlighted_index is None
+                or not 0 <= self.highlighted_index < len(self.entries)):
+            return None
+        entry = self.entries[self.highlighted_index]
+        return entry if isinstance(entry, Monitor) else None
+
+    def _cmd_no_alarm(self, args=''):
+        """:no-alarm [--remove] <glob> — a lost reply is expected on these hosts.
+
+        For a device that is normally switched off, or one that drops ICMP: the
+        history shows a grey 'o' instead of a red 'X', the host is counted
+        separately in a section badge, and its up/down events drop to 'info'.
+
+        Presentation only.  'alive' stays factual, because it is read in some
+        two dozen places and feeds loss statistics, recovery detection and the
+        clock probe — a host that does not answer has not answered, whether or
+        not that is interesting.
+
+        Patterns are ``fnmatch`` globs matched against the display name and the
+        ':resolv' alias, as ':prog-options' patterns are.  With no argument,
+        lists the current rules.
+        """
+        if not args:
+            if not self.no_alarm_patterns:
+                self.add_event("config", "no-alarm: no patterns")
+            else:
+                self.add_event("config",
+                    "no-alarm: " + ' '.join(self.no_alarm_patterns))
+            return
+        rest = args.strip()
+        if rest in ('--toggle', '-t'):
+            monitor = self._selected_monitor()
+            if monitor is None:
+                self.add_event("cmd", "no-alarm: no host selected")
+                return
+            name, alias = self._prog_match_names(monitor)
+            # Persist the alias when there is one: it is the name shown, and it
+            # survives a DNS change or a renumbering that the address does not.
+            pattern = alias or name
+            if monitor.no_alarm:
+                # Drop every rule that matches this host, not just an exact
+                # pattern: toggling off must actually turn it off, even when the
+                # host was marked by a glob.
+                self.no_alarm_patterns = [
+                    pat for pat in self.no_alarm_patterns
+                    if not (fnmatch.fnmatch(name, pat)
+                            or (alias and fnmatch.fnmatch(alias, pat)))]
+                verb = 'cleared'
+            else:
+                self.no_alarm_patterns.append(pattern)
+                verb = 'set'
+            self._apply_no_alarm()
+            self.add_event("config", f"no-alarm: {verb} for {pattern}")
+            return
+        remove = False
+        for flag in ('--remove', '-r'):
+            if rest == flag or rest.startswith(flag + ' '):
+                remove = True
+                rest = rest[len(flag):].strip()
+                break
+        if not rest:
+            self.add_event("cmd", "no-alarm: missing host or glob")
+            return
+        changed = []
+        for pattern in rest.split():
+            if remove:
+                if pattern in self.no_alarm_patterns:
+                    self.no_alarm_patterns.remove(pattern)
+                    changed.append(pattern)
+                elif self._monitoring_started:
+                    self.add_event("cmd", f"no-alarm: no rule {pattern!r}")
+            elif pattern not in self.no_alarm_patterns:
+                self.no_alarm_patterns.append(pattern)
+                changed.append(pattern)
+        self._apply_no_alarm()
+        if self._monitoring_started and changed:
+            verb = 'removed' if remove else 'set'
+            self.add_event("config", f"no-alarm: {verb} {' '.join(changed)}")
+
+    def _apply_no_alarm(self):
+        """Recompute every monitor's no_alarm flag from the current patterns.
+
+        Cached on the monitor rather than matched while drawing: the history
+        strip is redrawn every frame for every host, and an fnmatch per cell
+        would be paid forever for a rule set that changes almost never.
+        """
+        for monitor in self.monitors:
+            name, alias = self._prog_match_names(monitor)
+            monitor.no_alarm = any(
+                fnmatch.fnmatch(name, pattern)
+                or (alias and fnmatch.fnmatch(alias, pattern))
+                for pattern in self.no_alarm_patterns)
 
     def _cmd_probe_source(self, args=''):
         """:probe-source --cmd '<command>' [--interval <seconds>]
@@ -11484,6 +11686,13 @@ class Application:
                         "remote-ping: usage: :remote-ping [ssh-opts] <relay> <target>")
                 else:
                     ping_host_pattern = tokens[-1]
+                    # '~' marks the target as expected-to-be-silent, as it does
+                    # on a host line.  Handled here too, or ':remote-ping relay
+                    # ~host' would quietly create a host literally named '~host'
+                    # that could never resolve.
+                    no_alarm_target = ping_host_pattern.startswith('~')
+                    if no_alarm_target:
+                        ping_host_pattern = ping_host_pattern[1:]
                     ssh_args = tokens[:-1]
                     ssh_dest = ssh_args[-1]
 
@@ -11584,8 +11793,13 @@ class Application:
                                                      ping_host_label=ping_host,
                                                      original_ssh_args=original_ssh_args,
                                                      hosts_map=self.hosts_map)
+                            if no_alarm_target:
+                                pattern = actual_ping_host
+                                if pattern not in self.no_alarm_patterns:
+                                    self.no_alarm_patterns.append(pattern)
                             self.monitors.append(monitor)
                             self._add_entry(monitor)
+                            self._apply_no_alarm()
                             if self._monitoring_started:
                                 thread = threading.Thread(
                                     target=monitor.ping, daemon=True

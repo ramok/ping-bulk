@@ -10,6 +10,28 @@
 # Run directly:  chmod +x network.hosts && ./network.hosts
 # Or:            ping-bulk -f network.hosts
 
+# -- Hosts where silence is expected --------------------------------------
+# Some hosts are not supposed to answer: a device that is normally switched
+# off, or one that drops ICMP.  A red 'X' every second and a permanently red
+# section header is noise rather than information, so those hosts can be
+# marked.  They then draw a grey 'o' instead of a red 'X', are counted apart
+# in the section badge (8^/1v/1o), and log their up/down at info level.
+#
+# Three ways to mark, all equivalent:
+#   :no-alarm *-power-switch     glob, matched on the shown name or the address
+#   ~10.0.3.99                   a leading '~' on a host line
+#   :with no-alarm               block form, one glob per line
+#       *-cam*
+#   :end
+#
+# '~' combines with '?' in either order ('~?host', '?~host') and works inside
+# a :for body and a :with remote-ping block.
+#
+# Interactively: [o] toggles the mark on the selected host, and :save-config
+# stores it.  This is presentation only -- the host is still down, and loss
+# statistics still count the misses.
+:no-alarm *-power-switch
+
 # -- Custom probes ---------------------------------------------------------
 # Read arbitrary per-host values -- temperature, fan speed, disk use -- over a
 # single SSH connection per host that is held open, so the interval costs

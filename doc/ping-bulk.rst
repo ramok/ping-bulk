@@ -752,6 +752,41 @@ Key bindings
     blocklist as ``:remote-ping`` applies, since an option here reaches every
     monitoring connection.
 
+``:no-alarm [--remove|--toggle] <host|glob>``
+    Mark hosts where a lost reply is **expected** rather than a fault: a
+    device that is normally switched off, or one that drops ICMP.  A red
+    ``X`` every second and a permanently red section header is noise, not
+    information.
+
+    A marked host draws a dim ``o`` in the history strip instead of a red
+    ``X``, is counted apart in a section badge (``8↑/1↓/1○``), and logs its
+    up and down events at ``info`` rather than the default level — still
+    recorded, so the log file stays greppable, but no longer filling the
+    visible log with expected silence.
+
+    Not yellow, and not only a colour: yellow already means *answered,
+    slowly* in that strip (``x`` for a late reply, ``5``-``9`` for 50-90 ms),
+    and a colour-only difference is lost in a screenshot, in a log, and to
+    anyone colourblind.
+
+    Patterns are ``fnmatch`` globs matched against the displayed name and the
+    ``:resolv`` alias, as ``:prog-options`` patterns are.  Three equivalent
+    ways to mark, all usable in a hosts file::
+
+        :no-alarm *-power-switch      # a glob
+        ~10.0.3.99                    # a leading '~' on a host line
+        :with no-alarm                # block form
+            *-cam*
+        :end
+
+    ``~`` combines with the optional marker ``?`` in either order, and works
+    inside a ``:for`` body and a ``:with remote-ping`` block.  With no
+    argument, lists the active rules; ``--remove`` drops one.
+
+    This is **presentation only**.  The host is still down: ``alive`` stays
+    factual, loss statistics still count the misses, and a process error
+    still shows ``?``.  What changes is how loudly it is reported.
+
 ``:set ssh-connect-rate <n>``
     SSH connection attempts per second, per endpoint.  Default: ``5``.
     ``0`` removes the limit.
