@@ -3167,7 +3167,13 @@ class SshPingMonitor(SubprocessMonitor):
         self._ssh_args = ssh_args      # e.g. ['-J', '10.0.0.1', 'user@remote'] (resolved)
         self._original_ssh_args = original_ssh_args or ssh_args.copy()  # original args before :resolv
         self._ping_host = ping_host    # host that the remote ping targets
-        self._hosts_map = hosts_map or {}  # reference to Application.hosts_map
+        # 'is not None', not 'or': an empty dict is falsy, so 'hosts_map or {}'
+        # silently replaced a shared-but-still-empty map with a private one.
+        # The first relayed host in a file is built before any ':resolv' has
+        # run, so that host never saw the mappings that arrived later — its
+        # display name stayed an IP, and a glob rule matched on the alias
+        # (':prog-options' and the like) could never match it.
+        self._hosts_map = hosts_map if hosts_map is not None else {}
         # Pre-populate resolved_ip when ping_host is already an IP address.
         # This covers the :resolv case where actual_ping_host is already an IP
         # so dns_mode='ip' works immediately without an extra resolution thread.
