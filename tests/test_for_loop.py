@@ -966,3 +966,57 @@ class TestForRemotePingLabel:
         assert all('##' not in c for c in rp_cmds), (
             f"'##' leaked into :remote-ping commands: {rp_cmds!r}"
         )
+
+
+class TestInlineIfSuppressesTheNoBackrefWarning:
+    """A fixed host under ':if COND -> host' is deliberate, not a mistake.
+
+    The warning exists to catch a host written in a loop body that was meant to
+    vary.  An inline ':if' has already scoped the line to some iterations, so
+    adding it once is the intent — and the inline body is re-inserted into the
+    loop body and parsed as an ordinary line, which is what lost that context.
+    """
+
+    def _warnings(self, pb, src):
+        return [e[1] for e in pb._HostsParser().parse(src) if e[0] == 'warn']
+
+    def test_guarded_fixed_host_does_not_warn(self, pb):
+        assert self._warnings(pb,
+            ':for i in hub-{1..3}\n'
+            '    :if $i in 1 -> 10.0.0.9\n'
+            ':end\n') == []
+
+    def test_the_host_is_still_added(self, pb):
+        entries = pb._HostsParser().parse(
+            ':for i in hub-{1..3}\n'
+            '    :if $i in 1 -> 10.0.0.9\n'
+            ':end\n')
+        assert ('host', '10.0.0.9') in entries
+
+    def test_added_only_once(self, pb):
+        entries = pb._HostsParser().parse(
+            ':for i in hub-{1..3}\n'
+            '    :if $i in 1,2 -> 10.0.0.9\n'
+            ':end\n')
+        assert [e for e in entries if e == ('host', '10.0.0.9')] == \
+            [('host', '10.0.0.9')]
+
+    def test_an_unguarded_fixed_host_still_warns(self, pb):
+        """The warning's real purpose is untouched."""
+        warns = self._warnings(pb,
+            ':for i in hub-{1..3}\n    10.0.0.1\n:end\n')
+        assert any('no back-reference' in w for w in warns), warns
+
+    def test_a_guarded_host_with_a_label_does_not_warn(self, pb):
+        assert self._warnings(pb,
+            ':for i in hub-{1..3}\n'
+            '    :if $i in 1 -> 10.0.0.9 ## nray-master\n'
+            ':end\n') == []
+
+    def test_a_guarded_relayed_host_does_not_warn(self, pb):
+        assert self._warnings(pb,
+            ':with remote-ping relay\n'
+            ':for i in hub-{1..3}\n'
+            '    :if $i in 1 -> 10.0.0.9 ## nray-master\n'
+            ':end\n'
+            ':end\n') == []

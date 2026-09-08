@@ -3440,6 +3440,11 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
 
     # Track no-backref body lines already emitted (add-once logic).
     no_backref_emitted = set()
+    # Bodies pulled in by an inline ':if COND -> BODY'.  The body is re-inserted
+    # into the loop body and then parsed as an ordinary line, which loses the
+    # fact that it was conditional — and a fixed host under such a guard is
+    # deliberate, not the mistake the "no back-reference" warning looks for.
+    inline_if_bodies = set()
 
     for iteration_idx, (full_str, captures) in enumerate(rows):
         if var_names is not None:
@@ -3524,6 +3529,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                         elif not currently_skipping:
                             if _evaluate_if_condition_logged(cond_str, entries):
                                 body_list.insert(bj, body_str)
+                                inline_if_bodies.add(body_str)
                         # No if_stack/block_open_stack push — no :end to match.
                     else:
                         condition = _apply_backref(condition_tmpl, captures, full_str)
@@ -3723,11 +3729,15 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                                         entries.append(('cmd', f':no-alarm {host_entry}'))
                                     entries.append(('optional_host' if optional else 'host', host_entry))
                     else:
-                        # No back-reference — include only on first encounter, then warn.
+                        # No back-reference — include only on first encounter,
+                        # and warn unless an inline ':if' already scoped it to
+                        # one iteration, where adding it once is the intent.
                         if host_line not in no_backref_emitted:
                             no_backref_emitted.add(host_line)
-                            entries.append(('warn',
-                                f"host {host_line!r} inside :for loop has no back-reference; added once"))
+                            if line not in inline_if_bodies:
+                                entries.append(('warn',
+                                    f"host {host_line!r} inside :for loop has "
+                                    f"no back-reference; added once"))
                             try:
                                 expanded_pairs = _expand_host_with_captures(host_line)
                             except ValueError as e:
