@@ -163,6 +163,54 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
 - `_proc`: Subprocess handle (if applicable).
 - `resolv_static`: Flag for static DNS mappings.
 
+## 9a. SSH connection behaviour (no staggering — read before "fixing" it)
+
+`start_monitoring()` starts every monitor thread in a tight loop, and each
+`SshPingMonitor.ping()` calls `Popen` immediately. **There is no stagger, no
+ramp and no connection pooling.** Measured: 20 relayed hosts opened 20 `ssh`
+processes within 10 ms.
+
+That matters because many hosts commonly sit behind one relay
+(`:with remote-ping <relay>` over a whole section), and two server-side limits
+bite from opposite directions:
+
+| Limit         | Default     | Bites when                                                                |
+| ------------- | ----------- | ------------------------------------------------------------------------- |
+| `MaxStartups` | `10:30:100` | many *connections* authenticate at once — random early drop from the 10th |
+| `MaxSessions` | `10`        | many *sessions* share one multiplexed connection — the 11th is refused    |
+
+So neither extreme works for a relay with, say, 54 hosts behind it: 54
+independent connections trip `MaxStartups`, and one multiplexed master trips
+`MaxSessions`. **Do not "fix" the burst by turning on `ControlMaster` alone** —
+that converts a retry storm which recovers into hosts that are never monitored
+at all.
+
+It is not hypothetical. A real 54-host log showed 10-20 occurrences of
+`kex_exchange_identification: read: Connection reset by peer` per affected
+session, all within 0-1 s of startup — the client-side signature of a
+pre-auth drop. It looks like it works because the existing exponential
+backoff in `SubprocessMonitor.ping()` retries and succeeds once the herd
+clears; the cost is that those hosts come up seconds late. Since the sync-mode
+`_` marker landed, that delay is visible on screen instead of showing as a
+merely shorter bar.
+
+Three ways out, none implemented:
+
+1. **Stagger the spawns** (e.g. a few per second). `MaxStartups` counts only
+   *unauthenticated* connections and key auth clears in well under a second,
+   so a modest ramp keeps the count under 10. Cheapest, no shared failure
+   domain, needs nothing from the relay. Preferred.
+2. **Raise `MaxSessions` on the relay** and multiplex. Cheapest at runtime —
+   one TCP, one auth — but makes ping-bulk depend on server config, and an
+   unconfigured relay silently loses hosts past the tenth.
+3. **A pool of masters**, `ceil(hosts / MaxSessions)` of them. Works against a
+   stock `sshd` but the pool size depends on a server value the client cannot
+   discover.
+
+`:set ssh-options` (default includes `-o ControlMaster=no`) makes the current
+behaviour deterministic — every monitoring connection is independent — rather
+than depending on whether the user's `ssh_config` says `ControlMaster auto`.
+
 ## 10. Key Binding System
 
 All interactive key bindings go through a single unified system. Do **not** add new hardcoded key checks in the main loop.
@@ -170,11 +218,11 @@ All interactive key bindings go through a single unified system. Do **not** add 
 ### Modes
 There are four UI modes that determine which binding table is active:
 
-| Mode | Active when |
-|------|-------------|
-| `normal` | Default — no overlay open |
-| `help` | `?` help overlay is visible |
-| `details` | Host details overlay is visible |
+| Mode      | Active when                      |
+| --------- | -------------------------------- |
+| `normal`  | Default — no overlay open        |
+| `help`    | `?` help overlay is visible      |
+| `details` | Host details overlay is visible  |
 | `command` | `:` command-line input is active |
 
 The active mode is tracked in `self._current_mode`.
@@ -217,13 +265,13 @@ Users write `:bind-key` directives:
   does nothing rather than firing its normal-mode binding.
 
 ### Built-in overlay commands
-| Command | Effect |
-|---------|--------|
-| `:close` | Close the currently active overlay (uses `_current_mode` to decide which) |
-| `:scroll-overlay up` | Scroll overlay content up one line |
-| `:scroll-overlay down` | Scroll overlay content down one line |
-| `:scroll-overlay page` | Scroll overlay content down one page |
-| `:scroll-overlay page-` | Scroll overlay content up one page |
+| Command                 | Effect                                                                    |
+| ----------------------- | ------------------------------------------------------------------------- |
+| `:close`                | Close the currently active overlay (uses `_current_mode` to decide which) |
+| `:scroll-overlay up`    | Scroll overlay content up one line                                        |
+| `:scroll-overlay down`  | Scroll overlay content down one line                                      |
+| `:scroll-overlay page`  | Scroll overlay content down one page                                      |
+| `:scroll-overlay page-` | Scroll overlay content up one page                                        |
 
 ---
 
@@ -285,12 +333,12 @@ The class delegates `__str__`, `__contains__`, `lower()`, `startswith()`, `__eq_
 `draw_events` filters `self.events` at display time: `[e for e in self.events if e.level <= self.loglevel]`.  Changing `loglevel` instantly reveals/hides buffered history without re-ingesting.
 
 ### Coloring (`_event_color_attr`)
-| Condition | Curses attribute |
-|-----------|-----------------|
-| level == DEBUG or category == 'bind-key' | `A_DIM` |
-| message starts with `warning:` or category in `('warn','hosts')` | yellow (pair 3) |
-| message starts with `error:` or category == `'save'` | red (pair 2) |
-| everything else | 0 (default) |
+| Condition                                                        | Curses attribute |
+| ---------------------------------------------------------------- | ---------------- |
+| level == DEBUG or category == 'bind-key'                         | `A_DIM`          |
+| message starts with `warning:` or category in `('warn','hosts')` | yellow (pair 3)  |
+| message starts with `error:` or category == `'save'`             | red (pair 2)     |
+| everything else                                                  | 0 (default)      |
 
 ### CLI flags
 - `--log-level quiet|normal|info|debug` — explicit startup level

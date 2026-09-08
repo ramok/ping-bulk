@@ -682,6 +682,46 @@ Key bindings
 
     See ``doc/custom-probes.md`` for the design and the alternatives weighed.
 
+``:set ssh-options <flags> | default | none``
+    SSH options for the connections **ping-bulk makes itself** — running
+    ``ping`` on a relay, reading a ``:probe``, taking a clock reading.
+    Sessions opened by ``c``, ``C`` or ``:mux ssh`` are deliberately not
+    affected: those are interactive, where X11 or agent forwarding may be
+    exactly what is wanted.  Use ``:prog-options ssh`` for those.
+
+    The default answers three things a monitoring connection never needs,
+    each of which a ``Host *`` block in ``~/.ssh/config`` commonly turns on::
+
+        -o ForwardX11=no -o ForwardX11Trusted=no
+        -o ClearAllForwardings=yes
+        -o ControlMaster=no
+
+    ``ForwardX11`` makes every connection ask the relay for an X11 channel;
+    a relay without ``xauth`` refuses and logs *X11 forwarding request
+    failed on channel 0* once per host.  ``ClearAllForwardings`` stops a
+    ``LocalForward`` meant for an interactive session from being set up once
+    per monitored host, where the first to bind holds the port.
+
+    ``ControlMaster`` is the subtle one.  With ``ControlMaster auto`` and a
+    shared ``ControlPath``, every monitor behind the same relay races to
+    become the master; the losers log *ControlSocket … already exists,
+    disabling multiplexing* and open their own connection anyway, so whether
+    a given host is multiplexed depends on a startup race.  ``no`` makes it
+    deterministic.  Multiplexing them onto one master is **not** simply
+    better: ``sshd``'s ``MaxSessions`` defaults to **10**, so behind a relay
+    carrying more than ten monitored hosts the eleventh onwards would be
+    refused outright.
+
+    ``ForwardAgent`` is deliberately absent from the default — it is how the
+    next hop authenticates in a multi-jump chain, so it stays under the
+    control of ``~/.ssh/config``.
+
+    A change applies to connections started from then on; those already
+    running keep the options they were started with until they reconnect.
+    Saved by ``:save-config`` when not the default.  In kiosk mode the same
+    blocklist as ``:remote-ping`` applies, since an option here reaches every
+    monitoring connection.
+
 ``:set late-grace <seconds>``
     How long a probe reported unanswered by ``ping -O`` may still be
     answered before it counts as lost.  Default: ``1``.

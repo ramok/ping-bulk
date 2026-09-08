@@ -337,6 +337,10 @@ SET_PARAMS = [
              ['5', '15', '30', '60', '120'],
              'seconds to wait before auto-folding a recovered section (default 30)',
              getter=lambda app: str(int(app.autofold_delay))),
+    SetParam('ssh-options', '_cmd_ssh_options', '<flags>|default|none',
+             "SSH options for ping-bulk's own monitoring connections "
+             "('default' restores, 'none' clears)",
+             getter=lambda app: ' '.join(_ssh_monitor_flags()) or 'none'),
     SetParam('late-grace', '_cmd_late_grace',
              ['0', '0.5', '1', '2', '5'],
              "grace after ping's '-O' line before a probe counts as lost (default 1)",
@@ -806,6 +810,11 @@ def _build_set_param_help_lines():
     for p in SET_PARAMS:
         if p.values == '_complete_stats_arg':
             choices = [m.lower() for m in STATS_MODES]
+        elif isinstance(p.values, str):
+            # A free-form parameter names its own placeholder; joining a string
+            # on '|' spelled it out one character at a time.
+            result.append(f'  :set {p.name} \\[{p.values}]')
+            continue
         elif callable(p.values):
             choices = p.values()
         else:
@@ -2789,8 +2798,9 @@ class ProbeReader(_PipeReaderLoop):
         # ~/.ssh/config and the user's keys, which is exactly what kiosk keeps
         # out of reach.
         flags = _kiosk_ssh_flags() if self.kiosk_mode else []
-        return (['ssh', '-o', 'BatchMode=yes'] + flags + self._jump_args()
-                + self._ssh_args + [self._ssh_target(), remote])
+        return (['ssh', '-o', 'BatchMode=yes'] + _ssh_monitor_flags() + flags
+                + self._jump_args() + self._ssh_args
+                + [self._ssh_target(), remote])
 
     def _ssh_target(self):
         """Where to log in: the host itself, or its relay's target."""
@@ -3301,10 +3311,8 @@ class SshPingMonitor(SubprocessMonitor):
 
     def _build_ping_cmd(self):
         """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
-        #return ['ssh', '-o', 'ControlMaster=no', '-o', 'BatchMode=yes'] + self._ssh_args + [
-        return ['ssh', '-o', 'BatchMode=yes'] + self._ssh_args + [
-            'ping', '-O', '-D', self._ping_host
-        ]
+        return (['ssh', '-o', 'BatchMode=yes'] + _ssh_monitor_flags() + self._ssh_args
+                + ['ping', '-O', '-D', self._ping_host])
 
     @staticmethod
     def _is_fatal_error(stderr_text):
@@ -4976,6 +4984,45 @@ def _resolve_mux_backend(preference: str = None) -> 'TerminalBackend | None':
     return None
 
 
+# Options applied to ping-bulk's *own* SSH connections — the ones that run
+# ping, read a probe, or take a clock reading.  Interactive sessions opened by
+# 'c' / 'C' / ':mux ssh' are untouched and keep the user's ssh_config, since an
+# X11 channel or a forwarded agent may be exactly what is wanted there.
+#
+# The defaults answer three things a monitoring connection never needs, all of
+# which a 'Host *' block commonly turns on:
+#   ForwardX11/Trusted  ping has no display; a relay without xauth refuses the
+#                       channel and logs "X11 forwarding request failed"
+#   ClearAllForwardings a LocalForward meant for an interactive session would
+#                       otherwise be set up once per monitored host, and the
+#                       first to bind holds the port
+#   ControlMaster       many monitors behind one relay share one ControlPath and
+#                       race to become master; the losers log "ControlSocket
+#                       ... already exists, disabling multiplexing".  'no' makes
+#                       that deterministic.  Multiplexing them onto one master
+#                       is *not* simply better: sshd's MaxSessions defaults to
+#                       10, so hosts past the tenth would be refused outright.
+#
+# ForwardAgent is deliberately absent: it is how the next hop authenticates in
+# a multi-jump chain, so it stays under the user's control.
+_SSH_MONITOR_OPTIONS_DEFAULT = [
+    '-o', 'ForwardX11=no',
+    '-o', 'ForwardX11Trusted=no',
+    '-o', 'ClearAllForwardings=yes',
+    '-o', 'ControlMaster=no',
+]
+
+# Live value, replaced by ':set ssh-options'.  Module-level because the three
+# command builders that need it are spread across a Monitor method, a
+# ProbeReader method and an Application method, none of which share an object.
+_ssh_monitor_options = list(_SSH_MONITOR_OPTIONS_DEFAULT)
+
+
+def _ssh_monitor_flags() -> list:
+    """Return the SSH options for ping-bulk's own monitoring connections."""
+    return list(_ssh_monitor_options)
+
+
 def _kiosk_ssh_flags() -> list:
     """Return SSH flags that isolate kiosk sessions from the user's home directory.
 
@@ -5429,6 +5476,12 @@ class Application:
                     f.write(f":set multikey-timeout {self.multikey_timeout}\n")
                 if self.late_grace != 1.0:
                     f.write(f":set late-grace {self.late_grace:g}\n")
+                if _ssh_monitor_flags() != _SSH_MONITOR_OPTIONS_DEFAULT:
+                    # shlex.join, not quote(join): quoting the whole string
+                    # makes it one argv element when read back, which ssh
+                    # rejects.  join quotes only the tokens that need it.
+                    opts = shlex.join(_ssh_monitor_flags())
+                    f.write(f":set ssh-options {opts if opts else 'none'}\n")
                 # Per-program option rules
                 for prog, rules in self.prog_options.items():
                     for pattern, opts in rules:
@@ -5738,7 +5791,8 @@ class Application:
         """
         ping_args = ['ping', '-n', '-c', '1', '-W', '2', '-T', 'tsandaddr', ip]
         if isinstance(monitor, SshPingMonitor):
-            return ['ssh', '-o', 'BatchMode=yes'] + monitor._ssh_args + ping_args
+            return (['ssh', '-o', 'BatchMode=yes'] + _ssh_monitor_flags()
+                    + monitor._ssh_args + ping_args)
         return ping_args
 
     def _clock_probe_once(self, monitor):
@@ -11062,6 +11116,47 @@ class Application:
             return
         state = 'on' if self.autofold else 'off'
         self.add_event("autofold", f"autofold {state}")
+
+    def _cmd_ssh_options(self, args=''):
+        """:set ssh-options <flags> | default | none
+
+        Applies to the SSH connections ping-bulk makes itself — running ping,
+        reading a probe, taking a clock reading.  Sessions opened by 'c', 'C'
+        or ':mux ssh' are deliberately not affected: those are interactive, and
+        X11 or agent forwarding may be exactly what is wanted.  Use
+        ':prog-options ssh' for those.
+        """
+        global _ssh_monitor_options
+        if not args:
+            current = ' '.join(_ssh_monitor_flags()) or 'none'
+            self.add_event("config", f"ssh-options: {current}")
+            return
+        arg = args.strip()
+        if arg == 'default':
+            _ssh_monitor_options = list(_SSH_MONITOR_OPTIONS_DEFAULT)
+        elif arg in ('none', 'off', ','):
+            _ssh_monitor_options = []
+        else:
+            try:
+                flags = shlex.split(arg)
+            except ValueError as e:
+                self.add_event("cmd", f"ssh-options: {e}")
+                return
+            if self.kiosk_mode:
+                # Same blocklist as ':remote-ping': an option here reaches every
+                # monitoring connection, so ProxyCommand and friends would be a
+                # shell escape by another route.
+                err = _kiosk_validate_ssh_args(flags)
+                if err:
+                    self.add_event("cmd", f"ssh-options: {err}")
+                    return
+            _ssh_monitor_options = flags
+        if self._monitoring_started:
+            # Read when a child is spawned, so existing connections keep the
+            # options they started with until they next reconnect.
+            self.add_event("config",
+                f"ssh-options: {' '.join(_ssh_monitor_flags()) or 'none'} "
+                f"(applies to connections started from now on)")
 
     def _cmd_late_grace(self, args=''):
         """Set how long an unanswered probe waits before counting as lost."""

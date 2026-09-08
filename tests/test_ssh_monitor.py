@@ -176,16 +176,20 @@ class TestSshPingMonitorResolveDns:
 
 class TestSshPingMonitorBuildPingCmd:
     def test_basic_cmd(self, pb):
+        """The monitoring options sit between BatchMode and the user's args."""
         m = pb.SshPingMonitor(['user@remote'], 'target.host')
         cmd = m._build_ping_cmd()
-        assert cmd == ['ssh', '-o', 'BatchMode=yes', 'user@remote',
-                       'ping', '-O', '-D', 'target.host']
+        assert cmd == (['ssh', '-o', 'BatchMode=yes']
+                       + pb._ssh_monitor_flags()
+                       + ['user@remote', 'ping', '-O', '-D', 'target.host'])
 
     def test_jump_host_cmd(self, pb):
         m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], 'target.host')
         cmd = m._build_ping_cmd()
-        assert cmd == ['ssh', '-o', 'BatchMode=yes', '-J', 'bastion', 'user@remote',
-                       'ping', '-O', '-D', 'target.host']
+        assert cmd == (['ssh', '-o', 'BatchMode=yes']
+                       + pb._ssh_monitor_flags()
+                       + ['-J', 'bastion', 'user@remote',
+                          'ping', '-O', '-D', 'target.host'])
 
     def test_batchmode_flag_present(self, pb):
         m = pb.SshPingMonitor(['user@remote'], 'target.host')
