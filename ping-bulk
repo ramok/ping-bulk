@@ -748,7 +748,8 @@ _HELP_HOTKEYS = [
     "  [l]                   (:layout --toggle log)             full-screen event log, press again to go back",
     "  [Ctrl+L]              (:layout)                          cycle layout: all / ping only / log only",
     "  [W]                   (:save)                            write event log to a file",
-    "  [C]                   (:clear)                           clear event log",
+    "  [X]                   (:clear)                           clear event log",
+    "  [C]                   (:mux ssh %r ...)                  edit an SSH command before running it",
     "  [Esc]                 (:select none)                     clear host selection + return to live history",
     "  [?]                   (:help bindings)                   show key bindings (help overlay)",
     "  [←]/[→]               (:scroll ping-history half/half-)  scroll history ← older / → live",
@@ -6458,7 +6459,8 @@ class Application:
 
     def _register_default_bindings(self):
         """Populate the key trie with default (hardcoded) bindings."""
-        def _b(notation, *commands, context=None, hint='', desc='', if_cmd=None):
+        def _b(notation, *commands, context=None, hint='', desc='',
+               if_cmd=None, edit=False):
             # if_cmd mirrors ':bind-key --if-cmd': register only when the
             # program is on PATH, so a default may reference an optional tool
             # without the tool becoming a special case in the code.
@@ -6466,8 +6468,8 @@ class Application:
                 return
             keys = _parse_key_notation(notation)
             self._key_trie.insert(keys, _Binding(
-                list(commands), key_notation=notation, origin='default',
-                context=context, hint=hint, desc=desc))
+                list(commands), edit_mode=edit, key_notation=notation,
+                origin='default', context=context, hint=hint, desc=desc))
 
         # Quit
         _b('q', ':quit', hint='[q]uit', desc='quit')
@@ -6484,7 +6486,17 @@ class Application:
         _b('p', ':pause-selected', desc='pause/resume selected host')
         # Actions
         _b('A', ':autofold', desc='toggle autofold on/off')
-        _b('C', ':clear --confirm', desc='clear event log')
+        _b('X', ':clear --confirm', desc='clear event log')
+        # 'c' connects straight away; 'C' hands you the same command on the
+        # command line to edit first — a different user, an extra -o, a port
+        # forward.  Not Ctrl-Shift-C: a terminal sends byte 3 for that just as
+        # it does for Ctrl-C, so the two cannot be told apart, and it is the
+        # emulator's own copy shortcut.
+        _b('C', ':mux ssh -J %{j?%{j:,},}%d %r', edit=True,
+           context=frozenset('d'),
+           desc='edit an SSH command for the selected host before running it')
+        _b('C', ':mux ssh %r', edit=True,
+           desc='edit an SSH command for the selected host before running it')
         _b('W', ':save', desc='write event log to a file')
         _b('l', ':layout --toggle log', desc='full-screen event log, and back')
         _b('<C-l>', ':layout', desc='cycle layout: all / ping only / log only')
@@ -6641,7 +6653,20 @@ class Application:
             return
 
         if binding.edit_mode:
-            cmd_text = ' \\; '.join(commands)
+            # Pre-fill with what the command would actually run, so an
+            # edit-mode binding and its exec counterpart agree: :prog-options
+            # are injected by :mux at execution time, and text that is only
+            # pre-filled would otherwise arrive without them.
+            entry = (self.entries[self.highlighted_index]
+                     if self.highlighted_index is not None
+                     and 0 <= self.highlighted_index < len(self.entries)
+                     else None)
+            cmd_text = self._preview_commands(
+                commands, used_vars, entry, sep=' \\; ', keep_launcher=True)
+            if cmd_text is None:
+                self.add_event("bind-key",
+                               "disabled for this host by :prog-options")
+                return
             if cmd_text.startswith(':'):
                 cmd_text = cmd_text[1:]
             self.cmd = {
@@ -8559,6 +8584,19 @@ class Application:
                                                           used=used)
         if warning:
             return None
+        return self._preview_commands(commands, used, monitor)
+
+    def _preview_commands(self, commands, used, entry, sep=' ; ',
+                          keep_launcher=False):
+        """Render already-expanded commands as what they would actually run.
+
+        Applies the :prog-options injection and relay wrapping that :mux does at
+        execution time, so a preview — or an edit-mode pre-fill — shows the same
+        command the key would run.  Returns None when :prog-options disables it.
+
+        *keep_launcher* keeps the ':mux' word, for text that has to be runnable
+        as typed; the 'Connect:' line drops it and shows the command alone.
+        """
         previews = []
         relay = self._relay_prefix_for(used)
         for cmd in commands:
@@ -8573,11 +8611,13 @@ class Application:
             tokens = parts[1].split() if len(parts) > 1 else []
             while tokens and tokens[0].startswith('-'):
                 tokens.pop(0)              # split-direction and --no-focus flags
-            tokens, _refusal = self._apply_prog_options(tokens, monitor, relay)
+            tokens, _refusal = self._apply_prog_options(tokens, entry, relay)
             if tokens is None:
                 return None                # :prog-options disables it
-            previews.append(shlex.join(tokens))
-        return ' ; '.join(previews) if previews else None
+            rendered = shlex.join(tokens)
+            previews.append(f"{parts[0]} {rendered}" if keep_launcher
+                            else rendered)
+        return sep.join(previews) if previews else None
 
     def _probe_def_for_label(self, label):
         """Return the ProbeDef whose column label is *label*, or None."""

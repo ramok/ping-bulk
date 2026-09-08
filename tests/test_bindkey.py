@@ -1861,3 +1861,97 @@ class TestConnectPreview:
         app._last_cmd_name = None
         m = self._select(app, pb.PingMonitor('10.0.0.1'))
         assert app._connect_preview(m) is None
+
+
+# ===========================================================================
+# TestEditModeConnect — 'C' hands you the command instead of running it
+# ===========================================================================
+
+class TestEditModeConnect:
+    """'c' connects; 'C' pre-fills the same command for editing.
+
+    Not Ctrl-Shift-C: a terminal sends byte 3 for that exactly as it does for
+    Ctrl-C, so the two cannot be distinguished, and it is the emulator's own
+    copy shortcut.  'X' took over clearing the event log.
+    """
+
+    def _select(self, app, monitor):
+        app.entries.append(monitor)
+        app.highlighted_index = len(app.entries) - 1
+        return monitor
+
+    def _press(self, app, pb, key):
+        app.cmd = None
+        binding, _ = app._key_trie.resolve(
+            pb._parse_key_notation(key), set(app._binding_context().keys()))
+        assert binding is not None, f'{key} is unbound'
+        app._execute_binding(binding)
+        return ''.join(app.cmd['chars']) if app.cmd else None
+
+    def test_c_upper_prefills_and_does_not_run(self, app, pb):
+        self._select(app, pb.PingMonitor('10.0.0.1'))
+        backend = MagicMock()
+        backend.is_inside.return_value = True
+        backend.available.return_value = True
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': backend}):
+            text = self._press(app, pb, 'C')
+        assert text == 'mux ssh 10.0.0.1'
+        backend.split.assert_not_called()
+
+    def test_cursor_sits_at_the_end_for_editing(self, app, pb):
+        self._select(app, pb.PingMonitor('10.0.0.1'))
+        self._press(app, pb, 'C')
+        assert app.cmd['cursor'] == len(app.cmd['chars'])
+
+    def test_prefill_includes_prog_options(self, app, pb):
+        """Edit mode skips :mux's injection, so the pre-fill has to carry it."""
+        app._cmd_prog_options('ssh *-router -l admin')
+        self._select(app, pb.PingMonitor('core-router'))
+        assert self._press(app, pb, 'C') == 'mux ssh -l admin core-router'
+
+    def test_prefill_includes_the_relay_hop(self, app, pb):
+        self._select(app, pb.SshPingMonitor(['relay'], '10.1.2.3'))
+        assert self._press(app, pb, 'C') == 'mux ssh -J relay 10.1.2.3'
+
+    def test_prefill_matches_what_c_would_run(self, app, pb):
+        app._cmd_prog_options('ssh 10.1.* -l dev')
+        m = self._select(app, pb.SshPingMonitor(['relay'], '10.1.2.3'))
+        assert self._press(app, pb, 'C') == f'mux {app._connect_preview(m)}'
+
+    def test_disabled_host_prefills_nothing(self, app, pb):
+        app._cmd_prog_options('ssh *-cam* --disable')
+        self._select(app, pb.PingMonitor('sh1-cam1'))
+        assert self._press(app, pb, 'C') is None
+
+    def test_disabled_host_says_why(self, app, pb):
+        app._cmd_prog_options('ssh *-cam* --disable')
+        self._select(app, pb.PingMonitor('sh1-cam1'))
+        self._press(app, pb, 'C')
+        assert any('disabled for this host' in e.text for e in app.events)
+
+    def test_lowercase_c_still_runs_immediately(self, app, pb):
+        self._select(app, pb.PingMonitor('10.0.0.1'))
+        backend = MagicMock()
+        backend.is_inside.return_value = True
+        backend.available.return_value = True
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': backend}):
+            binding, _ = app._key_trie.resolve(
+                pb._parse_key_notation('c'),
+                set(app._binding_context().keys()))
+            app._execute_binding(binding)
+        backend.split.assert_called_once()
+        assert app.cmd is None
+
+    def test_x_now_clears_the_event_log(self, app, pb):
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('X'), set())
+        assert binding is not None
+        assert binding.commands == [':clear --confirm']
+
+    def test_c_is_no_longer_clear(self, app, pb):
+        binding, _ = app._key_trie.resolve(pb._parse_key_notation('C'), set())
+        assert ':clear --confirm' not in binding.commands
+
+    def test_ctrl_shift_c_is_not_a_key(self, pb):
+        """Kept out of the defaults because a terminal cannot send it."""
+        with pytest.raises(ValueError):
+            pb._parse_key_notation('<C-S-c>')

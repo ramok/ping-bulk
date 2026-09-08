@@ -45,7 +45,7 @@ class TestQuitConfirmPrompt:
 
     def test_ctrl_c_in_prompt_dismisses_without_quitting(self, tmux_app_40):
         """Ctrl+C inside the clear prompt cancels it (does not trigger quit)."""
-        tmux_app_40.send_keys('C')           # opens "Clear event log? [y/N]:"
+        tmux_app_40.send_keys('X')           # opens "Clear event log? [y/N]:"
         tmux_app_40.wait_for(CLEAR_PROMPT)
         tmux_app_40.send_keys('C-c')
         tmux_app_40.wait_for_absence(CLEAR_PROMPT)
@@ -121,7 +121,7 @@ class TestCtrlCInModals:
 
     def test_ctrl_c_cancels_clear_prompt(self, tmux_app_40):
         """Ctrl+C while the clear-log prompt is active cancels it and restores the UI."""
-        tmux_app_40.send_keys('C')           # opens "Clear event log? [y/N]:"
+        tmux_app_40.send_keys('X')           # opens "Clear event log? [y/N]:"
         tmux_app_40.wait_for(CLEAR_PROMPT)
         tmux_app_40.send_keys('C-c')
         tmux_app_40.wait_for_absence(CLEAR_PROMPT)

@@ -295,8 +295,20 @@ Display
     log file when one is set.  If the target file already exists a second
     prompt offers ``[t]runcate`` or ``[a]ppend``.
 
+``X``
+    Open the *clear event log* confirmation prompt.  (This was ``C`` until
+    that key was given to the editable SSH command below.)
+
 ``C``
-    Open the *clear event log* confirmation prompt.
+    Put the SSH command for the selected host on the command line **without
+    running it**, so it can be edited first — a different user, an extra
+    ``-o``, a port forward.  Press ``Enter`` to run it or ``Esc`` to
+    abandon it.
+
+    The text is identical to what ``c`` would run, ``:prog-options`` and the
+    relay hop included::
+
+        :mux ssh -l root -J 217.160.7.176 10.111.1.1
 
 ``c``
     Open an SSH connection to the selected host in a split pane.  A host

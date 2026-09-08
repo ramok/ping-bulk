@@ -367,6 +367,30 @@ Events [SPACE to set "seen" mark] [PgUp to scroll]                              
 - The settings-cursor highlight row draws with addstr and len(), so a settings
   line containing markup would highlight the wrong span. Not hit today.
 
+## Help overlay: tab 5 [Bindings] shows no reference text (2026-09-08)
+
+Tab 4 [Commands] pairs a command list with its syntax reference; tab 5
+[Bindings] shows only `_build_all_bindings_lines()` — the live table of what
+is bound right now — and no help at all.  So the answer to "how do I bind
+this?" is on a different tab from the bindings themselves.
+
+The material already exists: `_HELP_BINDINGS` (ping-bulk:945) documents
+`:bind-key` / `:unbind-key`, the key notation, the `%` variables and the `\;`
+separator.  It is currently included on the Interactive and Hosts tabs
+(_build_tab_lines, ping-bulk:~11807) but not on Bindings.
+
+WANT: `[5 Bindings]` = full reference (as `[4 Commands]` has) followed by the
+live table.
+
+While there: the tab-content builder is a chain of `if self.help_tab == N`
+with the fragment lists assembled inline per tab, and the same fragment
+appears on several tabs by hand.  A tab -> fragments table would make
+"which tab shows what" readable in one place, and would have made this gap
+obvious.  Note `_build_tab_lines()` also re-shifts `_settings_line_map` by
+`_HELP_PINNED` on every call and is called at least twice per interaction —
+idempotent only because `_build_settings_lines` rebuilds the map from
+scratch (already recorded under STILL OPEN).
+
 ## Log-file paths / banner (2026-08-18)
 - _target_count is computed once in Application.__init__ from the caller's
   entries, so after an :edit reload that adds or removes hosts, a later log
