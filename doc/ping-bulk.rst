@@ -277,6 +277,25 @@ Display
     In sync mode all hosts share the same time axis; a host that started
     late shows a leading gap instead of appearing shifted.
 
+    A second in which no ping process was running is drawn ``_`` (dimmed)
+    rather than left blank.  That covers a host still starting up, an SSH
+    connection still being established — several seconds through a jump
+    host — and the backoff wait between reconnection attempts::
+
+        127.0.0.1          ............
+        relay → 10.0.0.1   ......._____
+
+    Both bars are anchored at *now* on the left, so the marked seconds are
+    the oldest.  Without the marker the second bar was simply shorter, with
+    nothing to say whether the missing seconds were a connection being set
+    up or data that never existed — a blank still means exactly that, no
+    sample and no explanation.
+
+    These seconds carry no probe, so they are absent from every statistic;
+    a recorded reply, a loss or a process error always outranks the marker
+    in a cell.  The dense (non-sync) bar is one cell per probe and has no
+    empty seconds, so it never shows ``_``.
+
 ``p`` / ``P``
     Toggle pause (freeze the display without stopping pings).
 

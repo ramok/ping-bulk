@@ -722,7 +722,8 @@ def _join_help_fragments(*groups):
 
 _HELP_LEGEND = [
     "  Ping history  ([H] cycle: success / rtt / scaled)",
-    "  Symbols:  [X:red = lost]             [x:yellow = late reply]           [?:brightred = process error]     \\[' ' = no data in sync mode]",
+    "  Symbols:  [X:red = lost]             [x:yellow = late reply]           [?:brightred = process error]",
+    "            \\[_ = ping not running (starting / connecting / backoff)]     \\[' ' = no data in sync mode]",
     "  RTT time: [green:green fast (<50 ms)]  [yellow:yellow slow (≥50 ms)]  [magenta:magenta ≥100 ms]",
     "  Ping history modes:",
     "     success   [.:green = reply]  [x:yellow = reply after the probe interval (see :set late-grace)] ",
@@ -2043,6 +2044,15 @@ class Monitor(ABC):
         self.latency = None
         self.history = deque(maxlen=100)
         self.history_times = deque(maxlen=100)  # parallel wall-clock timestamps
+        # Wall-clock spans during which no ping process was producing results:
+        # the child was starting, connecting, or waiting out a backoff.  In
+        # sync mode those seconds render as '_' rather than blank, which
+        # otherwise also means "not monitored" and "no sample this second".
+        # _connect_since is the open span (None while results are arriving);
+        # closed spans are (t0, t1) pairs.  Populated by SubprocessMonitor —
+        # a TCP connect is immediate, so PortMonitor leaves them empty.
+        self._connect_since = None
+        self._connect_windows = deque(maxlen=64)
         # name -> ProbeSeries, filled by the probe reader.  One generic store
         # rather than per-value attributes: the remote-clock stats added six of
         # those to this constructor, and custom probes would repeat that for
@@ -2301,6 +2311,32 @@ class Monitor(ABC):
             return ip
         return self.host
 
+    def _fill_connect_gaps(self, result, t_end, length, cell_width):
+        """Mark seconds when no ping was running with '_' instead of a blank.
+
+        A blank cell in sync mode is ambiguous: it can mean this host was not
+        being monitored yet, that a second produced no sample, or — for a
+        relayed host — that the SSH connection was still being set up.  The
+        last case is knowable, so it gets its own symbol.
+
+        Only blank cells are touched: a recorded sample, a loss and an error all
+        outweigh "the process was starting".  Nothing here affects statistics —
+        these seconds had no probe, which is precisely the point.
+        """
+        blank = (' ' * cell_width) if cell_width > 1 else ' '
+        fill = ('_' * (cell_width - 1) + ' ') if cell_width > 1 else '_'
+        with self.lock:
+            spans = list(self._connect_windows)
+            if self._connect_since is not None:
+                spans.append((self._connect_since, None))   # still waiting
+        for t0, t1 in spans:
+            # Bucket 0 is the newest second, so an older time is a higher index.
+            first = 0 if t1 is None else max(0, t_end - int(t1))
+            last = t_end - int(t0)
+            for bucket in range(first, min(last + 1, length)):
+                if result[bucket] == blank:
+                    result[bucket] = fill
+
     def get_history_string(self, length=50, offset=0, mode="success", cell_width=1,
                            sync=False, end_time=None):
         """Get history as a string of given length ending offset steps from the newest sample.
@@ -2344,6 +2380,7 @@ class Monitor(ABC):
                     else:
                         cell = _history_char(val, mode)
                     result[bucket] = cell
+            self._fill_connect_gaps(result, t_end, length, cell_width)
             return "".join(result)  # result[0]=newest, result[length-1]=oldest (no reversal)
 
         with self.lock:
@@ -2582,7 +2619,14 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
 
     # ── _PipeReaderLoop hooks ────────────────────────────────────────────────
     def _handle_stdout_line(self, line):
-        return self._handle_ping_line(line)
+        handled = self._handle_ping_line(line)
+        if handled:
+            with self.lock:
+                if self._connect_since is not None:
+                    self._connect_windows.append((self._connect_since,
+                                                  time.time()))
+                    self._connect_since = None
+        return handled
 
     def _handle_stderr_line(self, line):
         self._note_stderr(line)
@@ -2632,6 +2676,12 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
             if not self.running:
                 break
             try:
+                with self.lock:
+                    # Left open across a child that exits without ever speaking,
+                    # so the backoff wait is covered too — a relay refusing
+                    # connections spends most of its time there, not in connect().
+                    if self._connect_since is None:
+                        self._connect_since = time.time()
                 self._proc = subprocess.Popen(
                     self._build_ping_cmd(),
                     stdin=subprocess.DEVNULL,   # never let the child read the terminal
@@ -2650,6 +2700,13 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
                 self._stderr_lines.clear()
 
             got_output = self._read_until_exit()
+            with self.lock:
+                # From here until the next result no ping is running: the child
+                # has gone and a backoff wait plus a fresh connect come first.
+                # Opening the span here rather than at the next spawn is what
+                # covers the backoff itself.
+                if self._connect_since is None:
+                    self._connect_since = time.time()
             # Close our ends now: the child is done and this loop may respawn it
             # many times over days, so leaving them to the garbage collector
             # leaks two fds per restart (and emits ResourceWarning).
@@ -8239,6 +8296,9 @@ class Application:
                     if not content:
                         # blank padding cell
                         stdscr.addstr(row, col, cell, row_attr)
+                    elif content[0] == '_':
+                        stdscr.addstr(row, col, cell,
+                                      self.stale_attr | row_attr)
                     elif content[0] == 'X':
                         stdscr.addstr(row, col, cell, curses.color_pair(2) | row_attr)  # red
                     elif content[0] == '?':
@@ -8273,6 +8333,11 @@ class Application:
                         stdscr.addstr(row, col, char, curses.color_pair(3) | row_attr)  # yellow
                     elif char == '>':
                         stdscr.addstr(row, col, char, curses.color_pair(5) | row_attr)  # magenta — >100 ms
+                    elif char == '_':
+                        # No ping process was running this second (starting,
+                        # connecting, or in backoff).  Dim: it is the absence of
+                        # a probe, not the result of one.
+                        stdscr.addstr(row, col, char, self.stale_attr | row_attr)
                     else:
                         stdscr.addstr(row, col, char, row_attr)  # blank padding
                     col += 1

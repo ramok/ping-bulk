@@ -5,6 +5,7 @@ bucket relative to a shared end_time.  A host that started late (e.g. SSH
 through a down jumphost) shows leading spaces for the seconds it was absent,
 so all hosts share the same time axis.
 """
+import time
 from collections import deque
 
 
@@ -217,3 +218,150 @@ class TestSyncHistoryLateCell:
         out = m.get_history_string(length=3, mode='success', sync=True,
                                    end_time=1700000006.0)
         assert out[1] == 'x' and out[2] == 'X', out
+
+
+class TestSyncConnectGaps:
+    """Seconds with no ping process render '_' rather than a blank.
+
+    A blank in sync mode is ambiguous — not monitored yet, no sample this
+    second, or a relayed host still establishing its SSH connection.  The last
+    is knowable, and for a jump host it can be several seconds, so the bar was
+    simply shorter with nothing to say why.
+    """
+
+    END = 1000.0
+
+    def _monitor(self, pb, samples=(), windows=(), open_since=None):
+        m = pb.PingMonitor('127.0.0.1')
+        m.history = deque(maxlen=200)
+        m.history_times = deque(maxlen=200)
+        for offset, val in samples:
+            m.history.append(val)
+            m.history_times.append(self.END - offset)
+        for t0_off, t1_off in windows:
+            m._connect_windows.append((self.END - t0_off, self.END - t1_off))
+        if open_since is not None:
+            m._connect_since = self.END - open_since
+        m.stop()
+        return m
+
+    def _bar(self, m, length=10, cell_width=1):
+        return m.get_history_string(length=length, sync=True, end_time=self.END,
+                                    cell_width=cell_width)
+
+    # ── the reported case: a slow connect before the first sample ───────────
+
+    def test_connect_before_first_sample_is_marked(self, pb):
+        """Bucket 0 is the newest second, so the gap sits at the old end.
+
+        A span from 6 s ago to 3 s ago covers four whole seconds — both ends
+        are inclusive, since each names a second that had no ping running.
+        """
+        m = self._monitor(pb, samples=[(0, 1.0), (1, 1.0), (2, 1.0)],
+                          windows=[(6, 3)])
+        assert self._bar(m) == '...____   '
+
+    def test_still_connecting_marks_up_to_now(self, pb):
+        """An open span reaches bucket 0: nothing has arrived yet."""
+        m = self._monitor(pb, open_since=4)
+        assert self._bar(m) == '_____     '
+
+    def test_a_gap_between_runs_is_marked(self, pb):
+        m = self._monitor(pb, samples=[(0, 1.0), (1, 1.0), (4, 1.0), (5, 1.0)],
+                          windows=[(3, 2)])
+        assert self._bar(m) == '..__..    '
+
+    # ── samples always outrank the marker ───────────────────────────────────
+
+    def test_a_sample_is_not_overwritten(self, pb):
+        """A recorded probe outweighs 'the process was starting'."""
+        m = self._monitor(pb, samples=[(1, 5.0)], windows=[(2, 0)])
+        assert self._bar(m)[1] == '.'
+
+    def test_a_loss_is_not_overwritten(self, pb):
+        m = self._monitor(pb, samples=[(1, None)], windows=[(2, 0)])
+        assert self._bar(m)[1] == 'X'
+
+    def test_an_error_cell_is_not_overwritten(self, pb):
+        m = self._monitor(pb, samples=[(1, 'ERR')], windows=[(2, 0)])
+        assert self._bar(m)[1] == '?'
+
+    # ── boundaries ─────────────────────────────────────────────────────────
+
+    def test_no_windows_leaves_blanks(self, pb):
+        m = self._monitor(pb, samples=[(0, 1.0)])
+        assert self._bar(m) == '.         '
+
+    def test_a_window_older_than_the_bar_is_ignored(self, pb):
+        m = self._monitor(pb, samples=[(0, 1.0)], windows=[(40, 30)])
+        assert self._bar(m) == '.         '
+
+    def test_a_window_is_clipped_to_the_bar(self, pb):
+        """An old span is trimmed at the bar's edge, not wrapped.
+
+        It ends 2 s ago, so the two newest buckets are after it and stay blank.
+        """
+        m = self._monitor(pb, windows=[(40, 2)])
+        assert self._bar(m) == '  ________'
+
+    def test_marker_does_not_appear_in_non_sync_mode(self, pb):
+        """The dense strip is one cell per probe; it has no empty seconds."""
+        m = self._monitor(pb, samples=[(0, 1.0)], windows=[(5, 1)])
+        assert '_' not in m.get_history_string(length=10, sync=False)
+
+    # ── multi-character cells (rtt mode) ───────────────────────────────────
+
+    def test_rtt_mode_fills_the_whole_cell(self, pb):
+        """A 3-char cell becomes '__ ', not a bare '_' in a blank cell."""
+        m = self._monitor(pb, windows=[(3, 1)])
+        bar = self._bar(m, length=4, cell_width=3)
+        assert bar == '   __ __ __ ', repr(bar)
+
+    def test_rtt_mode_keeps_a_sample_cell(self, pb):
+        m = self._monitor(pb, samples=[(0, 7.0)], windows=[(3, 0)])
+        bar = self._bar(m, length=4, cell_width=3)
+        assert bar.startswith(' 7 '), repr(bar)
+        assert bar[3:] == '__ __ __ ', repr(bar)
+
+    # ── statistics are untouched ───────────────────────────────────────────
+
+    def test_no_effect_on_counters(self, pb):
+        """These seconds had no probe, which is the whole point."""
+        m = self._monitor(pb, samples=[(0, 1.0)], windows=[(5, 1)])
+        before = (m.rx_count, m.xx_count, m.ping_count)
+        self._bar(m)
+        assert (m.rx_count, m.xx_count, m.ping_count) == before
+
+
+class TestConnectWindowTracking:
+    """The spans are opened and closed by the subprocess loop itself."""
+
+    def test_a_fresh_monitor_has_no_spans(self, pb):
+        m = pb.PingMonitor('127.0.0.1')
+        assert m._connect_since is None
+        assert list(m._connect_windows) == []
+
+    def test_first_result_closes_the_span(self, pb):
+        m = pb.PingMonitor('127.0.0.1')
+        m._connect_since = time.time() - 5
+        m._handle_stdout_line(
+            '[1700000000.0] 64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=1.0 ms')
+        assert m._connect_since is None
+        assert len(m._connect_windows) == 1
+
+    def test_a_non_result_line_leaves_the_span_open(self, pb):
+        """Banner and statistics lines are not results."""
+        m = pb.PingMonitor('127.0.0.1')
+        m._connect_since = time.time() - 5
+        m._handle_stdout_line('PING 127.0.0.1 (127.0.0.1) 56(84) bytes of data.')
+        assert m._connect_since is not None
+
+    def test_spans_are_bounded(self, pb):
+        """A host that reconnects for days must not grow memory."""
+        m = pb.PingMonitor('127.0.0.1')
+        assert m._connect_windows.maxlen is not None
+
+    def test_port_monitor_has_no_spans(self, pb):
+        """A TCP connect is immediate; there is no setup to report."""
+        m = pb.PortMonitor('127.0.0.1', '443')
+        assert m._connect_since is None
