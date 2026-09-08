@@ -5094,7 +5094,14 @@ def _ssh_sharing_flags(share: bool) -> list:
         if flag.split('=', 1)[0].lstrip('-').lower() in _SSH_CONTROL_OPTIONS:
             return []
     if not share:
-        return ['-o', 'ControlMaster=no']
+        # 'ControlMaster=no' is not enough — it is the *client* mode.  Per
+        # ssh_config(5): "Additional sessions can connect to this socket using
+        # the same ControlPath with ControlMaster set to no (the default)".  So
+        # with a ControlPath still set from the user's config, every ping
+        # connection joined whatever master happened to exist and sshd refused
+        # them past MaxSessions (10) with "Session open refused by peer".
+        # 'ControlPath=none' is the documented way to disable sharing outright.
+        return ['-o', 'ControlMaster=no', '-o', 'ControlPath=none']
     directory = _ssh_control_dir()
     if directory is None:
         return []

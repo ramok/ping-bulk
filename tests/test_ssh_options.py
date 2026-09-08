@@ -121,6 +121,25 @@ class TestConnectionSharing:
         m = pb.SshPingMonitor(['relay'], '10.1.2.3')
         assert 'ControlMaster=no' in pb.Application._clock_probe_cmd(m, '10.1.2.3')
 
+    def test_declining_sharing_also_clears_the_path(self, pb):
+        """'ControlMaster=no' alone is the *client* mode, not "off".
+
+        ssh_config(5): "Additional sessions can connect to this socket using
+        the same ControlPath with ControlMaster set to no (the default)".  So
+        with a ControlPath still set by the user's own config, every ping
+        connection joined whatever master existed and sshd refused them past
+        MaxSessions with "Session open refused by peer".  Reproduced locally:
+        14 clients through one master, 4 refused.
+        """
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        cmd = m._build_ping_cmd()
+        assert 'ControlMaster=no' in cmd
+        assert 'ControlPath=none' in cmd, cmd
+
+    def test_clock_probe_also_clears_the_path(self, pb):
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        assert 'ControlPath=none' in pb.Application._clock_probe_cmd(m, '10.1.2.3')
+
     def test_probe_reader_shares(self, pb):
         m = pb.SshPingMonitor(['relay'], '10.1.2.3')
         r = pb.ProbeReader(m, 'p', 60, {'t': pb.ProbeDef('t')}, retain=5)

@@ -717,11 +717,16 @@ Key bindings
     Many monitored hosts share one relay, and sharing *those* onto a single
     master is a trap rather than an optimisation: ``sshd``'s ``MaxSessions``
     defaults to **10**, so behind a relay carrying more hosts than that the
-    eleventh onwards is refused outright.  Saying ``no`` explicitly also stops
-    them racing for a ``ControlPath`` from the user's own config — the losers
-    of that race log *ControlSocket … already exists, disabling multiplexing*
-    and open their own connection anyway, so whether a given host was
-    multiplexed depended on a startup race.
+    eleventh onwards is refused with *Session open refused by peer*.
+
+    Declining it takes both ``-o ControlMaster=no`` **and**
+    ``-o ControlPath=none``.  ``ControlMaster=no`` is the *client* mode, not
+    "off": ssh_config(5) says additional sessions connect to an existing
+    socket *with ``ControlMaster`` set to no*, so on its own it makes every
+    connection join whatever master the user's own ``ControlPath`` points at.
+    ``ControlPath=none`` is the documented way to disable sharing.  It also
+    stops them racing for that path — the losers of such a race log
+    *ControlSocket … already exists, disabling multiplexing*.
 
     A probe reader is the opposite case: one endpoint per host, reconnecting
     whenever its remote loop restarts, so a master turns each reconnection

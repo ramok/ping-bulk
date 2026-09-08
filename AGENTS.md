@@ -210,11 +210,19 @@ Three ways out, none implemented:
 `_ssh_sharing_flags(share)` encodes the split rather than putting a single
 answer in `_SSH_MONITOR_OPTIONS_DEFAULT`:
 
-| Connection      | Reaches         | Sharing            | Why                                                         |
-| --------------- | --------------- | ------------------ | ----------------------------------------------------------- |
-| ping            | the relay       | `ControlMaster=no` | many hosts per relay, so a shared master hits `MaxSessions` |
-| clock probe     | the relay       | `ControlMaster=no` | same endpoint as ping                                       |
-| `:probe-source` | the host itself | shared master      | one endpoint per host; reconnects reuse the master          |
+| Connection      | Reaches         | Sharing                               | Why                                                         |
+| --------------- | --------------- | ------------------------------------- | ----------------------------------------------------------- |
+| ping            | the relay       | `ControlMaster=no` `ControlPath=none` | many hosts per relay, so a shared master hits `MaxSessions` |
+| clock probe     | the relay       | `ControlMaster=no` `ControlPath=none` | same endpoint as ping                                       |
+| `:probe-source` | the host itself | shared master                         | one endpoint per host; reconnects reuse the master          |
+
+**`ControlMaster=no` does not mean "no sharing".** It is the *client* mode —
+ssh_config(5): "Additional sessions can connect to this socket using the same
+ControlPath with ControlMaster set to no (the default)". Setting only that made
+every ping connection join whatever master the user's `ControlPath` pointed at,
+and sshd refused them past `MaxSessions` with `Session open refused by peer`.
+Reproduced locally: 14 clients through one master, 4 refused. Use
+`ControlPath=none` to actually disable sharing.
 
 Saying `no` explicitly also stops the ping connections racing for a
 `ControlPath` set by the user's own `Host *` block. Naming any `Control*`
