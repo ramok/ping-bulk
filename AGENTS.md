@@ -207,9 +207,20 @@ Three ways out, none implemented:
    stock `sshd` but the pool size depends on a server value the client cannot
    discover.
 
-`:set ssh-options` (default includes `-o ControlMaster=no`) makes the current
-behaviour deterministic — every monitoring connection is independent — rather
-than depending on whether the user's `ssh_config` says `ControlMaster auto`.
+`_ssh_sharing_flags(share)` encodes the split rather than putting a single
+answer in `_SSH_MONITOR_OPTIONS_DEFAULT`:
+
+| Connection      | Reaches         | Sharing            | Why                                                         |
+| --------------- | --------------- | ------------------ | ----------------------------------------------------------- |
+| ping            | the relay       | `ControlMaster=no` | many hosts per relay, so a shared master hits `MaxSessions` |
+| clock probe     | the relay       | `ControlMaster=no` | same endpoint as ping                                       |
+| `:probe-source` | the host itself | shared master      | one endpoint per host; reconnects reuse the master          |
+
+Saying `no` explicitly also stops the ping connections racing for a
+`ControlPath` set by the user's own `Host *` block. Naming any `Control*`
+option in `:set ssh-options` overrides all of it — ssh takes the *first* value
+of a repeated option and these are placed first, so an explicit choice would
+otherwise be silently ignored.
 
 ## 10. Key Binding System
 

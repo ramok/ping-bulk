@@ -60,9 +60,9 @@ class TestDefaults:
     def test_forwardings_are_cleared(self, pb):
         assert 'ClearAllForwardings=yes' in pb._ssh_monitor_flags()
 
-    def test_multiplexing_is_explicit(self, pb):
-        """Deterministic rather than racing for a shared ControlPath."""
-        assert 'ControlMaster=no' in pb._ssh_monitor_flags()
+    def test_sharing_is_not_in_the_shared_default(self, pb):
+        """It differs per connection kind — see TestConnectionSharing."""
+        assert not any('Control' in f for f in pb._ssh_monitor_flags())
 
     def test_agent_forwarding_is_left_alone(self, pb):
         """It is how the next hop authenticates in a multi-jump chain."""
@@ -98,6 +98,100 @@ class TestAppliedToOwnConnections:
         app.entries.append(m)
         app.highlighted_index = len(app.entries) - 1
         assert 'ForwardX11' not in (app._connect_preview(m) or '')
+
+
+class TestConnectionSharing:
+    """The right answer differs by connection kind, so it is not in the default.
+
+    ping and clock probes reach the *relay*, and many hosts share one relay —
+    sharing them onto one master trips sshd's MaxSessions (default 10) and the
+    hosts past the tenth are refused outright.  A probe reader reaches the
+    *host itself*, one endpoint each, and reconnects whenever its remote loop
+    restarts, so a master saves a handshake and an authentication each time.
+    """
+
+    def test_default_carries_no_sharing_option(self, pb):
+        assert not any('Control' in f for f in pb._SSH_MONITOR_OPTIONS_DEFAULT)
+
+    def test_ping_declines_sharing(self, pb):
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        assert 'ControlMaster=no' in m._build_ping_cmd()
+
+    def test_clock_probe_declines_sharing(self, pb):
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        assert 'ControlMaster=no' in pb.Application._clock_probe_cmd(m, '10.1.2.3')
+
+    def test_probe_reader_shares(self, pb):
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        r = pb.ProbeReader(m, 'p', 60, {'t': pb.ProbeDef('t')}, retain=5)
+        cmd = r._build_cmd()
+        assert 'ControlMaster=auto' in cmd
+        assert any(f.startswith('ControlPath=') for f in cmd)
+        assert any(f.startswith('ControlPersist=') for f in cmd)
+
+    def test_socket_lives_in_a_private_directory(self, pb):
+        """SSH options are set by the master, so a shared socket would impose
+        this connection's ForwardX11=no on any later session reusing it."""
+        d = pb._ssh_control_dir()
+        assert d is not None
+        assert os.stat(d).st_mode & 0o077 == 0, oct(os.stat(d).st_mode)
+
+    def test_socket_path_stays_short(self, pb):
+        """A Unix socket path is limited to about 107 bytes."""
+        d = pb._ssh_control_dir()
+        assert len(os.path.join(d, '%C')) < 80, d
+
+    def test_control_path_uses_the_ssh_hash(self, pb):
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        r = pb.ProbeReader(m, 'p', 60, {'t': pb.ProbeDef('t')}, retain=5)
+        path = [f for f in r._build_cmd() if f.startswith('ControlPath=')][0]
+        assert path.endswith('/%C'), path
+
+    def test_runtime_dir_is_preferred(self, pb, tmp_path, monkeypatch):
+        """tmpfs, already 0700, and cleared at logout — so no stale sockets."""
+        monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path))
+        assert pb._ssh_control_dir() == str(tmp_path / 'ping-bulk')
+
+    def test_cache_dir_is_the_fallback(self, pb, tmp_path, monkeypatch):
+        """No runtime dir under cron, a systemd unit, or kiosk."""
+        monkeypatch.delenv('XDG_RUNTIME_DIR', raising=False)
+        monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path))
+        assert pb._ssh_control_dir() == str(tmp_path / 'ping-bulk')
+
+    def test_an_existing_loose_directory_is_tightened(self, pb, tmp_path, monkeypatch):
+        """~/.cache is commonly 0755, where a socket would be visible."""
+        monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path))
+        loose = tmp_path / 'ping-bulk'
+        loose.mkdir(mode=0o755)
+        pb._ssh_control_dir()
+        assert os.stat(loose).st_mode & 0o077 == 0
+
+    def test_directory_name_is_fixed_not_the_script_name(self, pb, tmp_path, monkeypatch):
+        """Two invocations under different names should reuse one master."""
+        monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path))
+        assert pb._ssh_control_dir().endswith('/ping-bulk')
+
+    # ── an explicit user choice wins ────────────────────────────────────────
+
+    def test_user_sharing_choice_is_respected_for_probes(self, app, pb):
+        app._cmd_ssh_options('-o ControlMaster=auto -o ControlPath=/tmp/mine-%C')
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        r = pb.ProbeReader(m, 'p', 60, {'t': pb.ProbeDef('t')}, retain=5)
+        cmd = r._build_cmd()
+        assert 'ControlPath=/tmp/mine-%C' in cmd
+        assert not any(f.startswith('ControlPath=/run') for f in cmd)
+
+    def test_user_sharing_choice_is_respected_for_ping(self, app, pb):
+        """ssh takes the first value, so ours must not be prepended over theirs."""
+        app._cmd_ssh_options('-o ControlMaster=auto')
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        assert 'ControlMaster=no' not in m._build_ping_cmd()
+
+    def test_no_sharing_when_no_directory_is_usable(self, pb, monkeypatch):
+        monkeypatch.setattr(pb, '_ssh_control_dir', lambda: None)
+        m = pb.SshPingMonitor(['relay'], '10.1.2.3')
+        r = pb.ProbeReader(m, 'p', 60, {'t': pb.ProbeDef('t')}, retain=5)
+        assert not any('Control' in f for f in r._build_cmd())
 
 
 class TestSetCommand:

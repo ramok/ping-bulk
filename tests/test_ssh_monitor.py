@@ -180,14 +180,14 @@ class TestSshPingMonitorBuildPingCmd:
         m = pb.SshPingMonitor(['user@remote'], 'target.host')
         cmd = m._build_ping_cmd()
         assert cmd == (['ssh', '-o', 'BatchMode=yes']
-                       + pb._ssh_monitor_flags()
+                       + pb._ssh_sharing_flags(False) + pb._ssh_monitor_flags()
                        + ['user@remote', 'ping', '-O', '-D', 'target.host'])
 
     def test_jump_host_cmd(self, pb):
         m = pb.SshPingMonitor(['-J', 'bastion', 'user@remote'], 'target.host')
         cmd = m._build_ping_cmd()
         assert cmd == (['ssh', '-o', 'BatchMode=yes']
-                       + pb._ssh_monitor_flags()
+                       + pb._ssh_sharing_flags(False) + pb._ssh_monitor_flags()
                        + ['-J', 'bastion', 'user@remote',
                           'ping', '-O', '-D', 'target.host'])
 

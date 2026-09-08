@@ -689,12 +689,11 @@ Key bindings
     affected: those are interactive, where X11 or agent forwarding may be
     exactly what is wanted.  Use ``:prog-options ssh`` for those.
 
-    The default answers three things a monitoring connection never needs,
-    each of which a ``Host *`` block in ``~/.ssh/config`` commonly turns on::
+    The default answers two things a monitoring connection never needs, both
+    of which a ``Host *`` block in ``~/.ssh/config`` commonly turns on::
 
         -o ForwardX11=no -o ForwardX11Trusted=no
         -o ClearAllForwardings=yes
-        -o ControlMaster=no
 
     ``ForwardX11`` makes every connection ask the relay for an X11 channel;
     a relay without ``xauth`` refuses and logs *X11 forwarding request
@@ -702,15 +701,41 @@ Key bindings
     ``LocalForward`` meant for an interactive session from being set up once
     per monitored host, where the first to bind holds the port.
 
-    ``ControlMaster`` is the subtle one.  With ``ControlMaster auto`` and a
-    shared ``ControlPath``, every monitor behind the same relay races to
-    become the master; the losers log *ControlSocket … already exists,
-    disabling multiplexing* and open their own connection anyway, so whether
-    a given host is multiplexed depends on a startup race.  ``no`` makes it
-    deterministic.  Multiplexing them onto one master is **not** simply
-    better: ``sshd``'s ``MaxSessions`` defaults to **10**, so behind a relay
-    carrying more than ten monitored hosts the eleventh onwards would be
-    refused outright.
+    **Connection sharing** is deliberately not part of that default, because
+    the right answer differs by connection kind:
+
+    +----------------------+--------------------------+---------------------+
+    | Connection           | Reaches                  | Sharing             |
+    +======================+==========================+=====================+
+    | ``ping``             | the relay                | ``ControlMaster=no``|
+    +----------------------+--------------------------+---------------------+
+    | clock probe (drift)  | the relay                | ``ControlMaster=no``|
+    +----------------------+--------------------------+---------------------+
+    | ``:probe-source``    | the host itself          | shared master       |
+    +----------------------+--------------------------+---------------------+
+
+    Many monitored hosts share one relay, and sharing *those* onto a single
+    master is a trap rather than an optimisation: ``sshd``'s ``MaxSessions``
+    defaults to **10**, so behind a relay carrying more hosts than that the
+    eleventh onwards is refused outright.  Saying ``no`` explicitly also stops
+    them racing for a ``ControlPath`` from the user's own config — the losers
+    of that race log *ControlSocket … already exists, disabling multiplexing*
+    and open their own connection anyway, so whether a given host was
+    multiplexed depended on a startup race.
+
+    A probe reader is the opposite case: one endpoint per host, reconnecting
+    whenever its remote loop restarts, so a master turns each reconnection
+    into a channel instead of a fresh handshake and authentication.  Its
+    socket goes in ``$XDG_RUNTIME_DIR/ping-bulk/`` — already private,
+    on tmpfs, and cleared at logout so no stale socket survives — falling back
+    to ``$XDG_CACHE_HOME/ping-bulk/`` (or ``~/.cache/ping-bulk/``) and then
+    ``/tmp/ping-bulk-<uid>/``, each created mode ``0700``.  The directory is
+    private for a reason beyond tidiness: SSH options are decided by the
+    *master*, so a socket anything else could join would impose this
+    connection's ``ForwardX11=no`` on a later session that reused it.
+
+    Naming any ``Control*`` option in ``:set ssh-options`` turns all of this
+    off and uses yours instead, for every connection kind.
 
     ``ForwardAgent`` is deliberately absent from the default — it is how the
     next hop authenticates in a multi-jump chain, so it stays under the

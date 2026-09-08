@@ -2798,7 +2798,8 @@ class ProbeReader(_PipeReaderLoop):
         # ~/.ssh/config and the user's keys, which is exactly what kiosk keeps
         # out of reach.
         flags = _kiosk_ssh_flags() if self.kiosk_mode else []
-        return (['ssh', '-o', 'BatchMode=yes'] + _ssh_monitor_flags() + flags
+        return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(True)
+                + _ssh_monitor_flags() + flags
                 + self._jump_args() + self._ssh_args
                 + [self._ssh_target(), remote])
 
@@ -3311,7 +3312,8 @@ class SshPingMonitor(SubprocessMonitor):
 
     def _build_ping_cmd(self):
         """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
-        return (['ssh', '-o', 'BatchMode=yes'] + _ssh_monitor_flags() + self._ssh_args
+        return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
+                + _ssh_monitor_flags() + self._ssh_args
                 + ['ping', '-O', '-D', self._ping_host])
 
     @staticmethod
@@ -4996,20 +4998,15 @@ def _resolve_mux_backend(preference: str = None) -> 'TerminalBackend | None':
 #   ClearAllForwardings a LocalForward meant for an interactive session would
 #                       otherwise be set up once per monitored host, and the
 #                       first to bind holds the port
-#   ControlMaster       many monitors behind one relay share one ControlPath and
-#                       race to become master; the losers log "ControlSocket
-#                       ... already exists, disabling multiplexing".  'no' makes
-#                       that deterministic.  Multiplexing them onto one master
-#                       is *not* simply better: sshd's MaxSessions defaults to
-#                       10, so hosts past the tenth would be refused outright.
 #
 # ForwardAgent is deliberately absent: it is how the next hop authenticates in
-# a multi-jump chain, so it stays under the user's control.
+# a multi-jump chain, so it stays under the user's control.  Connection sharing
+# is absent too, because the right answer differs per connection kind — see
+# _ssh_sharing_flags().
 _SSH_MONITOR_OPTIONS_DEFAULT = [
     '-o', 'ForwardX11=no',
     '-o', 'ForwardX11Trusted=no',
     '-o', 'ClearAllForwardings=yes',
-    '-o', 'ControlMaster=no',
 ]
 
 # Live value, replaced by ':set ssh-options'.  Module-level because the three
@@ -5018,9 +5015,98 @@ _SSH_MONITOR_OPTIONS_DEFAULT = [
 _ssh_monitor_options = list(_SSH_MONITOR_OPTIONS_DEFAULT)
 
 
+# Options that decide connection sharing.  Named so the probe reader can tell
+# whether the user has already spoken about multiplexing.
+_SSH_CONTROL_OPTIONS = ('controlmaster', 'controlpath', 'controlpersist')
+
+
+def _ssh_control_dir():
+    """Return a private 0700 directory for SSH control sockets, or None.
+
+    Preference order, and why:
+
+      $XDG_RUNTIME_DIR/ping-bulk   already 0700 and per-user, on tmpfs, and
+                                   cleared at logout — so no stale sockets
+      $XDG_CACHE_HOME/ping-bulk    or ~/.cache/ping-bulk when there is no
+                                   runtime dir (cron, a systemd unit, kiosk)
+      /tmp/ping-bulk-<uid>         last resort, created 0700 by us
+
+    The path is kept short deliberately: a Unix socket path is limited to about
+    107 bytes, and ssh's own '%C' hash is used for the leaf so a long user or
+    host name cannot overflow it.  Returns None when no directory can be made,
+    which the caller treats as "do not multiplex" rather than an error.
+    """
+    # A fixed name, not _PROG_NAME: sockets are shared infrastructure, so two
+    # invocations under different script names should reuse one master rather
+    # than each opening their own.
+    name = 'ping-bulk'
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    candidates = []
+    if runtime:
+        candidates.append(os.path.join(runtime, name))
+    cache = os.environ.get('XDG_CACHE_HOME') or os.path.join(
+        os.path.expanduser('~'), '.cache')
+    candidates.append(os.path.join(cache, name))
+    candidates.append(os.path.join('/tmp', f'{name}-{os.getuid()}'))
+    for path in candidates:
+        try:
+            os.makedirs(path, mode=0o700, exist_ok=True)
+            # An existing directory keeps its mode, so tighten it: ~/.cache is
+            # commonly 0755, and a socket there would be visible to others.
+            os.chmod(path, 0o700)
+            if os.access(path, os.W_OK):
+                return path
+        except OSError:
+            continue
+    return None
+
+
 def _ssh_monitor_flags() -> list:
     """Return the SSH options for ping-bulk's own monitoring connections."""
     return list(_ssh_monitor_options)
+
+
+def _ssh_sharing_flags(share: bool) -> list:
+    """Return connection-sharing options, or [] when the user has chosen.
+
+    The right answer differs by connection kind, which is why this is not part
+    of the shared default:
+
+    *ping and clock probes* connect to the **relay**, and many monitored hosts
+    share one relay.  Sharing them onto a single master looks attractive and is
+    a trap: sshd's ``MaxSessions`` defaults to 10, so behind a relay carrying
+    more hosts than that the eleventh onwards is refused outright — a retry
+    storm that recovers becomes hosts that never work.  They pass
+    ``share=False`` to say so explicitly, rather than inheriting whatever
+    ``ControlMaster`` a user's ``Host *`` block happens to set and racing for
+    the socket.
+
+    *probe readers* connect to the **host itself**, one endpoint each, and
+    reconnect whenever the remote loop restarts.  A master turns each
+    reconnection into a channel instead of a fresh handshake and
+    authentication, so they pass ``share=True``.
+
+    Returns [] when ``:set ssh-options`` already mentions any Control* option:
+    ssh takes the first value of a repeated option and these are placed first,
+    so they would otherwise silently override an explicit choice.
+    """
+    for flag in _ssh_monitor_flags():
+        if flag.split('=', 1)[0].lstrip('-').lower() in _SSH_CONTROL_OPTIONS:
+            return []
+    if not share:
+        return ['-o', 'ControlMaster=no']
+    directory = _ssh_control_dir()
+    if directory is None:
+        return []
+    return [
+        '-o', 'ControlMaster=auto',
+        # '%C' is ssh's own hash of (user, host, port, proxy) — short, so a long
+        # name cannot overflow the ~107-byte socket path.
+        '-o', f'ControlPath={os.path.join(directory, "%C")}',
+        # Long enough to cover a reconnect, short enough that a master does not
+        # outlive the run by much.
+        '-o', 'ControlPersist=60',
+    ]
 
 
 def _kiosk_ssh_flags() -> list:
@@ -5791,8 +5877,8 @@ class Application:
         """
         ping_args = ['ping', '-n', '-c', '1', '-W', '2', '-T', 'tsandaddr', ip]
         if isinstance(monitor, SshPingMonitor):
-            return (['ssh', '-o', 'BatchMode=yes'] + _ssh_monitor_flags()
-                    + monitor._ssh_args + ping_args)
+            return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
+                    + _ssh_monitor_flags() + monitor._ssh_args + ping_args)
         return ping_args
 
     def _clock_probe_once(self, monitor):
