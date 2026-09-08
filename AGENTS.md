@@ -56,6 +56,31 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 16 (probes, SSH hygiene, expected-silence hosts)**:
+  `:probe-source` + `:probe` read arbitrary per-host values over **one
+  persistent SSH connection per host** (`ProbeReader` on the shared
+  `_PipeReaderLoop`), shown three ways — a stats column, the history strip
+  (`:set ping-view <probe>`, one cell per reading), and a sparkline block in
+  the details overlay. `:no-alarm <glob>` / a `~` host-line prefix / `:with
+  no-alarm` mark hosts where a lost reply is *expected*: dim `o` instead of red
+  `X`, a separate `1○` badge segment, events demoted to `info`; `o` toggles it
+  per host. `:set ssh-options` puts sane defaults on ping-bulk's own
+  connections (no X11, no forwardings), and `:set ssh-connect-rate` (5/s)
+  paces them per relay. Sync mode marks seconds with no ping process as `_`.
+  `--dump-simple-script -` writes to stdout. `:log` gained `$SCRIPT_DIR`,
+  environment fallback and a session banner. `Connect:` in the details overlay
+  is rendered from the `c` binding; `C` pre-fills that command for editing and
+  `X` took over clearing the log.
+  Bugs fixed, all found by measuring rather than reading: `ControlMaster=no` is
+  ssh's *client* mode, so it made every monitor join one master and hit
+  `MaxSessions` (`ControlPath=none` is the real switch); connections were
+  opened in a 10 ms burst that tripped `MaxStartups` ~10 times per startup;
+  `hosts_map or {}` gave the first monitor a private copy of an empty map, so
+  it never saw later `:resolv` entries; the `;` splitter ignored quotes, which
+  truncated a quoted command *and* broke the documented multi-command
+  `:bind-key`; an exact `:prog-options` pattern lost to a later glob; `c` on a
+  relayed host connected to the relay instead of through it; a fixed host under
+  an inline `:if` warned about missing back-references.
 - **Phase 15 (log file paths + session banner)**: `$SCRIPT_DIR` / `$SCRIPT_FILE`
   are predefined while a hosts *file* is parsed (`abspath`, not `realpath`;
   seeded in `_HostsParser.parse_file`, so a `:source`d file gets its own), which
