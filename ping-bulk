@@ -8508,6 +8508,77 @@ class Application:
             return self._probe_cell(monitor, probe)
         return self._compute_stat(monitor, cname)
 
+    def _apply_prog_options(self, tokens, entry, relay_prefix=None):
+        """Inject :prog-options into *tokens* for *entry*; wrap in a relay hop.
+
+        Returns ``(tokens, None)``, or ``(None, reason)`` when the launch is
+        refused.  Shared by :meth:`_cmd_mux` and the details overlay's Connect
+        preview so the preview cannot drift from what the key actually runs —
+        it used to rebuild the command itself and showed an unusable target for
+        a relayed host.
+        """
+        if not tokens:
+            return (tokens, None)
+        prog = tokens[0]
+        disabled, opts = self._match_prog_options(
+            prog, *self._prog_match_names(entry))
+        if disabled:
+            return (None, '')
+        if opts:
+            tokens = [prog] + shlex.split(opts) + list(tokens[1:])
+
+        # Run the command on the host's relay when it cannot be reached from
+        # here (see _relay_prefix_for).  The program's own rules were matched
+        # above against the target, which is what it acts on; the ssh rules for
+        # the relay hop are matched separately, because that login lands on the
+        # relay rather than on the target.
+        if relay_prefix:
+            relay_disabled, relay_opts = self._match_prog_options(
+                'ssh', *self._relay_match_names(entry))
+            if relay_disabled:
+                return (None,
+                        f"mux: ssh to the relay is disabled by :prog-options, "
+                        f"cannot run '{prog}' for this host")
+            tokens = (list(relay_prefix[:1]) + shlex.split(relay_opts)
+                      + list(relay_prefix[1:]) + tokens) if relay_opts \
+                else list(relay_prefix) + tokens
+        return (tokens, None)
+
+    def _connect_preview(self, monitor):
+        """Return what the 'c' key would run for *monitor*, or None if disabled.
+
+        Rendered from the binding itself rather than rebuilt, so a rebound 'c'
+        is previewed accurately and the two cannot disagree.
+        """
+        binding, _ = self._key_trie.resolve(
+            _parse_key_notation('c'), set(self._binding_context().keys()))
+        if binding is None:
+            return None
+        used = set()
+        commands, warning = self._expand_binding_commands(binding.commands,
+                                                          used=used)
+        if warning:
+            return None
+        previews = []
+        relay = self._relay_prefix_for(used)
+        for cmd in commands:
+            body = cmd[1:] if cmd.startswith(':') else cmd
+            parts = body.split(None, 1)
+            if not parts:
+                continue
+            if parts[0] not in ('mux', 'tmux', 'screen', 'term', 'terminal',
+                                'xterm'):
+                previews.append(body)      # not a launcher; show it as written
+                continue
+            tokens = parts[1].split() if len(parts) > 1 else []
+            while tokens and tokens[0].startswith('-'):
+                tokens.pop(0)              # split-direction and --no-focus flags
+            tokens, _refusal = self._apply_prog_options(tokens, monitor, relay)
+            if tokens is None:
+                return None                # :prog-options disables it
+            previews.append(shlex.join(tokens))
+        return ' ; '.join(previews) if previews else None
+
     def _probe_def_for_label(self, label):
         """Return the ProbeDef whose column label is *label*, or None."""
         for d in self.probe_defs.values():
@@ -9811,35 +9882,16 @@ class Application:
             }
             return
         elif self._mux_from_binding:
-            # Auto-inject :prog-options when the command came from a key binding.
-            prog = tokens[0]
             entry = (self.entries[self.highlighted_index]
                      if self.highlighted_index is not None
                      and 0 <= self.highlighted_index < len(self.entries)
                      else None)
-            disabled, opts = self._match_prog_options(
-                prog, *self._prog_match_names(entry))
-            if disabled:
+            tokens, refusal = self._apply_prog_options(
+                tokens, entry, getattr(self, '_mux_relay_prefix', None))
+            if tokens is None:
+                if refusal:
+                    self.add_event("cmd", refusal)
                 return
-            if opts:
-                tokens = [prog] + shlex.split(opts) + list(tokens[1:])
-
-            # Run the command on the host's relay when it cannot be reached
-            # from here (see _relay_prefix_for).  The program's own rules were
-            # matched above against the target, which is what it acts on; the
-            # ssh rules that apply to the relay hop are matched separately,
-            # because that login lands on the relay, not on the target.
-            relay = getattr(self, '_mux_relay_prefix', None)
-            if relay:
-                relay_disabled, relay_opts = self._match_prog_options(
-                    'ssh', *self._relay_match_names(entry))
-                if relay_disabled:
-                    self.add_event("cmd",
-                        f"mux: ssh to the relay is disabled by :prog-options, "
-                        f"cannot run '{prog}' for this host")
-                    return
-                tokens = (relay[:1] + shlex.split(relay_opts) + relay[1:]
-                          + tokens) if relay_opts else relay + tokens
 
         # Kiosk whitelist: only ssh and login are permitted; X terminal not allowed
         if self.kiosk_mode:
@@ -12072,16 +12124,13 @@ class Application:
         else:
             lines.append(f"  Cmd:  -")
 
-        # Connect status for this host (via :prog-options ssh rules)
-        conn_disabled, conn_opts = self._match_prog_options(
-            'ssh', *self._prog_match_names(monitor))
+        # What the 'c' key would run, taken from the binding itself so the
+        # preview cannot disagree with it (and follows a rebound 'c').
+        conn_str = self._connect_preview(monitor)
+        conn_disabled = conn_str is None
         if conn_disabled:
             lines.append(f"  Connect: disabled")
         else:
-            r = (monitor.resolved_ip
-                 if getattr(monitor, 'resolv_static', False) and monitor.resolved_ip
-                 else monitor.host)
-            conn_str = f"ssh {conn_opts + ' ' if conn_opts else ''}{r}"
             conn_wrap_w = max(10, inner_w - 12)
             wrapped_conn = textwrap.wrap(conn_str, width=conn_wrap_w)
             lines.append(f"  Connect: {wrapped_conn[0] if wrapped_conn else '-'}")

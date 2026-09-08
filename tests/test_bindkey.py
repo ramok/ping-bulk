@@ -1742,3 +1742,122 @@ class TestContextFlagPercentI:
     def test_percent_i_is_offered_in_completion(self, app, pb):
         flags = pb._CMD_MAP['bind-key'].flags
         assert '--%i' in flags, flags
+
+
+# ===========================================================================
+# TestConnectPreview — the details overlay's 'Connect:' line
+# ===========================================================================
+
+class TestConnectPreview:
+    """'Connect:' previews what 'c' would run, so it must not be rebuilt.
+
+    It used to construct its own string from monitor.host, which for a relayed
+    host is the composite display label ('relay→target', arrow included) — not
+    a usable ssh target — and it omitted the -J relay hop.  It also ignored a
+    rebound 'c' entirely.
+    """
+
+    def _select(self, app, monitor):
+        app.entries.append(monitor)
+        app.highlighted_index = len(app.entries) - 1
+        return monitor
+
+    def _real_c(self, app, pb):
+        """What pressing 'c' actually launches, as a command string."""
+        binding, _ = app._key_trie.resolve(
+            pb._parse_key_notation('c'), set(app._binding_context().keys()))
+        assert binding is not None
+        backend = MagicMock()
+        backend.is_inside.return_value = True
+        backend.available.return_value = True
+        with patch.dict(pb._MUX_BACKENDS, {'tmux': backend}):
+            app._execute_binding(binding)
+        if not backend.split.called:
+            return None
+        launched = ' '.join(backend.split.call_args[0][1])
+        return launched.replace('sh -c ', '').split(';')[0].strip()
+
+    # ── preview matches reality ─────────────────────────────────────────────
+
+    def test_plain_host_matches(self, app, pb):
+        m = self._select(app, pb.PingMonitor('10.0.0.1'))
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    def test_relayed_host_matches(self, app, pb):
+        m = self._select(app, pb.SshPingMonitor(['relay'], '10.1.2.3'))
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    def test_relayed_host_shows_the_jump_not_the_label(self, app, pb):
+        """The old preview named 'relay→target', which ssh cannot resolve."""
+        m = self._select(app, pb.SshPingMonitor(['relay'], '10.1.2.3'))
+        preview = app._connect_preview(m)
+        assert preview == 'ssh -J relay 10.1.2.3', preview
+        assert '→' not in preview
+
+    def test_prog_options_are_shown(self, app, pb):
+        app._cmd_prog_options('ssh *-router -l admin')
+        m = self._select(app, pb.PingMonitor('core-router'))
+        assert app._connect_preview(m) == 'ssh -l admin core-router'
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    def test_relayed_host_with_prog_options_matches(self, app, pb):
+        app._cmd_prog_options('ssh 10.1.* -l dev')
+        m = self._select(app, pb.SshPingMonitor(['relay'], '10.1.2.3'))
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    def test_resolv_static_target_matches(self, app, pb):
+        m = pb.PingMonitor('label')
+        m.resolved_ip = '10.0.0.5'
+        m.resolv_static = True
+        self._select(app, m)
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    # ── disabled ────────────────────────────────────────────────────────────
+
+    def test_disabled_returns_none(self, app, pb):
+        app._cmd_prog_options('ssh *-cam* --disable')
+        m = self._select(app, pb.PingMonitor('sh1-cam1'))
+        assert app._connect_preview(m) is None
+
+    def test_disabled_relayed_host_returns_none(self, app, pb):
+        app._cmd_prog_options('ssh 10.1.* --disable')
+        m = self._select(app, pb.SshPingMonitor(['relay'], '10.1.2.3'))
+        assert app._connect_preview(m) is None
+
+    # ── a rebound 'c' is followed ───────────────────────────────────────────
+
+    def test_rebound_c_is_previewed(self, app, pb):
+        """The old preview showed the built-in form whatever 'c' was bound to."""
+        app._cmd_bindkey('c :mux ssh -l myuser %r')
+        m = self._select(app, pb.PingMonitor('10.0.0.1'))
+        assert app._connect_preview(m) == 'ssh -l myuser 10.0.0.1'
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    def test_rebound_c_with_prog_options_matches(self, app, pb):
+        app._cmd_bindkey('c :mux ssh -l myuser %r')
+        app._cmd_prog_options('ssh 10.0.0.1 -o Compression=yes')
+        m = self._select(app, pb.PingMonitor('10.0.0.1'))
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    def test_multi_command_binding_is_shown_joined(self, app, pb):
+        app._cmd_bindkey(r'c :mux ssh %r \; :mux echo hi')
+        m = self._select(app, pb.PingMonitor('10.0.0.1'))
+        assert app._connect_preview(m) == 'ssh 10.0.0.1 ; echo hi'
+
+    def test_split_flags_are_not_shown(self, app, pb):
+        """'-v' selects the pane direction; it is not part of the command."""
+        app._cmd_bindkey('c :mux -v ssh %r')
+        m = self._select(app, pb.PingMonitor('10.0.0.1'))
+        assert app._connect_preview(m) == 'ssh 10.0.0.1'
+
+    def test_non_mux_binding_is_shown_as_written(self, app, pb):
+        app._cmd_bindkey('c :select down')
+        m = self._select(app, pb.PingMonitor('10.0.0.1'))
+        assert app._connect_preview(m) == 'select down'
+
+    def test_unbound_c_returns_none(self, app, pb):
+        app._last_cmd_name = 'unbind-key'
+        app._cmd_bindkey('c')
+        app._last_cmd_name = None
+        m = self._select(app, pb.PingMonitor('10.0.0.1'))
+        assert app._connect_preview(m) is None

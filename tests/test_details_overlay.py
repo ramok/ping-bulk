@@ -272,3 +272,79 @@ class TestDetailsOverlayNoOp:
         assert DETAILS_MARKER in screen
         assert 'Host: 127.0.0.1' in screen
 
+
+
+class TestDetailsConnectLine:
+    """'Connect:' previews what 'c' would run, drawn through the real overlay.
+
+    The unit tests in test_bindkey.py cover _connect_preview itself; these go
+    through _draw_details_overlay, which is where a missing variable once
+    crashed the whole overlay.
+    """
+
+    def _app(self, app_path, tmp_path, hosts, name):
+        import uuid
+        from tmux_helper import TmuxSession
+        f = tmp_path / 'connect.hosts'
+        f.write_text(hosts)
+        sess = TmuxSession(f'{name}-{uuid.uuid4().hex[:8]}',
+                           width=120, height=40)
+        sess.send_literal(f'python3 {app_path} -f {f}')
+        sess.send_keys('Enter')
+        sess.wait_for('DNS:', timeout=10)
+        return sess
+
+    def test_relayed_host_shows_the_jump(self, app_path, tmp_path,
+                                         check_integration_deps):
+        """The old preview printed 'relay→target', which ssh cannot resolve."""
+        sess = self._app(app_path, tmp_path,
+                         ':remote-ping relay.example.com 10.1.2.3\n',
+                         'pytest-conn-relay')
+        try:
+            _open_details(sess)
+            sess.wait_for(DETAILS_MARKER)
+            screen = sess.capture_pane()
+            assert 'Connect: ssh -J relay.example.com 10.1.2.3' in screen, screen
+            assert '→' not in screen.split('Connect:')[1].split('\n')[0]
+        finally:
+            sess.kill()
+
+    def test_prog_options_username_is_shown(self, app_path, tmp_path,
+                                            check_integration_deps):
+        sess = self._app(app_path, tmp_path,
+                         ':prog-options ssh 127.0.0.1 -l admin\n127.0.0.1\n',
+                         'pytest-conn-opts')
+        try:
+            _open_details(sess)
+            sess.wait_for(DETAILS_MARKER)
+            assert 'Connect: ssh -l admin 127.0.0.1' in sess.capture_pane()
+        finally:
+            sess.kill()
+
+    def test_disabled_host_hides_the_connect_hint(self, app_path, tmp_path,
+                                                  check_integration_deps):
+        """'--disable' must show 'disabled' and drop the '[c]' footer hint."""
+        sess = self._app(app_path, tmp_path,
+                         ':prog-options ssh 127.0.0.1 --disable\n127.0.0.1\n',
+                         'pytest-conn-dis')
+        try:
+            _open_details(sess)
+            sess.wait_for(DETAILS_MARKER)
+            screen = sess.capture_pane()
+            assert 'Connect: disabled' in screen, screen
+            assert '[c] SSH connect' not in screen
+        finally:
+            sess.kill()
+
+    def test_enabled_host_keeps_the_connect_hint(self, app_path, tmp_path,
+                                                 check_integration_deps):
+        """The footer hint read a variable the rewrite removed, crashing the box."""
+        sess = self._app(app_path, tmp_path, '127.0.0.1\n', 'pytest-conn-en')
+        try:
+            _open_details(sess)
+            sess.wait_for(DETAILS_MARKER)
+            screen = sess.capture_pane()
+            assert '[c] SSH connect' in screen, screen
+            assert 'Connect: ssh 127.0.0.1' in screen
+        finally:
+            sess.kill()
