@@ -4144,11 +4144,19 @@ class _HostsParser:
                 elif with_stack:
                     # Any unrecognised command inside a :with block is an error.
                     # Pop the stack so subsequent host lines are not silently
-                    # consumed by the now-broken block.
+                    # consumed by the now-broken block: a command here usually
+                    # means a missing :end, and carrying on would quietly turn
+                    # every later host into a relayed one.
                     w_type, w_args = with_stack[-1]
-                    entries.append(('error',
-                        f':{cmd_word}: command not allowed inside '
-                        f':with {w_type} block'))
+                    msg = (f':{cmd_word}: command not allowed inside '
+                           f':with {w_type} block')
+                    # Say what to do instead, where there is a direct answer.
+                    if cmd_word == 'no-alarm':
+                        msg += (" — mark the host with a leading '~' on its own"
+                                " line, or put :no-alarm outside the block")
+                    elif w_type == 'remote-ping':
+                        msg += ' — close it with :end first'
+                    entries.append(('error', msg))
                     with_stack.pop()
                 else:
                     if cmd_word not in _CMD_MAP:

@@ -27,6 +27,13 @@
 # '~' combines with '?' in either order ('~?host', '?~host') and works inside
 # a :for body and a :with remote-ping block.
 #
+# Inside a :with block use '~', not the command: like :resolv and
+# :prog-options, a ':no-alarm' command there is an error, because a command
+# inside a block usually means a missing ':end' -- and carrying on would
+# quietly turn every following host into a relayed one.  Put the glob rule
+# before the block; patterns match the :resolv alias, so one rule outside
+# covers relayed hosts declared inside.
+#
 # Interactively: [o] toggles the mark on the selected host, and :save-config
 # stores it.  This is presentation only -- the host is still down, and loss
 # statistics still count the misses.

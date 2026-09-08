@@ -157,6 +157,25 @@ class TestMarkingInAScript:
             ':end\n'))
         assert [m.no_alarm for m in app.monitors] == [True, False]
 
+    def test_command_inside_a_with_block_is_refused_with_a_hint(self, pb):
+        """The block takes host lines only; a command there means a missing :end.
+
+        Carrying on would quietly turn every following host into a relayed one,
+        so it errors and pops the block — but the message has to say what to do,
+        which for this command is one character.
+        """
+        entries = pb._HostsParser().parse(
+            ':with remote-ping relay\n    :no-alarm *-ps\n:end\n')
+        errs = [e[1] for e in entries if e[0] == 'error']
+        assert errs and 'not allowed inside' in errs[0]
+        assert "'~'" in errs[0], errs[0]
+
+    def test_other_commands_get_the_generic_hint(self, pb):
+        entries = pb._HostsParser().parse(
+            ':with remote-ping relay\n    :resolv 10.0.0.1 gw\n:end\n')
+        errs = [e[1] for e in entries if e[0] == 'error']
+        assert 'close it with :end first' in errs[0], errs[0]
+
     def test_tilde_is_the_in_block_form(self, pb, tmp_path):
         """What the hint points at has to work."""
         app = _app(pb, tmp_path, pb._HostsParser().parse(

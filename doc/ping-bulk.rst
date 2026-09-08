@@ -783,6 +783,21 @@ Key bindings
     inside a ``:for`` body and a ``:with remote-ping`` block.  With no
     argument, lists the active rules; ``--remove`` drops one.
 
+    **Inside a ``:with`` block, use ``~`` rather than the command.**  Like
+    ``:resolv`` and ``:prog-options``, a ``:no-alarm`` *command* is refused
+    inside one::
+
+        :with remote-ping ses-wg-video
+            ~10.123.1.20  ## sh1-power-switch     # this works
+            :no-alarm *-power-switch              # this is an error
+        :end
+
+    The block only accepts host lines (and a nested ``:remote-ping``), because
+    a command there usually means a missing ``:end`` — and carrying on would
+    quietly turn every following host into a relayed one.  The error says so.
+    Put the glob rule before the block instead; since patterns match the
+    ``:resolv`` alias, one rule outside covers relayed hosts declared inside.
+
     This is **presentation only**.  The host is still down: ``alive`` stays
     factual, loss statistics still count the misses, and a process error
     still shows ``?``.  What changes is how loudly it is reported.
