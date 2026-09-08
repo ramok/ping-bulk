@@ -163,49 +163,54 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
 - `_proc`: Subprocess handle (if applicable).
 - `resolv_static`: Flag for static DNS mappings.
 
-## 9a. SSH connection behaviour (no staggering — read before "fixing" it)
+## 9a. SSH connection pacing and sharing
 
-`start_monitoring()` starts every monitor thread in a tight loop, and each
-`SshPingMonitor.ping()` calls `Popen` immediately. **There is no stagger, no
-ramp and no connection pooling.** Measured: 20 relayed hosts opened 20 `ssh`
-processes within 10 ms.
-
-That matters because many hosts commonly sit behind one relay
-(`:with remote-ping <relay>` over a whole section), and two server-side limits
-bite from opposite directions:
+Many hosts commonly sit behind one relay (`:with remote-ping <relay>` over a
+whole section), and two server-side limits bite from opposite directions:
 
 | Limit         | Default     | Bites when                                                                |
 | ------------- | ----------- | ------------------------------------------------------------------------- |
 | `MaxStartups` | `10:30:100` | many *connections* authenticate at once — random early drop from the 10th |
 | `MaxSessions` | `10`        | many *sessions* share one multiplexed connection — the 11th is refused    |
 
-So neither extreme works for a relay with, say, 54 hosts behind it: 54
-independent connections trip `MaxStartups`, and one multiplexed master trips
-`MaxSessions`. **Do not "fix" the burst by turning on `ControlMaster` alone** —
-that converts a retry storm which recovers into hosts that are never monitored
-at all.
+So neither extreme works for a relay with 54 hosts behind it: 54 simultaneous
+connections trip `MaxStartups`, and one multiplexed master trips `MaxSessions`.
+**Do not "solve" the burst by turning on `ControlMaster` for the ping
+connections** — that converts a retry storm which recovers into hosts that are
+never monitored at all.
 
-It is not hypothetical. A real 54-host log showed 10-20 occurrences of
-`kex_exchange_identification: read: Connection reset by peer` per affected
-session, all within 0-1 s of startup — the client-side signature of a
-pre-auth drop. It looks like it works because the existing exponential
-backoff in `SubprocessMonitor.ping()` retries and succeeds once the herd
-clears; the cost is that those hosts come up seconds late. Since the sync-mode
-`_` marker landed, that delay is visible on screen instead of showing as a
-merely shorter bar.
+Both were measured, not theorised. `start_monitoring()` used to start every
+thread in a tight loop and each `ping()` called `Popen` immediately: 20 relayed
+hosts opened 20 `ssh` processes within 10 ms, and a real 54-host log carried
+10-20 `kex_exchange_identification: read: Connection reset by peer` per
+startup, all within 0-1 s of it. It looked like it worked because the backoff
+loop retried once the herd cleared, at the cost of those hosts coming up
+seconds late.
 
-Three ways out, none implemented:
+### Pacing (implemented)
 
-1. **Stagger the spawns** (e.g. a few per second). `MaxStartups` counts only
-   *unauthenticated* connections and key auth clears in well under a second,
-   so a modest ramp keeps the count under 10. Cheapest, no shared failure
-   domain, needs nothing from the relay. Preferred.
-2. **Raise `MaxSessions` on the relay** and multiplex. Cheapest at runtime —
-   one TCP, one auth — but makes ping-bulk depend on server config, and an
-   unconfigured relay silently loses hosts past the tenth.
-3. **A pool of masters**, `ceil(hosts / MaxSessions)` of them. Works against a
-   stock `sshd` but the pool size depends on a server value the client cannot
-   discover.
+`_ssh_spawn_gate(endpoint)` is a leaky bucket, `:set ssh-connect-rate`
+(default 5/s), applied in `SubprocessMonitor.ping()` and `ProbeReader.run()`
+just before `Popen`. Measured after: 20 connections over 3.8 s, at most 6 in
+any one-second window.
+
+Three details that are deliberate:
+
+- **Keyed on `_ssh_first_hop()`**, not the target. With `-J` the local ssh
+  authenticates to the *jump host*, so that is the daemon under load; hosts
+  behind one relay share a budget and hosts on different relays do not wait
+  for each other.
+- **A rate limiter, not a fixed per-host offset.** The same storm happens on
+  every mass reconnect — a relay restart has every monitor retry at once, and
+  the backoff carries no jitter — so a startup-only stagger would fix the
+  first minute and nothing after it.
+- **Inside the monitor thread**, not in `start_monitoring()`. Sleeping there
+  would block the UI for the whole ramp.
+
+A local `ping` returns `None` from `_spawn_endpoint()` and is never paced: it
+contacts no daemon.
+
+### Sharing
 
 `_ssh_sharing_flags(share)` encodes the split rather than putting a single
 answer in `_SSH_MONITOR_OPTIONS_DEFAULT`:

@@ -341,6 +341,11 @@ SET_PARAMS = [
              "SSH options for ping-bulk's own monitoring connections "
              "('default' restores, 'none' clears)",
              getter=lambda app: ' '.join(_ssh_monitor_flags()) or 'none'),
+    SetParam('ssh-connect-rate', '_cmd_ssh_connect_rate',
+             ['0', '2', '5', '10', '20'],
+             'SSH connection attempts per second per relay (0 = no limit, '
+             'default 5)',
+             getter=lambda app: f'{_ssh_connect_rate:g}'),
     SetParam('late-grace', '_cmd_late_grace',
              ['0', '0.5', '1', '2', '5'],
              "grace after ping's '-O' line before a probe counts as lost (default 1)",
@@ -2626,6 +2631,13 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
 
     _child_label = 'ping'
 
+    def _spawn_endpoint(self):
+        """The sshd this monitor authenticates to, or None when there is none.
+
+        A local `ping` contacts no daemon, so it is never paced.
+        """
+        return None
+
     # ── _PipeReaderLoop hooks ────────────────────────────────────────────────
     def _handle_stdout_line(self, line):
         handled = self._handle_ping_line(line)
@@ -2691,6 +2703,14 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
                     # connections spends most of its time there, not in connect().
                     if self._connect_since is None:
                         self._connect_since = time.time()
+                # Pace attempts to the same sshd; see _ssh_spawn_gate.  Done
+                # here rather than in start_monitoring() so it also applies to
+                # a reconnect, and so the UI is not blocked while waiting.
+                endpoint = self._spawn_endpoint()
+                if endpoint is not None:
+                    _ssh_spawn_gate(endpoint)
+                    if not self.running:
+                        break
                 self._proc = subprocess.Popen(
                     self._build_ping_cmd(),
                     stdin=subprocess.DEVNULL,   # never let the child read the terminal
@@ -2883,6 +2903,12 @@ class ProbeReader(_PipeReaderLoop):
         backoff = 1
         while self.running:
             try:
+                # A probe through '-J relay' authenticates to that relay, so it
+                # draws on the same budget as the ping connections.
+                _ssh_spawn_gate(_ssh_first_hop(self._jump_args(),
+                                               self._ssh_target()))
+                if not self.running:
+                    break
                 self._proc = subprocess.Popen(
                     self._build_cmd(),
                     stdin=subprocess.DEVNULL,
@@ -3315,6 +3341,9 @@ class SshPingMonitor(SubprocessMonitor):
         return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
                 + _ssh_monitor_flags() + self._ssh_args
                 + ['ping', '-O', '-D', self._ping_host])
+
+    def _spawn_endpoint(self):
+        return _ssh_first_hop(self._ssh_args, self._ssh_dest)
 
     @staticmethod
     def _is_fatal_error(stderr_text):
@@ -5020,6 +5049,60 @@ _ssh_monitor_options = list(_SSH_MONITOR_OPTIONS_DEFAULT)
 _SSH_CONTROL_OPTIONS = ('controlmaster', 'controlpath', 'controlpersist')
 
 
+# Connection attempts per second, per SSH endpoint.  sshd's MaxStartups
+# defaults to 10:30:100 — it starts refusing at 10 concurrent *unauthenticated*
+# connections — and ping-bulk opens one per monitored host at once.  Measured on
+# a real 54-host relay: 10-20 `kex_exchange_identification: Connection reset by
+# peer` per startup, recovered only by the backoff loop.
+#
+# Key auth clears in well under a second, so pacing the attempts keeps the
+# concurrent count far below the limit without any multiplexing.  5/s means a
+# 54-host relay is fully up in about 11 s.
+_SSH_CONNECT_RATE_DEFAULT = 5.0
+_ssh_connect_rate = _SSH_CONNECT_RATE_DEFAULT
+
+# endpoint -> monotonic time the next attempt to it may start.
+_ssh_spawn_next = {}
+_ssh_spawn_lock = threading.Lock()
+
+
+def _ssh_first_hop(ssh_args, dest):
+    """Return the endpoint whose sshd a connection actually authenticates to.
+
+    With ``-J`` the local ssh authenticates to the *first jump host* and asks it
+    to forward, so that is the daemon under load — not the final target.  Hosts
+    reached through one relay therefore share one budget, which is the point:
+    MaxStartups is per-sshd.
+    """
+    for i, arg in enumerate(ssh_args):
+        if arg == '-J' and i + 1 < len(ssh_args):
+            return ssh_args[i + 1].split(',')[0]
+        if arg.startswith('-J') and len(arg) > 2:
+            return arg[2:].split(',')[0]
+    return dest
+
+
+def _ssh_spawn_gate(endpoint):
+    """Block until this thread may open a connection to *endpoint*.
+
+    A leaky bucket rather than a fixed per-host offset, because the same storm
+    happens on every mass reconnect — a relay restart has every monitor retry
+    at once, and the backoff has no jitter — not only at startup.  Rate 0
+    disables the gate.
+    """
+    rate = _ssh_connect_rate
+    if rate <= 0:
+        return
+    interval = 1.0 / rate
+    with _ssh_spawn_lock:
+        now = time.monotonic()
+        slot = max(now, _ssh_spawn_next.get(endpoint, 0.0))
+        _ssh_spawn_next[endpoint] = slot + interval
+    delay = slot - now
+    if delay > 0:
+        time.sleep(delay)
+
+
 def _ssh_control_dir():
     """Return a private 0700 directory for SSH control sockets, or None.
 
@@ -5569,6 +5652,8 @@ class Application:
                     f.write(f":set multikey-timeout {self.multikey_timeout}\n")
                 if self.late_grace != 1.0:
                     f.write(f":set late-grace {self.late_grace:g}\n")
+                if _ssh_connect_rate != _SSH_CONNECT_RATE_DEFAULT:
+                    f.write(f":set ssh-connect-rate {_ssh_connect_rate:g}\n")
                 if _ssh_monitor_flags() != _SSH_MONITOR_OPTIONS_DEFAULT:
                     # shlex.join, not quote(join): quoting the whole string
                     # makes it one argv element when read back, which ssh
@@ -11250,6 +11335,33 @@ class Application:
             self.add_event("config",
                 f"ssh-options: {' '.join(_ssh_monitor_flags()) or 'none'} "
                 f"(applies to connections started from now on)")
+
+    def _cmd_ssh_connect_rate(self, args=''):
+        """:set ssh-connect-rate <n> — SSH connection attempts per second.
+
+        Per endpoint, so hosts behind one relay share a budget and hosts on
+        different relays do not wait for each other.  0 removes the limit.
+        """
+        global _ssh_connect_rate
+        if not args:
+            self.add_event("config",
+                f"ssh-connect-rate: {_ssh_connect_rate:g}/s"
+                + (" (no limit)" if _ssh_connect_rate <= 0 else ""))
+            return
+        try:
+            rate = float(args.strip())
+            if rate < 0:
+                raise ValueError
+        except ValueError:
+            self.add_event("cmd",
+                f"ssh-connect-rate: invalid value {args.strip()!r} — "
+                f"expected a non-negative number of connections per second")
+            return
+        _ssh_connect_rate = rate
+        if self._monitoring_started:
+            self.add_event("config",
+                f"ssh-connect-rate: {rate:g}/s"
+                + (" (no limit)" if rate <= 0 else ""))
 
     def _cmd_late_grace(self, args=''):
         """Set how long an unanswered probe waits before counting as lost."""

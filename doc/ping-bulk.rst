@@ -752,6 +752,34 @@ Key bindings
     blocklist as ``:remote-ping`` applies, since an option here reaches every
     monitoring connection.
 
+``:set ssh-connect-rate <n>``
+    SSH connection attempts per second, per endpoint.  Default: ``5``.
+    ``0`` removes the limit.
+
+    ping-bulk opens one connection per monitored host, and without a limit it
+    opens them all at once — 20 relayed hosts were measured spawning 20 ``ssh``
+    processes within 10 ms.  ``sshd``'s ``MaxStartups`` defaults to
+    ``10:30:100``, meaning it starts refusing at ten concurrent
+    *unauthenticated* connections, so a relay carrying dozens of monitored
+    hosts drops a share of them at every startup with *kex_exchange_
+    identification: read: Connection reset by peer*.  Those hosts recover
+    through the usual backoff, several seconds late.
+
+    Key authentication clears in well under a second, so pacing the attempts
+    keeps the concurrent count far below the limit without any multiplexing.
+    At the default a 54-host relay is fully up in about eleven seconds.
+
+    The budget is **per endpoint**, and the endpoint is the host actually
+    authenticated to — with ``-J`` that is the jump host, not the final
+    target.  Hosts behind one relay therefore share a budget, matching
+    ``MaxStartups`` being per-daemon, while hosts on different relays never
+    wait for each other.  A directly pinged host contacts no daemon and is
+    never paced.
+
+    The limit applies to reconnections as well as startup, which is the reason
+    it is a rate rather than a one-off stagger: a relay restart has every
+    monitor behind it retry at once.
+
 ``:set late-grace <seconds>``
     How long a probe reported unanswered by ``ping -O`` may still be
     answered before it counts as lost.  Default: ``1``.
