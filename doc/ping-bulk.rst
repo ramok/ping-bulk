@@ -1208,8 +1208,19 @@ above depends on it.
     ``:mux <prog>`` is invoked from a key binding, the options matching
     the current host are automatically prepended to *prog*'s argument
     list.  Rules use ``fnmatch`` glob matching (case-sensitive) against
-    both the literal hostname and the resolved hostname; the **last
-    match wins**.
+    both the literal hostname and the resolved hostname.
+
+    A rule naming **one host exactly beats any glob**, whatever order they
+    are written in::
+
+        tent-router  -l root      # this host
+        *-router     -l admin     # every other router
+
+    Among rules of the same kind the **last match wins**, so an exact rule
+    can be overridden by a later exact rule and a glob by a later glob.
+    Ordering alone used to decide everything, which meant a specific rule
+    had to be written after the glob it refined — and stopped working as
+    soon as another glob was appended.
 
     For a host monitored through a relay (``:remote-ping`` or ``:with
     remote-ping``) the patterns are matched against the **target** — its

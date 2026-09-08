@@ -52,7 +52,10 @@
 
 # -- :prog-options ---------------------------------------------------------
 # Map hostname globs to SSH flags injected automatically by :mux.
-# Rules are evaluated in order; last match wins.
+# A rule naming one host exactly beats any glob, whatever the order:
+#   tent-router  -l root     <- this host
+#   *-router     -l admin    <- every other router
+# Among rules of the same kind, the last match wins.
 #
 # Inline syntax:
 #   :prog-options <prog> <glob> <opts>    -- add/replace rule

@@ -514,3 +514,81 @@ class TestProgOptionsForRelayedHosts:
         # split(direction, command); the command is wrapped in sh -c '...'
         launched = ' '.join(backend.split.call_args[0][1])
         assert 'ssh -l admin -J gw.example.com 10.111.1.1' in launched, launched
+
+
+class TestExactPatternBeatsGlob:
+    """A rule naming one host exactly wins over a glob, whatever the order.
+
+    Ordering alone used to decide, so this silently gave 'tent-router' the
+    '-l admin' meant for every other router:
+
+        tent-router  -l root
+        *-router     -l admin
+
+    Writing the specific rule last worked, but only until the next glob was
+    appended — which is what made ordering the wrong mechanism.
+    """
+
+    def _rules(self, app, *rules):
+        for r in rules:
+            app._cmd_prog_options('ssh ' + r)
+        return app
+
+    def test_exact_before_glob(self, app):
+        self._rules(app, 'tent-router -l root', '*-router -l admin')
+        assert app._match_prog_options('ssh', 'tent-router') == (False, '-l root')
+
+    def test_exact_after_glob(self, app):
+        self._rules(app, '*-router -l admin', 'tent-router -l root')
+        assert app._match_prog_options('ssh', 'tent-router') == (False, '-l root')
+
+    def test_glob_still_covers_other_hosts(self, app):
+        self._rules(app, 'tent-router -l root', '*-router -l admin')
+        assert app._match_prog_options('ssh', 'sh1-router') == (False, '-l admin')
+
+    def test_a_later_glob_cannot_steal_an_exact_host(self, app):
+        """The case the ordering workaround could not survive."""
+        self._rules(app, '*-router -l admin', 'tent-router -l root',
+                    '*-rout* -l dev')
+        assert app._match_prog_options('ssh', 'tent-router') == (False, '-l root')
+        assert app._match_prog_options('ssh', 'sh1-router') == (False, '-l dev')
+
+    def test_last_exact_wins_among_exacts(self, app):
+        """Ordering still decides between rules of the same kind."""
+        self._rules(app, 'tent-router -l root', 'tent-router -l dev')
+        assert app._match_prog_options('ssh', 'tent-router') == (False, '-l dev')
+
+    def test_last_glob_wins_among_globs(self, app):
+        self._rules(app, '*-router -l admin', '*-rout* -l dev')
+        assert app._match_prog_options('ssh', 'sh1-router') == (False, '-l dev')
+
+    def test_exact_overrides_a_glob_disable(self, app):
+        self._rules(app, '*-cam* --disable', 'sh1-cam1 -l admin')
+        assert app._match_prog_options('ssh', 'sh1-cam1') == (False, '-l admin')
+
+    def test_exact_disable_overrides_a_glob_opts(self, app):
+        self._rules(app, '* -l admin', 'restricted.example.com --disable')
+        assert app._match_prog_options('ssh', 'restricted.example.com') == (True, '')
+
+    def test_no_match_is_unchanged(self, app):
+        self._rules(app, '*-router -l admin')
+        assert app._match_prog_options('ssh', 'unrelated') == (False, '')
+
+    def test_exact_match_on_the_resolved_name(self, app):
+        """Whether the pattern is a glob is what ranks it, not which name matched."""
+        self._rules(app, '*-router -l admin', 'tent-router -l root')
+        assert app._match_prog_options('ssh', '10.111.1.1', 'tent-router') == \
+            (False, '-l root')
+
+
+class TestIsGlob:
+
+    @pytest.mark.parametrize('pattern', ['*-router', 'sh?-router', 'sh[12]-router',
+                                         '*', 'a*b'])
+    def test_glob_patterns(self, pb, pattern):
+        assert pb._is_glob(pattern) is True
+
+    @pytest.mark.parametrize('pattern', ['tent-router', '10.0.0.1',
+                                         'host.example.com', 'a-b_c'])
+    def test_literal_patterns(self, pb, pattern):
+        assert pb._is_glob(pattern) is False

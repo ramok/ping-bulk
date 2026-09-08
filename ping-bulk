@@ -868,6 +868,8 @@ _HELP_CMDS_HOSTSFILE = [
     "                            ip-pat may use brace expansion; \\N in host = brace group N",
     "                            :remote-ping user@hostname resolves hostname, preserves username",
     "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
+    "                            an exact host name beats any glob, whatever the order;",
+    "                            among rules of the same kind the last match wins",
     "",
     "  :probe-source --cmd '<cmd>' \\[--interval SEC] \\[--retain N]",
     "                            command run on each host printing key=value lines",
@@ -1159,6 +1161,16 @@ _DIRECTIVE_KEYWORDS = frozenset({
     'remote-ping', 'source', 'log', 'edit', 'bind-key', 'section',
     'probe', 'probe-source',
 })
+
+
+# fnmatch metacharacters.  A pattern without any of these matches exactly one
+# name, which is what lets :prog-options rank a literal above a glob.
+_GLOB_METACHARS = frozenset('*?[')
+
+
+def _is_glob(pattern):
+    """True when *pattern* can match more than the one name it spells."""
+    return any(c in pattern for c in _GLOB_METACHARS)
 
 
 # Directives whose argument is a file path.  An undefined variable inside one
@@ -10198,22 +10210,32 @@ class Application:
     def _match_prog_options(self, prog, host, resolved_hostname=''):
         """Return (disabled, opts_str) for prog + host by matching prog_options rules.
 
-        Last matching rule wins. Returns (True, '') if disabled, (False, opts) otherwise.
+        A rule naming one host exactly beats any glob, whatever the order they
+        were written in::
+
+            tent-router  -l root      # this host
+            *-router     -l admin     # every other router
+
+        Ordering alone used to decide, so the glob below silently took over the
+        host named above it and the specific rule could only be expressed by
+        moving it — which breaks as soon as another glob is appended.  Among
+        rules of the same kind the last match still wins, so an exact rule can
+        be overridden by a later exact rule and a glob by a later glob.
+
+        Returns (True, '') if disabled, (False, opts) otherwise.
 
         Callers with a Monitor in hand should pass ``*self._prog_match_names(e)``
         rather than ``e.host`` directly — see that method for why.
         """
-        rules = self.prog_options.get(prog, [])
-        matched_opts = ''
-        matched_disabled = False
-        for pattern, opts in rules:
-            if fnmatch.fnmatch(host, pattern) or fnmatch.fnmatch(resolved_hostname, pattern):
-                if opts is None:
-                    matched_disabled = True
-                else:
-                    matched_disabled = False
-                    matched_opts = opts
-        return matched_disabled, matched_opts
+        matches = [(pattern, opts)
+                   for pattern, opts in self.prog_options.get(prog, [])
+                   if fnmatch.fnmatch(host, pattern)
+                   or fnmatch.fnmatch(resolved_hostname, pattern)]
+        if not matches:
+            return (False, '')
+        exact = [m for m in matches if not _is_glob(m[0])]
+        _pattern, opts = (exact or matches)[-1]
+        return (True, '') if opts is None else (False, opts)
 
     # ── :edit ────────────────────────────────────────────────────────────────
 
