@@ -160,3 +160,37 @@ class TestBannerViaOtherEntryPoints:
         """A failing open() must stay silent — an error event would recurse."""
         app._cmd_log('/nonexistent-dir-pb/pb.log')
         app.add_event('10.0.0.1', 'host down')   # must not raise
+
+
+class TestBannerCountsRelayedHosts:
+    """A relayed host arrives as a ':remote-ping' command, not a 'host' entry.
+
+    Counting only 'host' reported "2 targets" for a file whose 54 hosts all sit
+    inside a ':with remote-ping' block — the two direct hosts.
+    """
+
+    def _app(self, pb, entries):
+        a = pb.Application(entries, hosts_file='/opt/net/pb.hosts')
+        a._monitoring_started = True
+        return a
+
+    def test_remote_ping_hosts_are_counted(self, pb, tmp_path):
+        app = self._app(pb, [('host', '10.0.0.1'),
+                             ('cmd', ':remote-ping relay 10.1.0.1'),
+                             ('cmd', ':remote-ping relay 10.1.0.2')])
+        log = tmp_path / 'pb.log'
+        app._cmd_log(str(log))
+        app.add_event('x', 'y')
+        assert '3 targets' in banners(log.read_text())[0]
+
+    def test_the_count_matches_the_monitors(self, pb, tmp_path):
+        entries = [('host', '10.0.0.1')] + [
+            ('cmd', f':remote-ping relay 10.1.0.{i}') for i in range(1, 11)]
+        app = self._app(pb, entries)
+        assert app._target_count == len(app.monitors)
+
+    def test_other_commands_are_not_counted(self, pb, tmp_path):
+        app = self._app(pb, [('host', '10.0.0.1'),
+                             ('cmd', ':set dns hostname'),
+                             ('cmd', ':resolv 10.0.0.1 gw')])
+        assert app._target_count == 1

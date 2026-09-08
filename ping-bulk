@@ -5088,8 +5088,13 @@ class Application:
         # first log line can be written while that list is still being filled
         # (a config-file ':log' plus a hosts-file parse warning does it), and a
         # banner that undercounts is worse than one that reports the request.
-        self._target_count = sum(1 for k, *_ in entries
-                                 if k in ('host', 'optional_host'))
+        # A relayed host arrives as a ':remote-ping' command rather than a
+        # 'host' entry, so counting only 'host' reported 2 targets for a file
+        # whose 54 hosts all sit inside a ':with remote-ping' block.
+        self._target_count = sum(
+            1 for k, *rest in entries
+            if k in ('host', 'optional_host')
+            or (k == 'cmd' and rest and rest[0].startswith(':remote-ping ')))
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
         self.probe_defs: dict = {}     # probe name → ProbeDef (':probe')
