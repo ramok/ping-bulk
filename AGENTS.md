@@ -92,6 +92,24 @@ The repository is structured to keep the core application as a single deployable
      enough.
   `:log` with no argument now answers "broken, or just quiet?" — path, lines
   written this session, file size, and the last write error with its time.
+
+  **Sync mode was hiding losses**, reported as "why does sync show fewer X?".
+  Two causes, both fixed: a bucket held the *last* sample written to it, so an
+  `X` vanished under a reply that shared its second (now `_worse_hist_sample`,
+  ranking from `_HIST_RANK`, which `_worst_history_char` also uses so a section
+  header and its rows cannot disagree — resolved on the *value*, since a wide
+  rtt cell holds a number and ranking its text would compare digits, and two
+  replies keep the slower reading); and a loss was stamped when the verdict
+  was reached, not when the probe was sent — `ping -O` reports an unanswered
+  probe one interval late (**measured**: `ping -O -D` to a black hole printed
+  `icmp_seq=1` at t0+1.005, `icmp_seq=2` at t0+2.010) and `_expire_pending`
+  added `late-grace` on top, so the cell landed one to two seconds after its
+  probe, in a second belonging to a later one. `_probe_send_time()` subtracts
+  the interval; a late reply is dated the same way. `history_times` is no longer
+  monotonic as a result — nothing reads it in order (checked: the sync bucket
+  loop, the two deque resizes, and the `:edit` snapshot).  `_record_stale_loss`
+  dates the probe it consumes the same way, so one event cannot land in two
+  different seconds depending on which path noticed it.
 - **Phase 16 (probes, SSH hygiene, expected-silence hosts)**:
   `:probe-source` + `:probe` read arbitrary per-host values over **one
   persistent SSH connection per host** (`ProbeReader` on the shared

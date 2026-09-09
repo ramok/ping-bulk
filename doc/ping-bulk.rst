@@ -296,6 +296,43 @@ Display
     in a cell.  The dense (non-sync) bar is one cell per probe and has no
     empty seconds, so it never shows ``_``.
 
+    **A second holds one cell, and the worse sample wins it.**  Two samples
+    can share a second — a relayed host is stamped when its line reaches
+    ping-bulk, and ``ssh`` delivers in bursts, so one second gets two lines
+    and the next gets none (those are the blanks in a relayed host's sync
+    bar).  The ranking is the one a folded section header uses:
+
+        ``?`` (process error) > ``X`` (lost) > ``x`` (late) > ``.`` (reply)
+        > ``o`` (expected loss) > ``_`` (no ping running) > blank
+
+    So a loss is never overwritten by a reply that happened to land in the
+    same second.  It used to be: the cell was filled last-writer-wins, and
+    the sync bar of a relayed host consequently showed noticeably fewer
+    ``X`` than the dense bar of the same history.  Two replies rank equal,
+    and there the slower one is kept — in the ``rtt`` and ``scaled`` views
+    that is the reading the cell shows.
+
+    **A lost probe is dated when it was sent**, not when it was written off.
+    ``ping -O`` reports an unanswered probe one interval after it went out,
+    ``:set late-grace`` seconds pass on top before the probe is declared
+    lost, and the state loop adds up to another half second — so with the
+    defaults the verdict is some two and a half seconds younger than the
+    probe it describes, and more if *late-grace* is raised.  Sync mode files
+    the ``X`` under the second the probe was sent; the newest two or three
+    seconds of a failing host therefore stay blank until the verdict is in,
+    which is honest — nothing is known about them yet.  A late reply (``x``)
+    is dated the same way, for the same reason.
+
+    For a relayed host the correction is approximate: the ``-O`` line is
+    timestamped when it reaches ping-bulk, so the recovered send time is off
+    by the one-way delay through the jump host — tens of milliseconds, which
+    matters only for a probe sent within that margin of a second boundary.
+
+    Since the verdict for a probe can arrive after the replies of later
+    probes, the *dense* bar shows such an ``X`` in append order — to the left
+    of replies that actually preceded it.  In sync mode the cell is in the
+    right second regardless.
+
 ``p`` / ``P``
     Toggle pause (freeze the display without stopping pings).
 
@@ -900,6 +937,12 @@ Key bindings
     Raising it tolerates slower hosts but delays down-detection by the same
     amount; lowering it detects outages sooner at the cost of drawing very
     slow hosts as down.  Saved by ``:save-config`` when not the default.
+
+    The delay affects when a loss is *known*, not where it is drawn: sync mode
+    dates the ``X`` at the second the probe was sent, so raising this value
+    does not slide the history bar out of step with the other hosts.  It does
+    leave the newest seconds of a failing host blank for longer — nothing is
+    known about them yet.  See ``S`` under **KEYBOARD REFERENCE**.
 
 ``:set multikey-timeout <ms>``
     Set the multi-key timeout in milliseconds (0–2000).

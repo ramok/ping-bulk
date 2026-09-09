@@ -1957,6 +1957,40 @@ def _hist_is_late(val):
     return isinstance(val, float) and val < 0
 
 
+# Worst-first rank of a history cell, so the sync view and a folded section
+# header agree on which of two samples is the one worth seeing.  A digit (the
+# rtt / scaled views) and '>' are replies and rank with '.'.
+_HIST_RANK = {'?': 6, 'X': 5, 'x': 4, '.': 3, 'o': 2, '_': 1, ' ': 0}
+
+
+def _hist_char_rank(ch):
+    """Rank one history glyph.  A digit or '>' is a reply and ranks with '.'."""
+    if ch.isdigit() or ch == '>':
+        ch = '.'
+    return _HIST_RANK.get(ch, _HIST_RANK['.'])
+
+
+def _worse_hist_sample(a, b, no_alarm=False):
+    """Return the worse of two raw history values sharing one time bucket.
+
+    Ranked by the glyph each would draw, so there is exactly one notion of
+    "worse" in the program — see _HIST_RANK.  Resolving on the value rather
+    than on the rendered cell is what makes the rtt and scaled views agree
+    with the success view: those cells hold a number, and ranking their text
+    would compare digits ('19' vs '20' → '9' beats '0').
+
+    Two replies rank equal, and there the slower one is the worse news, so it
+    is the reading that survives.
+    """
+    ra = _HIST_RANK[_history_char(a, 'success', no_alarm)]
+    rb = _HIST_RANK[_history_char(b, 'success', no_alarm)]
+    if ra != rb:
+        return a if ra > rb else b
+    if isinstance(a, float) and isinstance(b, float):
+        return a if _hist_rtt(a) >= _hist_rtt(b) else b
+    return a
+
+
 def _hist_rtt(val):
     """Return the RTT in ms carried by a successful history cell, late or not."""
     return abs(val)
@@ -2258,14 +2292,19 @@ class Monitor(ABC):
         can say "reachable but slower than the probe interval".
         """
         with self.lock:
-            late = seq is not None and self._pending.pop(seq, None) is not None
+            flagged = self._pending.pop(seq, None) if seq is not None else None
+            late = flagged is not None
             self.latency = latency
             self.alive = True
             # Late cells carry -latency: it keeps the history union at
             # float|None|'ERR' so every existing `is None` / == 'ERR' check
             # still holds, while preserving the RTT for the rtt/scaled views.
             self.history.append(-latency if late else latency)
-            self.history_times.append(ts)
+            # A late reply arrived more than an interval after its probe went
+            # out, so stamping it on arrival would file it under a later
+            # probe's second in the sync view.  Use the probe's own send time.
+            self.history_times.append(
+                self._probe_send_time(flagged) if late else ts)
             self.rx_count += 1
             self._record_latency(latency)
         self.ping_count += 1
@@ -2279,10 +2318,34 @@ class Monitor(ABC):
         silently stop reporting losses.
         """
         if seq is None:
-            self._record_loss(ts)
+            self._record_loss(self._probe_send_time(ts))
             return
         with self.lock:
+            # The observation time, not the send time: the grace period in
+            # _expire_pending is counted from when we heard about the probe.
             self._pending[seq] = ts
+
+    # ping prints 'no answer yet for icmp_seq=N' as it sends probe N+1, one
+    # probe interval after N went out.  Measured with 'ping -O -D' against a
+    # black hole: seq=1 at t0+1.005, seq=2 at t0+2.010, seq=3 at t0+3.011 —
+    # exactly one second apart, and ping-bulk never passes '-i', so this is
+    # ping's 1 s default.
+    _PING_PROBE_INTERVAL = 1.0
+
+    @classmethod
+    def _probe_send_time(cls, observed_ts):
+        """When the probe behind a '-O' line at *observed_ts* actually went out.
+
+        Both loss paths used to stamp history with the moment the *verdict* was
+        reached: the '-O' line is printed one interval after the probe, and
+        _expire_pending then waits 'late-grace' on top before writing the probe
+        off.  The dense strip does not care — its cells are in probe order — but
+        the sync strip buckets by wall-clock second, so the 'X' landed one to two
+        seconds late, in a second belonging to a later probe, and (bucket
+        collisions being resolved last-wins at the time) usually vanished under
+        that probe's reply.
+        """
+        return observed_ts - cls._PING_PROBE_INTERVAL
 
     def _record_loss(self, ts):
         """Record one genuinely lost probe."""
@@ -2301,24 +2364,34 @@ class Monitor(ABC):
         consume it — otherwise _expire_pending would count the same probe again
         and inflate both xx_count and Loss%.
         """
+        sent = None
         with self.lock:
             if self._pending:
                 oldest = min(self._pending, key=self._pending.get)
-                del self._pending[oldest]
-        self._record_loss(now)
+                sent = self._probe_send_time(self._pending.pop(oldest))
+        # When a real probe is being consumed it is dated like any other, so
+        # the same event does not land in a different second depending on
+        # which code path noticed it.  With nothing outstanding there is no
+        # probe to date and the stale window itself is the news.
+        self._record_loss(now if sent is None else sent)
 
     def _expire_pending(self, now, grace):
         """Write off outstanding probes unanswered for longer than *grace*.
 
-        Called from the 0.5 s state loop.  This is the only place an ICMP probe
-        becomes a loss, so `alive` goes False once per probe at most.
+        Called from the 0.5 s state loop.  Together with _record_stale_loss and
+        the seq-less path of _record_no_answer this is where a probe becomes a
+        loss, and each of them consumes the probe, so `alive` goes False once
+        per probe at most.
         """
         with self.lock:
-            stale = [s for s, ts in self._pending.items() if now - ts >= grace]
-            for s in stale:
+            stale = [(s, ts) for s, ts in self._pending.items()
+                     if now - ts >= grace]
+            for s, _ts in stale:
                 del self._pending[s]
-        for _ in stale:
-            self._record_loss(now)
+        for _s, ts in stale:
+            # 'ts', not 'now': the probe is dated when it was sent, not when
+            # this loop got round to declaring it lost.
+            self._record_loss(self._probe_send_time(ts))
 
     @property
     def lat_avg(self):
@@ -2410,25 +2483,40 @@ class Monitor(ABC):
             # Each ping belongs to the second it arrived in: int(ts) i.e. floor(ts).
             # This ensures all pings within the same second land in the same bucket
             # regardless of their sub-second offset, preventing per-host jitter.
+            #
+            # A second holds one cell but can hold two samples — a relayed host
+            # is stamped when its line reaches us, and ssh delivers in bursts.
+            # The worse sample wins (_worse_hist_sample, the ranking a folded
+            # section header also uses), because the alternative is a monitor
+            # that quietly drops failures: last-writer-wins hid an 'X' under
+            # the next reply that happened to share its second.  The pick is
+            # made on the value and rendered once, so every view shows the
+            # same sample.
+            picked: dict = {}
+            for ts, val in zip(times_list, history_list):
+                bucket = t_end - int(ts)
+                if 0 <= bucket < length:
+                    if bucket in picked:
+                        val = _worse_hist_sample(picked[bucket], val,
+                                                 self.no_alarm)
+                    picked[bucket] = val
             if cell_width > 1:
                 result = [' ' * cell_width] * length
             else:
                 result = [' '] * length
-            for ts, val in zip(times_list, history_list):
-                bucket = t_end - int(ts)
-                if 0 <= bucket < length:
-                    if cell_width > 1:
-                        num_w = cell_width - 1
-                        if val is None:
-                            cell = ("o" if self.no_alarm else "X") * num_w + " "
-                        elif val == "ERR":
-                            cell = "?" * num_w + " "
-                        else:
-                            capped = min(int(round(_hist_rtt(val))), 10 ** num_w - 1)
-                            cell = f"{capped:>{num_w}} "
+            for bucket, val in picked.items():
+                if cell_width > 1:
+                    num_w = cell_width - 1
+                    if val is None:
+                        cell = ("o" if self.no_alarm else "X") * num_w + " "
+                    elif val == "ERR":
+                        cell = "?" * num_w + " "
                     else:
-                        cell = _history_char(val, mode, self.no_alarm)
-                    result[bucket] = cell
+                        capped = min(int(round(_hist_rtt(val))), 10 ** num_w - 1)
+                        cell = f"{capped:>{num_w}} "
+                else:
+                    cell = _history_char(val, mode, self.no_alarm)
+                result[bucket] = cell
             self._fill_connect_gaps(result, t_end, length, cell_width)
             return "".join(result)  # result[0]=newest, result[length-1]=oldest (no reversal)
 
@@ -7877,20 +7965,12 @@ class Application:
         is the better news, but a section where *every* host is expected to be
         silent now folds, and a blank strip there would read as "nothing was
         measured" instead of "measured, and quiet as intended".
+
+        _HIST_RANK is the same ranking the sync view uses to resolve two samples
+        landing in one second, so a section header and the rows under it cannot
+        disagree about which sample mattered.
         """
-        if '?' in chars:
-            return '?'
-        if 'X' in chars:
-            return 'X'
-        if 'x' in chars:
-            return 'x'
-        if '.' in chars:
-            return '.'
-        if 'o' in chars:
-            return 'o'
-        if '_' in chars:
-            return '_'
-        return ' '
+        return max(chars, key=_hist_char_rank, default=' ')
 
     def _section_summary(self, monitors, length, offset, sync=False, end_time=None,
                          history_monitors=None):
