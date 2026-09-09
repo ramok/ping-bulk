@@ -75,12 +75,12 @@ class TestThreadsAreNamed:
             thread.join(timeout=5)
         assert thread.name == 'ping:relay→10.9.9.9'
 
-    def test_no_thread_is_left_unnamed(self, app_path):
-        """Every Thread() in the source must say what it is.
+    def test_every_thread_goes_through_the_one_helper(self, app_path):
+        """There must be exactly one Thread() in the file, and it names itself.
 
-        Paren-counted rather than matched with a regex: a nested call in the
-        arguments ('args=(g(h),)') defeats any fixed nesting depth, and the
-        failure would be a silent pass on the very thing this guards.
+        Stronger than checking each site for 'name=': a thread started any
+        other way would be anonymous both in a death report and in 'top -H',
+        and _spawn is what keeps those two in step.
         """
         src = open(app_path, encoding='utf-8').read()
         calls = []
@@ -99,9 +99,118 @@ class TestThreadsAreNamed:
                 i += 1
             calls.append(src[at:i + 1])
             at = src.find(needle, i)
-        assert len(calls) >= 5, f'expected every thread site, found {len(calls)}'
-        unnamed = [c for c in calls if 'name=' not in c]
-        assert not unnamed, f'unnamed threads: {unnamed}'
+        assert len(calls) == 1, f'threads started outside _spawn: {calls}'
+        assert 'name=name' in calls[0], calls[0]
+
+
+class TestOsTaskName:
+    """What the kernel is told: /proc/<pid>/task/<tid>/comm, 15 bytes.
+
+    That is what 'ps -o comm', 'ps -T', 'top', 'htop' and a bare
+    'pgrep ping-bulk' read — all of which said 'python3' before.
+    """
+
+    def test_a_short_name_passes_through(self, pb):
+        assert pb._os_task_name('state-loop') == b'state-loop'
+
+    def test_the_host_is_trimmed_from_the_front(self, pb):
+        """The tail identifies; the head is shared by every relayed host."""
+        got = pb._os_task_name('ping:ses-wg-video→10.123.254.161')
+        assert got == b'ping:23.254.161'
+        assert got.startswith(b'ping:')
+        assert b'254.161' in got, 'the identifying part must survive'
+
+    def test_it_never_exceeds_the_kernel_limit(self, pb):
+        for name in ['ping:' + 'x' * 200, 'x' * 200,
+                     'ping:ses-wg-video→10.123.254.161', 'clock:10.0.0.1']:
+            assert len(pb._os_task_name(name)) <= 15, name
+
+    def test_a_name_with_no_tag_is_cut_from_the_right(self, pb):
+        assert pb._os_task_name('averyverylongname') == b'averyverylongna'
+
+    def test_a_tag_longer_than_the_limit_does_not_loop(self, pb):
+        assert len(pb._os_task_name('averyverylongtag:host')) <= 15
+
+    def test_a_multibyte_character_is_not_split(self, pb):
+        """A half-written '→' would put a stray byte in ps output."""
+        for i in range(1, 30):
+            got = pb._os_task_name('dns:' + '→' * i)
+            got.decode('utf-8')          # must not raise
+
+    def test_setting_it_is_silent_where_prctl_is_absent(self, pb):
+        with patch('ctypes.CDLL', side_effect=OSError('no libc')):
+            pb._set_os_task_name('ping-bulk')      # must not raise
+
+
+class TestSpawnNamesBothWays:
+
+    def test_the_python_name_is_the_full_one(self, pb):
+        """It is what a thread-death report prints, so nothing is trimmed."""
+        seen = []
+        t = pb._spawn(lambda: seen.append(threading.current_thread().name),
+                      'ping:ses-wg-video→10.123.254.161')
+        t.join(timeout=5)
+        assert seen == ['ping:ses-wg-video→10.123.254.161']
+
+    @pytest.mark.skipif(not __import__('os').path.exists('/proc/self/comm'),
+                        reason='needs Linux /proc')
+    def test_the_kernel_name_is_the_trimmed_one(self, pb):
+        import os
+        seen = []
+
+        def read_own_comm():
+            tid = threading.get_native_id()
+            with open(f'/proc/self/task/{tid}/comm') as f:
+                seen.append(f.read().strip())
+
+        t = pb._spawn(read_own_comm, 'ping:ses-wg-video→10.123.254.161')
+        t.join(timeout=5)
+        assert seen == ['ping:23.254.161'], seen
+
+    def test_arguments_are_passed_through(self, pb):
+        got = []
+        t = pb._spawn(lambda a, b=None: got.append((a, b)), 'x:1',
+                      args=('pos',), kwargs={'b': 'kw'})
+        t.join(timeout=5)
+        assert got == [('pos', 'kw')]
+
+    def test_the_thread_is_a_daemon(self, pb):
+        """Or quitting would hang on 59 of them."""
+        t = pb._spawn(lambda: None, 'x:1')
+        assert t.daemon
+        t.join(timeout=5)
+
+
+class TestTheProcessNamesItself:
+    """'ps -o comm', 'top' and 'pgrep ping-bulk' said 'python3'.
+
+    Driven through a real process, because the thing being tested is what the
+    kernel recorded — no unit test can see that.
+    """
+
+    def test_ps_and_pgrep_see_ping_bulk(self, app_path, check_integration_deps,
+                                        tmp_path):
+        import subprocess
+        from tmux_helper import TmuxSession
+        hosts = tmp_path / 'named.hosts'
+        hosts.write_text('127.0.0.1\n')
+        sess = TmuxSession('ping-bulk-test-procname', width=100, height=12)
+        try:
+            sess.send_literal(f'python3 {app_path} -f {hosts}')
+            sess.send_keys('Enter')
+            sess.wait_for('DNS:', timeout=10)
+            pids = subprocess.run(['pgrep', '-f', str(hosts)],
+                                  capture_output=True, text=True).stdout.split()
+            assert pids, 'the app should be running'
+            pid = pids[0]
+            comm = subprocess.run(['ps', '-o', 'comm=', '-p', pid],
+                                  capture_output=True, text=True).stdout.strip()
+            assert comm == 'ping-bulk', f'ps -o comm says {comm!r}'
+            named = subprocess.run(['pgrep', '-x', 'ping-bulk'],
+                                   capture_output=True, text=True).stdout.split()
+            assert pid in named, "pgrep -x ping-bulk should find it"
+        finally:
+            sess.kill()
 
 
 # ---------------------------------------------------------------------------

@@ -159,6 +159,21 @@ The repository is structured to keep the core application as a single deployable
     Measured both ways. A run whose reader failed is not a run that produced
     nothing; it is a run we did not finish reading, so `reader_failed` skips
     the classification while the backoff still grows.
+
+  **The process names itself, and `ps aux` still cannot be fixed.** Every
+  thread starts through `_spawn(target, name)`, which sets the Python thread
+  name (full, for a death report) *and* the kernel's `comm` via
+  `prctl(PR_SET_NAME)` (`_os_task_name`, 15 bytes, trimmed from the front of
+  the host so `ping:23.254.161` survives instead of `ping:ses-wg-vid`).
+  `main()` names the process `ping-bulk`, so `ps -o comm`, `ps -T`, `top`,
+  `htop` and a bare `pgrep -x ping-bulk` finally say what it is. **The
+  `COMMAND` column of `ps aux` cannot be changed from inside a Python 3
+  process** — measured: `Py_GetArgcArgv` returns the interpreter's own
+  `wchar_t` copy on the heap, nowhere near the stack region the kernel
+  records, so the classic argv-overwrite trick has nothing to write to. The
+  shebang puts `python3` in argv[0] before any of our code runs; only the
+  caller can change it (`exec -a ping-bulk python3 …`). Do not add a
+  `setproctitle`-style stack scan for this.
 - **Phase 16 (probes, SSH hygiene, expected-silence hosts)**:
   `:probe-source` + `:probe` read arbitrary per-host values over **one
   persistent SSH connection per host** (`ProbeReader` on the shared

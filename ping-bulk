@@ -67,6 +67,69 @@ def _derive_prog_name(argv=None):
 # config paths, syslog identity, and error messages.
 _PROG_NAME = _derive_prog_name()
 
+# Linux caps a task's name at 16 bytes including the terminator.
+_COMM_MAX = 15
+_PR_SET_NAME = 15          # prctl(2)
+
+
+def _set_os_task_name(name):
+    """Name the *calling thread* as the kernel sees it, best effort.
+
+    This is /proc/<pid>/task/<tid>/comm — what 'ps -o comm', 'ps -T', 'top',
+    'htop' and a bare 'pgrep ping-bulk' read.  Without it every one of them
+    says 'python3'.
+
+    It is NOT the COMMAND column of 'ps aux', which is the argv the kernel
+    recorded at execve and cannot be rewritten from inside a Python 3 process:
+    Py_GetArgcArgv hands back the wchar_t copy the interpreter made for itself
+    (measured: a heap address, nowhere near the stack region holding the real
+    cmdline), so writing to it changes nothing a tool would read.  A shebang
+    puts the interpreter in argv[0] before any of our code runs; only the
+    caller can change that, with 'exec -a ping-bulk python3 …'.
+
+    Silent on failure: a name is a convenience, and this has to be a no-op on
+    anything without prctl.
+    """
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.so.6')
+        libc.prctl(_PR_SET_NAME,
+                   ctypes.c_char_p(_os_task_name(name)), 0, 0, 0)
+    except Exception:
+        pass
+
+
+def _os_task_name(name):
+    """Fit *name* into the kernel's 15 bytes, keeping what identifies it.
+
+    'ping:ses-wg-video→10.123.254.161' cut from the right is
+    'ping:ses-wg-vid', which every relayed host behind one jump host shares.
+    The tail is the part that differs, so the host is trimmed from the front
+    and the tag kept: 'ping:23.254.161'.  The full name stays on the Python
+    thread object, which is what a death report prints.
+    """
+    tag, sep, rest = name.partition(':')
+    if sep and len(tag) + 1 < _COMM_MAX:
+        room = _COMM_MAX - len(tag) - 1
+        while len(rest.encode('utf-8', 'replace')) > room:
+            rest = rest[1:]
+        name = f'{tag}:{rest}'
+    return name.encode('utf-8', 'replace')[:_COMM_MAX]
+
+
+def _spawn(target, name, args=(), kwargs=None):
+    """Start a daemon thread that names itself to Python and to the kernel.
+
+    One helper for both, so a thread cannot end up identified in a death
+    report but anonymous in 'top -H', or the other way round.
+    """
+    def _run():
+        _set_os_task_name(name)
+        target(*args, **(kwargs or {}))
+
+    thread = threading.Thread(target=_run, name=name, daemon=True)
+    thread.start()
+    return thread
+
 # ── Event log levels ─────────────────────────────────────────────────────────
 
 LEVEL_QUIET  = 0   # host status changes only (up / down / recover)
@@ -6231,13 +6294,11 @@ class Application:
         has to identify — and 'Thread-42 (ping)' identifies nothing when there
         are fifty-nine of them.
         """
-        thread = threading.Thread(target=monitor.ping, daemon=True,
-                                  name=f'ping:{monitor.host}')
         # Started before it is published: a thread that has been created but
         # not yet started reports is_alive() False, and the state loop —
         # already running when ':ping' or an ':edit' reload adds a host —
         # would read that as a loop to restart.
-        thread.start()
+        thread = _spawn(monitor.ping, f'ping:{monitor.host}')
         monitor._thread = thread
         self.threads.append(thread)
         return thread
@@ -6297,9 +6358,7 @@ class Application:
         self._start_probe_readers()
 
         # Check for state changes
-        checker = threading.Thread(target=self.check_state_changes, daemon=True,
-                                   name='state-loop')
-        checker.start()
+        _spawn(self.check_state_changes, 'state-loop')
 
     def _start_probe_readers(self):
         """Open one probe connection per host, when probes are configured.
@@ -6317,10 +6376,8 @@ class Application:
                                  self.probe_defs, self.probe_retain,
                                  kiosk_mode=self.kiosk_mode)
             self.probe_readers.append(reader)
-            t = threading.Thread(target=reader.run, daemon=True,
-                                 name=f'probe:{monitor.host}')
-            t.start()
-            self.threads.append(t)
+            self.threads.append(
+                _spawn(reader.run, f'probe:{monitor.host}'))
         self.add_event("probe",
             f"probe: {len(self.probe_readers)} reader(s) started, "
             f"every {self.probe_interval:g}s")
@@ -6614,9 +6671,8 @@ class Application:
                 and not monitor._clock_probing
                 and now >= monitor._clock_next_ts):
             monitor._clock_probing = True
-            threading.Thread(target=self._run_clock_probe,
-                             args=(monitor,), daemon=True,
-                             name=f'clock:{monitor.host}').start()
+            _spawn(self._run_clock_probe, f'clock:{monitor.host}',
+                   args=(monitor,))
 
     def cycle_dns(self, direction=1):
         """Cycle through DNS display modes. direction=1 forward, -1 backward."""
@@ -6627,11 +6683,10 @@ class Application:
         if DNS_MODES[self.dns_mode] in ('hostname', 'ip', 'name+ip', 'ip+name'):
             for monitor in self.monitors:
                 if monitor.resolved_ip is None:
-                    threading.Thread(
-                        target=monitor.resolve_dns,
-                        kwargs={'on_resolved': self._invalidate_name_col_cache},
-                        daemon=True, name=f'dns:{monitor.host}',
-                    ).start()
+                    _spawn(monitor.resolve_dns,
+                           f'dns:{monitor.host}',
+                           kwargs={'on_resolved':
+                                   self._invalidate_name_col_cache})
         if self._filter_query:
             self._update_filter_visible()
 
@@ -11525,11 +11580,10 @@ class Application:
                 if DNS_MODES[self.dns_mode] in ('hostname', 'ip', 'name+ip', 'ip+name'):
                     for monitor in self.monitors:
                         if monitor.resolved_ip is None:
-                            threading.Thread(
-                                target=monitor.resolve_dns,
-                                kwargs={'on_resolved': self._invalidate_name_col_cache},
-                                daemon=True, name=f'dns:{monitor.host}',
-                            ).start()
+                            _spawn(monitor.resolve_dns,
+                                   f'dns:{monitor.host}',
+                                   kwargs={'on_resolved':
+                                           self._invalidate_name_col_cache})
                 if self._filter_query:
                     self._update_filter_visible()
             else:
@@ -13838,6 +13892,9 @@ def _build_entries(args):
 
 
 def main(stdscr, args):
+    # So 'ps -o comm', 'top', 'htop' and 'pgrep ping-bulk' say what this is
+    # instead of 'python3'.  See _set_os_task_name for what it cannot fix.
+    _set_os_task_name(_PROG_NAME)
     try:
         entries = _build_entries(args)
     except OSError as e:
