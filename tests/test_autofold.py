@@ -331,3 +331,199 @@ class TestFoldHealthyUnhealthy:
         assert not sections['Up'].folded    # all alive → not folded
         assert sections['Down'].folded      # has down host → folded
         assert sections['Mixed'].folded     # has down host → folded
+
+
+# ===========================================================================
+# Unit tests — expected-down hosts (':no-alarm' / '~')
+# ===========================================================================
+
+class TestExpectedDownDoesNotHoldASectionOpen:
+    """A ':no-alarm' host that is down is not news, so it must not block a fold.
+
+    A section holding a normally-off power switch would otherwise sit unfolded
+    for good — on a kiosk console that is exactly the row budget autofold was
+    added to reclaim.
+    """
+
+    def _setup(self, pb, tmp_path, hosts):
+        hf = write_hosts(tmp_path, "## Services\n" + hosts)
+        app = _build_app(pb, hf)
+        app.autofold = True
+        app.autofold_delay = 5.0
+        section = next(e for e in app.entries if isinstance(e, pb.SectionLabel))
+        monitors = [e for e in app.entries if isinstance(e, pb.Monitor)]
+        return app, section, monitors
+
+    def _elapse(self, app, section):
+        """Run the countdown to completion: tick, wind back, tick again."""
+        app._autofold_tick()
+        app._autofold_ts[id(section)] = time.time() - 10.0
+        app._autofold_tick()
+
+    def test_mixed_up_and_expected_down_folds(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path, "1.1.1.1\n~2.2.2.2\n")
+        monitors[0].alive = True
+        monitors[1].alive = False       # marked — expected to be silent
+        assert monitors[1].no_alarm, "the '~' prefix should have marked it"
+        section.folded = False
+        self._elapse(app, section)
+        assert section.folded
+
+    def test_all_expected_down_folds(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path, "~1.1.1.1\n~2.2.2.2\n")
+        for m in monitors:
+            m.alive = False
+        section.folded = False
+        self._elapse(app, section)
+        assert section.folded
+
+    def test_an_expected_down_host_does_not_unfold(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path, "1.1.1.1\n~2.2.2.2\n")
+        monitors[0].alive = True
+        monitors[1].alive = False
+        section.folded = True
+        app._autofold_tick()
+        assert section.folded
+
+    def test_an_unmarked_down_host_still_unfolds(self, pb, tmp_path):
+        """The exemption must not leak to its neighbours."""
+        app, section, monitors = self._setup(pb, tmp_path, "1.1.1.1\n~2.2.2.2\n")
+        monitors[0].alive = False       # not marked — real news
+        monitors[1].alive = False
+        section.folded = True
+        app._autofold_tick()
+        assert not section.folded
+
+    def test_a_process_error_is_never_exempt(self, pb, tmp_path):
+        """':no-alarm' means 'a lost reply is expected', not 'a broken host is'.
+
+        A mistyped address fails to resolve; folding that away silently would
+        hide the one thing the user needs to see.
+        """
+        app, section, monitors = self._setup(pb, tmp_path, "1.1.1.1\n~2.2.2.2\n")
+        monitors[0].alive = True
+        monitors[1].alive = False
+        monitors[1].error = 'Name or service not known'
+        section.folded = True
+        app._autofold_tick()
+        assert not section.folded
+
+    def test_unmarking_a_down_host_unfolds_immediately(self, pb, tmp_path):
+        """'o' takes the marker off — the section must reopen on the next tick."""
+        app, section, monitors = self._setup(pb, tmp_path, "1.1.1.1\n~2.2.2.2\n")
+        monitors[0].alive = True
+        monitors[1].alive = False
+        section.folded = False
+        self._elapse(app, section)
+        assert section.folded, "precondition: marked, so it folded"
+        app.highlighted_index = app.entries.index(monitors[1])
+        app._cmd_no_alarm('--toggle')
+        assert monitors[1].no_alarm is False
+        app._autofold_tick()
+        assert not section.folded
+
+    def test_an_initialising_marked_host_changes_nothing(self, pb, tmp_path):
+        app, section, monitors = self._setup(pb, tmp_path, "~1.1.1.1\n~2.2.2.2\n")
+        for m in monitors:
+            m.alive = None
+        section.folded = True
+        app._autofold_tick()
+        assert section.folded
+        assert id(section) not in app._autofold_ts
+
+    def test_a_glob_rule_reaches_the_check(self, pb, tmp_path):
+        """The rule form users actually write, not just the '~' prefix."""
+        hf = write_hosts(tmp_path, ":no-alarm *-switch\n"
+                                   "## Services\n"
+                                   "1.1.1.1 ## router\n"
+                                   "2.2.2.2 ## rack-switch\n")
+        app = _build_app(pb, hf)
+        app.autofold = True
+        app.autofold_delay = 5.0
+        section = next(e for e in app.entries if isinstance(e, pb.SectionLabel))
+        monitors = [e for e in app.entries if isinstance(e, pb.Monitor)]
+        monitors[0].alive = True
+        monitors[1].alive = False
+        assert monitors[1].no_alarm
+        section.folded = False
+        self._elapse(app, section)
+        assert section.folded
+
+
+class TestAutofoldLockLabel:
+    """The '(autofold lock)' label and the tick must agree.
+
+    If they disagree the user folds a section, autofold reopens it, and the
+    header carries no explanation for why.
+    """
+
+    def _setup(self, pb, tmp_path, hosts):
+        hf = write_hosts(tmp_path, "## Services\n" + hosts)
+        app = _build_app(pb, hf)
+        app.autofold = True
+        section_idx = next(i for i, e in enumerate(app.entries)
+                           if isinstance(e, pb.SectionLabel))
+        monitors = [e for e in app.entries if isinstance(e, pb.Monitor)]
+        return app, section_idx, monitors
+
+    def test_not_locked_by_an_expected_down_host(self, pb, tmp_path):
+        app, idx, monitors = self._setup(pb, tmp_path, "1.1.1.1\n~2.2.2.2\n")
+        monitors[0].alive = True
+        monitors[1].alive = False
+        assert app._section_autofold_locked(idx) is False
+
+    def test_locked_by_an_unmarked_down_host(self, pb, tmp_path):
+        app, idx, monitors = self._setup(pb, tmp_path, "1.1.1.1\n~2.2.2.2\n")
+        monitors[0].alive = False
+        monitors[1].alive = False
+        assert app._section_autofold_locked(idx) is True
+
+    def test_locked_by_a_marked_host_in_error(self, pb, tmp_path):
+        app, idx, monitors = self._setup(pb, tmp_path, "1.1.1.1\n~2.2.2.2\n")
+        monitors[0].alive = True
+        monitors[1].alive = False
+        monitors[1].error = 'connect failed'
+        assert app._section_autofold_locked(idx) is True
+
+
+class TestFoldHealthyAndExpectedDown:
+    """z[ / z] ask the same question autofold does, so they answer it alike.
+
+    A section holding a normally-off power switch used to refuse to fold under
+    z[ and fold under z] — the exact inversion of what the marker means.
+    """
+
+    def _app(self, pb, tmp_path):
+        hf = write_hosts(tmp_path,
+                         "## Quiet\n1.1.1.1\n~2.2.2.2\n"
+                         "## Broken\n3.3.3.3\n~4.4.4.4\n")
+        app = _build_app(pb, hf)
+        mons = {m.host: m for m in app.monitors}
+        mons['1.1.1.1'].alive = True
+        mons['2.2.2.2'].alive = False    # marked — expected
+        mons['3.3.3.3'].alive = False    # unmarked — real
+        mons['4.4.4.4'].alive = False
+        return app, mons
+
+    def _sections(self, app, pb):
+        return {e.title: e for e in app.entries if isinstance(e, pb.SectionLabel)}
+
+    def test_close_healthy_folds_the_quiet_section(self, pb, tmp_path):
+        app, _ = self._app(pb, tmp_path)
+        app._fold_healthy()
+        sections = self._sections(app, pb)
+        assert sections['Quiet'].folded
+        assert not sections['Broken'].folded
+
+    def test_close_unhealthy_leaves_the_quiet_section(self, pb, tmp_path):
+        app, _ = self._app(pb, tmp_path)
+        app._fold_unhealthy()
+        sections = self._sections(app, pb)
+        assert not sections['Quiet'].folded
+        assert sections['Broken'].folded
+
+    def test_a_process_error_makes_a_marked_section_unhealthy(self, pb, tmp_path):
+        app, mons = self._app(pb, tmp_path)
+        mons['2.2.2.2'].error = 'Name or service not known'
+        app._fold_healthy()
+        assert not self._sections(app, pb)['Quiet'].folded

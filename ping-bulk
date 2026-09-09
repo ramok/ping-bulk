@@ -331,7 +331,8 @@ SET_PARAMS = [
              'event log verbosity (quiet=host status only, normal=+errors/warnings, info=+cmd/config, debug=all, trace=+exec)',
              getter=lambda app: app._LOGLEVEL_LABELS.get(app.loglevel, 'normal')),
     SetParam('autofold', '_cmd_autofold', ['on', 'off'],
-             'auto fold sections when all hosts are up, unfold when any go down (default off)',
+             'auto fold sections with nothing to see, unfold when a host goes '
+             'unexpectedly down (:no-alarm counts as up; default off)',
              getter=lambda app: 'on' if app.autofold else 'off'),
     SetParam('autofold-delay', '_cmd_autofold_delay',
              ['5', '15', '30', '60', '120'],
@@ -786,8 +787,8 @@ _HELP_FOLDING = [
     "  [\\]/zR]          (:fold open-all)          open (unfold) ALL sections",
     "  [\\[/zM]          (:fold close-all)         close (fold) ALL sections",
     "  [zx]             (:fold close-other)       fold all except cursor section (or regex pattern)",
-    "  [z\\[]            (:fold close-healthy)     fold sections where all hosts are up",
-    "  [z\\]]            (:fold close-unhealthy)   fold sections where any host is down",
+    "  [z\\[]            (:fold close-healthy)     fold sections with nothing to see  (:no-alarm = up)",
+    "  [z\\]]            (:fold close-unhealthy)   fold sections where a host is unexpectedly down",
     "",
     "  Section folding  (highlight a section header, then press)",
     "  [zA]            (:fold toggle-recursive)  toggle fold recursively",
@@ -860,8 +861,8 @@ _HELP_CMDS_INTERACTIVE = [
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
     "  :fold close-other \\[pat]   fold all except sections matching regex pattern  (zx)",
-    "  :fold close-healthy       fold sections where all hosts are currently up    (z[)",
-    "  :fold close-unhealthy     fold sections where any host is currently down    (z])",
+    "  :fold close-healthy       fold sections with nothing to see  (:no-alarm = up)   (z[)",
+    "  :fold close-unhealthy     fold sections where a host is unexpectedly down      (z])",
     "  :save-config              save current settings to config file",
     "  :help \\[tab-number]       open help overlay; tab 1-6 or name  (:man alias)",
     "  :q  :quit                 quit",
@@ -887,6 +888,7 @@ _HELP_CMDS_HOSTSFILE = [
     "                            :remote-ping user@hostname resolves hostname, preserves username",
     "  :no-alarm <host|glob>     a lost reply is expected here: grey 'o' not red 'X',",
     "                            counted apart in a section badge, events at info level",
+    "                            and no longer holds its section open under autofold",
     "                            ('~host' on a host line marks that host; :with no-alarm too)",
     "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
     "                            an exact host name beats any glob, whatever the order;",
@@ -6484,7 +6486,11 @@ class Application:
         self._fold_state_changed()
 
     def _fold_healthy(self):
-        """Fold every section whose direct-child active monitors are all alive.
+        """Fold every section with nothing worth seeing in it.
+
+        "Healthy" is the same question autofold asks, so it gets the same
+        answer: a ':no-alarm' host that is down is expected to be, and does
+        not keep its section open (see _counts_as_down).
 
         Sections with no active (non-paused) monitors with known status are
         skipped.  Sections that already folded are left as-is.
@@ -6498,7 +6504,7 @@ class Application:
             known = [m for m in active if m.alive is not None]
             if not known:
                 continue
-            if all(m.alive is True for m in known):
+            if not any(self._counts_as_down(m) for m in known):
                 if not entry.folded:
                     entry.folded = True
                     changed = True
@@ -6506,7 +6512,10 @@ class Application:
             self._fold_state_changed()
 
     def _fold_unhealthy(self):
-        """Fold every section that has at least one direct-child active monitor down.
+        """Fold every section with something worth seeing in it.
+
+        Counterpart of _fold_healthy, and it draws the line in the same place:
+        an expected-down host is not something worth seeing.
 
         Sections with no active (non-paused) monitors with known status are
         skipped.  Sections that are already folded are left as-is.
@@ -6520,7 +6529,7 @@ class Application:
             known = [m for m in active if m.alive is not None]
             if not known:
                 continue
-            if any(m.alive is False for m in known):
+            if any(self._counts_as_down(m) for m in known):
                 if not entry.folded:
                     entry.folded = True
                     changed = True
@@ -7638,12 +7647,30 @@ class Application:
                     hidden.append(entry)
         return hidden
 
+    @staticmethod
+    def _counts_as_down(monitor):
+        """Return True when *monitor* is a reason to keep its section open.
+
+        A ':no-alarm' host is *expected* to lose replies, so being down is not
+        news about it: a section holding only a normally-off power switch folds
+        like any other healthy one, which is the noise the marker exists to
+        remove.  A monitor carrying a process-level error is never exempt — a
+        mistyped hostname must not fold itself away silently.
+
+        Callers pass monitors whose status is known; 'alive is None' (still
+        connecting) is not a reason to keep anything open.
+        """
+        if monitor.alive is not False:
+            return False
+        return not monitor.no_alarm or monitor.error is not None
+
     def _section_autofold_locked(self, section_idx):
         """Return True if this section is locked open by autofold.
 
         A section is locked when autofold is on, it is not exempt (no_autofold),
-        and at least one of its *direct* monitors is currently down.  In this
-        state autofold will immediately reopen the section if the user folds it.
+        and at least one of its *direct* monitors is down for a reason worth
+        seeing (see _counts_as_down).  In this state autofold will immediately
+        reopen the section if the user folds it.
         """
         if not self.autofold:
             return False
@@ -7655,7 +7682,7 @@ class Application:
         if not active:
             return False
         known = [m for m in active if m.alive is not None]
-        return bool(known) and any(m.alive is False for m in known)
+        return bool(known) and any(self._counts_as_down(m) for m in known)
 
     def _autofold_tick(self):
         """Check all sections for autofold/autounfold conditions."""
@@ -7681,8 +7708,9 @@ class Application:
             known = [m for m in active if m.alive is not None]
             if not known:
                 continue
-            any_down = any(m.alive is False for m in known)
-            all_alive = all(m.alive is True for m in known)
+            # 'known' holds no None, so "nothing to see" is exactly the
+            # complement of "something to see".
+            any_down = any(self._counts_as_down(m) for m in known)
             sid = id(entry)
             if any_down:
                 # Unfold immediately
@@ -7690,26 +7718,28 @@ class Application:
                 if entry.folded:
                     entry.folded = False
                     self._fold_state_changed()
-            elif all_alive:
-                if not entry.folded:
-                    # Start or maintain countdown
-                    if sid not in self._autofold_ts:
-                        self._autofold_ts[sid] = now
-                    elif now - self._autofold_ts[sid] >= self.autofold_delay:
-                        entry.folded = True
-                        self._autofold_ts.pop(sid, None)
-                        self._fold_state_changed()
-            else:
-                # Mixed alive/None — reset countdown
-                self._autofold_ts.pop(sid, None)
+            elif not entry.folded:
+                # Start or maintain countdown
+                if sid not in self._autofold_ts:
+                    self._autofold_ts[sid] = now
+                elif now - self._autofold_ts[sid] >= self.autofold_delay:
+                    entry.folded = True
+                    self._autofold_ts.pop(sid, None)
+                    self._fold_state_changed()
 
     @staticmethod
     def _worst_history_char(chars):
         """Return the worst character from a list of per-monitor history chars.
 
         Priority (worst first): '?' (process error) > 'X' (lost) > 'x' (late
-        reply) > '.' (ok) > ' ' (no data).  A late reply ranks above a clean one
-        because it is worth surfacing in a folded section, but below a real loss.
+        reply) > '.' (ok) > 'o' (lost, but expected) > '_' (no ping running) >
+        ' ' (no data).  A late reply ranks above a clean one because it is worth
+        surfacing in a folded section, but below a real loss.
+
+        'o' and '_' rank below '.' rather than being dropped: one host answering
+        is the better news, but a section where *every* host is expected to be
+        silent now folds, and a blank strip there would read as "nothing was
+        measured" instead of "measured, and quiet as intended".
         """
         if '?' in chars:
             return '?'
@@ -7719,6 +7749,10 @@ class Application:
             return 'x'
         if '.' in chars:
             return '.'
+        if 'o' in chars:
+            return 'o'
+        if '_' in chars:
+            return '_'
         return ' '
 
     def _section_summary(self, monitors, length, offset, sync=False, end_time=None,
@@ -7741,10 +7775,13 @@ class Application:
         up      = sum(1 for m in active if m.alive is True)
         # A ':no-alarm' host that is down is counted apart from the red '↓':
         # a normally-off power switch would otherwise hold a section header red
-        # for good, which is the noise the marker exists to remove.
-        quiet   = sum(1 for m in active if m.alive is False and m.no_alarm)
-        down    = sum(1 for m in active
-                      if m.alive is False and not m.no_alarm)
+        # for good, which is the noise the marker exists to remove.  The split
+        # is _counts_as_down's, so the badge and the fold decision agree — a
+        # marked host whose ping process failed reads red, which is what makes
+        # the '(autofold lock)' on its header explicable.
+        quiet   = sum(1 for m in active
+                      if m.alive is False and not self._counts_as_down(m))
+        down    = sum(1 for m in active if self._counts_as_down(m))
         unknown = sum(1 for m in active if m.alive is None)
         has_error = any(m.error is not None for m in monitors)
         segs = []
@@ -8592,6 +8629,9 @@ class Application:
                             attr = curses.color_pair(3) | row_attr   # yellow — late reply
                         elif char == '.':
                             attr = curses.color_pair(1) | row_attr
+                        elif char in '_o':
+                            # Same dim as a host row's own 'o'/'_' cells.
+                            attr = self.stale_attr | row_attr
                         else:
                             attr = row_attr
                         try:

@@ -37,6 +37,12 @@
 # Interactively: [o] toggles the mark on the selected host, and :save-config
 # stores it.  This is presentation only -- the host is still down, and loss
 # statistics still count the misses.
+#
+# Folding follows the same rule: a marked host that is down does not hold its
+# section open under ':set autofold', and does not stop 'z[' from folding it.
+# So a section of normally-off gear collapses like any other healthy one.  A
+# marked host whose ping *process* failed (a mistyped address, say) still
+# counts as down -- that is a fault, not expected silence.
 :no-alarm *-power-switch
 
 # -- Custom probes ---------------------------------------------------------

@@ -299,6 +299,11 @@ Display
 ``p`` / ``P``
     Toggle pause (freeze the display without stopping pings).
 
+``A``
+    Toggle autofold: healthy sections collapse to one line and reopen the
+    moment a host in them goes unexpectedly down.  See ``:set autofold``
+    under **Folding**.
+
 ``l``
     Show the event log full screen; press again to return to the previous
     layout.  A there-and-back peek at the log, rather than cycling around.
@@ -802,6 +807,13 @@ Key bindings
     factual, loss statistics still count the misses, and a process error
     still shows ``?``.  What changes is how loudly it is reported.
 
+    Fold decisions follow the same rule.  A marked host that is down neither
+    holds its section open under ``:set autofold`` nor stops ``z[`` from
+    folding it: a section whose hosts are all either answering or expected to
+    be silent counts as healthy.  A marked host whose ping *process* failed
+    still counts as down, so a mistyped address cannot fold itself out of
+    sight.
+
 ``:set ssh-connect-rate <n>``
     SSH connection attempts per second, per endpoint.  Default: ``5``.
     ``0`` removes the limit.
@@ -1078,10 +1090,22 @@ Folding
     +------------------------+---------+------------------------------------+
     | ``close-other [pat]``  | ``zx``  | Close all except match             |
     +------------------------+---------+------------------------------------+
+    | ``close-healthy``      | ``z[``  | Close sections with nothing to see |
+    +------------------------+---------+------------------------------------+
+    | ``close-unhealthy``    | ``z]``  | Close sections with a host down    |
+    +------------------------+---------+------------------------------------+
 
     ``close-other`` folds every section, then recursively unfolds sections
     whose title matches the regex *pat*.  Without *pat*, unfolds the section
     at the cursor.  Plain text works as a substring match.
+
+    ``close-healthy`` and ``close-unhealthy`` are the two halves of one
+    question, asked of each section's **direct** hosts: is there anything in
+    here worth looking at?  A host marked ``:no-alarm`` is expected to be
+    silent, so being down does not make its section unhealthy — but a host
+    whose ping *process* failed does.  Hosts still connecting, and paused
+    hosts, decide nothing; a section with no hosts of its own is left alone.
+    This is the same judgement ``:set autofold`` makes on its own.
 
     ``--if-hosts`` makes the action apply only to a section that owns hosts,
     leaving a header whose children are all sub-sections untouched.  Folding
@@ -1101,6 +1125,33 @@ Folding
 ``:fold-all`` / ``:unfold-all``
     Fold / unfold all sections at once (shorthand for ``:fold close-all``
     and ``:fold open-all``).
+
+``:set autofold on|off`` (also ``:autofold``)
+    Fold sections that are healthy and unfold them the moment something in
+    them goes down (same as ``A``).  Off by default.  Written for a console
+    whose window is shorter than the unfolded list: healthy groups collapse
+    to one line each, and the one with a problem is the one that is open.
+
+    A section is judged by its **direct** hosts only, so a subsection is
+    decided on its own.  Hosts still connecting (no result yet) are not
+    counted either way, and paused hosts are ignored.  A section marked
+    ``##!`` (or ``:title!``) is exempt and never moves on its own.
+
+    A host marked ``:no-alarm`` — one where a lost reply is *expected* — does
+    not count as down here, so a group holding a normally-off power switch
+    folds like any other healthy one.  A host whose ping process failed
+    (``?`` in the strip) is never exempt: that is a fault, not expected
+    silence.
+
+    While a section is held open this way its header says
+    ``(autofold lock)``, since folding it by hand would only last until the
+    next tick.
+
+``:set autofold-delay <seconds>``
+    How long a section must stay healthy before ``autofold`` closes it again.
+    Default: ``30``.  Unfolding on a failure is immediate — the delay only
+    slows the *re*-fold, so a host flapping once a minute does not make the
+    list jump.
 
 Search and Filter
 -----------------

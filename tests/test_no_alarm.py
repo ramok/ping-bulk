@@ -337,6 +337,20 @@ class TestPresentationOnly:
         parts, _h, _r = app._section_summary([plain], length=10, offset=0)
         assert dict(parts)['1↓'] == 2
 
+    def test_a_marked_host_in_error_reads_red(self, app, pb):
+        """A process error is not expected silence, and the badge must say so.
+
+        Under autofold this is the only way a section of marked hosts stays
+        open, so a dim '1○' there would leave '(autofold lock)' unexplained.
+        """
+        marked = app.monitors[0]
+        marked.alive = False
+        marked.error = 'Name or service not known'
+        parts, _h, _r = app._section_summary([marked], length=10, offset=0)
+        text = dict(parts)
+        assert '1↓' in text and '1○' not in text, parts
+        assert text['1↓'] == 2, 'red'
+
     def test_down_event_is_demoted(self, app, pb):
         """Still logged, so the file stays greppable — just not at the default."""
         marked = app.monitors[0]
@@ -423,3 +437,46 @@ class TestSharedHostsMap:
     def test_no_map_still_gets_its_own(self, pb):
         m = pb.SshPingMonitor(['relay'], '10.0.0.1')
         assert m._hosts_map == {}
+
+
+class TestFoldedSectionStrip:
+    """A folded section of expected-silent hosts must not read as 'no data'.
+
+    Now that such a section folds on its own, its one-line summary is all the
+    user sees of it.
+    """
+
+    def test_expected_silence_survives_to_the_summary(self, pb):
+        wc = pb.Application._worst_history_char
+        assert wc(['o', 'o']) == 'o'
+        assert wc(['o', ' ']) == 'o'
+
+    def test_a_real_answer_outranks_it(self, pb):
+        """One host answering is the better news for the slot."""
+        assert pb.Application._worst_history_char(['o', '.']) == '.'
+
+    def test_a_real_loss_still_wins(self, pb):
+        wc = pb.Application._worst_history_char
+        assert wc(['o', 'X']) == 'X'
+        assert wc(['o', '?']) == '?'
+        assert wc(['o', 'x']) == 'x'
+
+    def test_no_ping_running_ranks_last_but_one(self, pb):
+        """'_' (sync mode, no process yet) is not a loss either."""
+        wc = pb.Application._worst_history_char
+        assert wc(['_', ' ']) == '_'
+        assert wc(['_', 'o']) == 'o'
+        assert wc(['_', 'X']) == 'X'
+
+    def test_nothing_measured_is_still_blank(self, pb):
+        assert pb.Application._worst_history_char([' ', ' ']) == ' '
+
+    def test_the_section_summary_uses_it(self, pb, tmp_path):
+        """End to end: a marked, down host gives the header an 'o' strip."""
+        app = _app(pb, tmp_path, pb._HostsParser().parse(
+            '## Quiet\n~10.0.0.1\n'))
+        monitor = app.monitors[0]
+        monitor.alive = False
+        monitor.history.extend([None] * 5)
+        _, history, _ = app._section_summary([monitor], length=5, offset=0)
+        assert set(history.strip()) == {'o'}, history
