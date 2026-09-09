@@ -255,3 +255,88 @@ class TestLayoutRendering:
             assert 'layout:' not in sess.capture_pane()
         finally:
             sess.kill()
+
+
+class TestFoldedListReleasesItsRows:
+    """Folding shortens the list, so the log must move up into the space.
+
+    The host area used to be sized from the entry *count*, which folding does
+    not change: a fully folded list left a screenful of blank rows between two
+    section headers and the log — and on a short window pushed the log off the
+    screen entirely, where 'l' was the only way to see any events at all.
+    """
+
+    HOSTS = ('## Group A\n' + '\n'.join(f'127.0.0.{i}' for i in range(1, 11))
+             + '\n## Group B\n'
+             + '\n'.join(f'127.0.0.{i}' for i in range(11, 21)) + '\n')
+
+    def _session(self, app_path, tmp_path, name, height):
+        from tmux_helper import TmuxSession
+        hosts = tmp_path / 'folding.hosts'
+        hosts.write_text(self.HOSTS)
+        sess = TmuxSession(f'ping-bulk-test-{name}', width=120, height=height)
+        sess.send_literal(f'python3 {app_path} -f {hosts}')
+        sess.send_keys('Enter')
+        sess.wait_for('DNS:', timeout=10)
+        return sess
+
+    @staticmethod
+    def _row_of(screen, needle):
+        for i, line in enumerate(screen.splitlines()):
+            if line.startswith(needle):
+                return i
+        return None
+
+    def test_log_follows_the_list_up(self, app_path, check_integration_deps, tmp_path):
+        sess = self._session(app_path, tmp_path, 'fold-up', height=40)
+        try:
+            sess.wait_for('Events')
+            before = self._row_of(sess.capture_pane(), 'Events')
+            sess.send_keys('[')                     # :fold close-all
+            sess.wait_for('[+] Group B')
+            after = self._row_of(sess.capture_pane(), 'Events')
+            assert after is not None
+            assert after < before, f"log stayed at row {after} (was {before})"
+            # header(1) + two section rows + one blank separator, and no
+            # mode banner: each of those takes a host row, so a selection
+            # (--select, say) would move this without anything being wrong.
+            assert after == 4, f"expected the log right below the list, got {after}"
+        finally:
+            sess.kill()
+
+    def test_no_blank_gap_is_left_behind(self, app_path, check_integration_deps, tmp_path):
+        sess = self._session(app_path, tmp_path, 'fold-gap', height=40)
+        try:
+            sess.send_keys('[')
+            sess.wait_for('[+] Group B')
+            lines = sess.capture_pane().splitlines()
+            events = self._row_of('\n'.join(lines), 'Events')
+            blanks = [i for i in range(events) if not lines[i].strip()]
+            assert len(blanks) == 1, f"blank rows above the log: {blanks}"
+        finally:
+            sess.kill()
+
+    def test_a_short_window_gains_the_log_when_folded(self, app_path,
+                                                      check_integration_deps, tmp_path):
+        """The case that read as broken: 22 rows of list in a 14-row window."""
+        sess = self._session(app_path, tmp_path, 'fold-short', height=14)
+        try:
+            assert 'Events' not in sess.capture_pane(), \
+                'precondition: the unfolded list fills the window'
+            sess.send_keys('[')
+            sess.wait_for('Events')
+        finally:
+            sess.kill()
+
+    def test_unfolding_gives_the_rows_back(self, app_path, check_integration_deps, tmp_path):
+        sess = self._session(app_path, tmp_path, 'fold-back', height=40)
+        try:
+            sess.wait_for('Events')
+            before = self._row_of(sess.capture_pane(), 'Events')
+            sess.send_keys('[')
+            sess.wait_for('[+] Group B')
+            sess.send_keys(']')                     # :fold open-all
+            sess.wait_for('[-] Group B')
+            assert self._row_of(sess.capture_pane(), 'Events') == before
+        finally:
+            sess.kill()

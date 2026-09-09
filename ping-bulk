@@ -13059,15 +13059,23 @@ class Application:
                 stdscr.erase()
                 height, width = stdscr.getmaxyx()
 
-                # Adaptive layout: menu at bottom (height-1), hosts fill from top
-                num_hosts = len(self.entries)
+                # Before the layout maths: folding one section changes how many
+                # rows the host list needs, and reading a stale answer would
+                # leave the event log a frame behind the fold it caused.
+                self._autofold_tick()
 
                 if self.layout == 'log':
                     # Event log only — it gets every row above the menu.
                     self._log_page_size = max(1, height - 1 - 2)
-                    self._autofold_tick()
                     self.draw_events(stdscr, 0, height - 1, width)
                 else:
+                    # Adaptive layout: menu at bottom (height-1), hosts fill
+                    # from top.  Only rows that will actually be drawn are
+                    # counted — hosts hidden by a folded section, or by an
+                    # active filter, would otherwise reserve rows and push the
+                    # event log down past a screenful of blanks.
+                    num_hosts = len(self._get_visible_entry_indices())
+
                     # Column header at row 0 if there is room for at least one host row too
                     show_header = height >= 3  # header(1) + host(1) + menu(1)
                     hosts_start = 0
@@ -13079,8 +13087,11 @@ class Application:
                     n_banners = sum(1 for _ in self._mode_banners())
                     visible_hosts = min(num_hosts, max(0, height - 1 - header_rows - n_banners))
 
-                    # Events get whatever space remains between hosts and the menu row
-                    section_end = hosts_start + (1 if show_header else 0) + visible_hosts
+                    # Events get whatever space remains between hosts and the
+                    # menu row.  Banners sit above the host rows and consume
+                    # host rows, so they count towards where the list ends.
+                    section_end = (hosts_start + header_rows + n_banners
+                                   + visible_hosts)
                     events_start = section_end + 1
                     self._log_page_size = max(1, height - 1 - events_start - 2)
                     # 'ping' hides the log even when there is room for it
@@ -13089,7 +13100,6 @@ class Application:
 
                     # Draw host list
                     self.clamp_host_scroll(visible_hosts)
-                    self._autofold_tick()
                     self.draw_hosts(stdscr, hosts_start, visible_hosts, width, height,
                                     show_header=show_header)
                     if show_events:
