@@ -143,6 +143,49 @@ class TestMarkingInAScript:
         assert rules == [':no-alarm 10.0.1.20', ':no-alarm 10.0.2.20',
                          ':no-alarm 10.0.3.20']
 
+    def test_tilde_after_an_inline_if(self, pb, tmp_path):
+        """':if cond -> ~host' — the marker sits on the body, not the line start.
+
+        The '~' has to survive being unwrapped from the conditional; missed,
+        it reaches ping as part of the hostname
+        ('~10.0.0.5: Name or service not known').
+        """
+        entries = pb._HostsParser().parse(
+            ':for i in hub-{1-3}\n'
+            '    :if $i in 1 -> ~10.0.0.5\n'
+            ':end\n')
+        assert ('host', '10.0.0.5') in entries, entries
+        assert not any('~' in e[1] for e in entries if e[0] == 'host')
+        assert (('cmd', ':no-alarm 10.0.0.5')) in entries
+
+    def test_tilde_after_an_inline_if_with_a_label(self, pb, tmp_path):
+        """The shape from a real hosts file: '~ip  ## name' behind an ':if'."""
+        app = _app(pb, tmp_path, pb._HostsParser().parse(
+            ':for i in hub-{1-3}\n'
+            '    :if $i in 1 -> ~10.0.0.5  ## nray-slave\n'
+            ':end\n'))
+        assert [m.host for m in app.monitors] == ['nray-slave']
+        assert _names(app) == {'nray-slave': True}
+
+    def test_tilde_after_an_inline_if_inside_a_with_block(self, pb, tmp_path):
+        """All three features at once — a relayed, looped, conditional host."""
+        app = _app(pb, tmp_path, pb._HostsParser().parse(
+            ':with remote-ping relay\n'
+            ':for i in hub-{1-2}\n'
+            '    :if $i in 1 -> ~10.0.0.5  ## nray-slave\n'
+            '    :if $i in 2 -> 10.0.0.6   ## nray-master\n'
+            ':end\n'
+            ':end\n'))
+        assert [m._ping_host for m in app.monitors] == ['10.0.0.5', '10.0.0.6']
+        assert [m.no_alarm for m in app.monitors] == [True, False]
+
+    def test_tilde_after_an_inline_if_outside_a_loop(self, pb, tmp_path):
+        """':if' works outside ':for' too, so the marker must as well."""
+        app = _app(pb, tmp_path, pb._HostsParser().parse(
+            ':let site harbour\n'
+            ':if $site in harbour -> ~10.0.0.7  ## switch\n'))
+        assert _names(app) == {'switch': True}
+
     def test_tilde_on_a_remote_ping_target(self, pb, tmp_path):
         """Without this, ':remote-ping relay ~host' made a host named '~host'."""
         app = _app(pb, tmp_path, [('cmd', ':remote-ping relay ~10.9.9.9')])
