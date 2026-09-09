@@ -9885,19 +9885,23 @@ class Application:
         timestamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
         events = self._events_snapshot()
         try:
-            if append:
-                with open(filename, 'a') as f:
+            # Explicit utf-8 and 'except Exception', for the reasons spelled
+            # out in _append_log_line: the header carries an em dash and a
+            # relayed host's name a '→', so under LANG=C the write raises
+            # UnicodeEncodeError — a ValueError, which walks straight past an
+            # 'except OSError'.  This runs on the main thread, so what escaped
+            # here took the whole display with it.
+            mode = 'a' if append else 'w'
+            with open(filename, mode, encoding='utf-8', errors='replace') as f:
+                if append:
                     if write_separator:
                         f.write(f"\n# ========== appended {timestamp} ==========\n")
-                    for event in events:
-                        f.write(event.text + "\n")
-            else:
-                with open(filename, 'w') as f:
+                else:
                     f.write(f"# {_PROG_NAME} event log — saved {timestamp}\n")
-                    for event in events:
-                        f.write(event.text + "\n")
-        except OSError as e:
-            self.add_event("save", f"error: {e}")
+                for event in events:
+                    f.write(event.text + "\n")
+        except Exception as e:
+            self.add_event("save", f"error: {type(e).__name__}: {e}")
 
     def _draw_completion_popup(self, stdscr, height, width, completions, comp_idx):
         """Draw a completion popup on the rows just above the bottom line.
@@ -13674,12 +13678,16 @@ press '?' inside the app for the full keyboard reference.\
                 sys.stdout.write(_SIMPLE_SCRIPT_HEADER + text)
             else:
                 try:
-                    with open(out_path, 'w') as f:
+                    # utf-8, not the locale's encoding: a '## label' can carry
+                    # any character, and under LANG=C the write would abort
+                    # with a UnicodeEncodeError traceback rather than the
+                    # message below (a ValueError is not an OSError).
+                    with open(out_path, 'w', encoding='utf-8') as f:
                         f.write(_SIMPLE_SCRIPT_HEADER + text)
                     os.chmod(out_path, os.stat(out_path).st_mode | 0o111)
-                except OSError as e:
-                    print(f"{_PROG_NAME}: cannot write '{out_path}': {e}",
-                          file=sys.stderr)
+                except Exception as e:
+                    print(f"{_PROG_NAME}: cannot write '{out_path}': "
+                          f"{type(e).__name__}: {e}", file=sys.stderr)
                     sys.exit(1)
         else:
             text, dump_warnings = _dump_simplified(entries, hosts_only=True)

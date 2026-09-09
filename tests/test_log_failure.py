@@ -352,3 +352,64 @@ print(os.path.getsize(sys.argv[2]))
         text = log.read_text(encoding='utf-8')
         assert 'ses-wg-video → 10.123.1.1' in text, text
         assert '###### log started' in text
+
+
+class TestSaveUnderAnAsciiLocale:
+    """':save' had the same defect as the streaming log, and worse odds.
+
+    Its header line carries an em dash, so under LANG=C the very first write
+    raised UnicodeEncodeError — before any event text, making ':save'
+    unconditionally broken rather than occasionally.  And it runs on the main
+    thread, so what escaped 'except OSError' took the display with it.
+    """
+
+    SCRIPT = """# -*- coding: utf-8 -*-
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader('ping_bulk', sys.argv[1])
+spec = importlib.util.spec_from_loader('ping_bulk', loader)
+pb = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pb)
+app = pb.Application([('host', '10.0.0.1')])
+app._monitoring_started = True
+app.add_event('ses-wg-video → 10.123.1.1', 'host down')
+app.save_to_file(sys.argv[2])
+print(os.path.getsize(sys.argv[2]))
+"""
+
+    def _run(self, app_path, tmp_path):
+        import subprocess
+        out = tmp_path / 'saved.log'
+        driver = tmp_path / 'driver.py'
+        driver.write_text(self.SCRIPT, encoding='utf-8')
+        env = dict(os.environ, LC_ALL='C', PYTHONUTF8='0',
+                   PYTHONCOERCECLOCALE='0')
+        env.pop('LANG', None)
+        env.pop('LC_CTYPE', None)
+        return subprocess.run(
+            [sys.executable, str(driver), app_path, str(out)],
+            capture_output=True, text=True, env=env), out
+
+    def test_the_save_completes(self, app_path, tmp_path):
+        done, out = self._run(app_path, tmp_path)
+        assert done.returncode == 0, done.stderr
+        assert int(done.stdout.strip()) > 0
+
+    def test_the_content_is_utf8(self, app_path, tmp_path):
+        done, out = self._run(app_path, tmp_path)
+        assert done.returncode == 0, done.stderr
+        text = out.read_text(encoding='utf-8')
+        assert 'event log — saved' in text, text
+        assert 'ses-wg-video → 10.123.1.1' in text, text
+
+
+class TestSaveReportsFailure:
+
+    def test_a_failing_save_is_reported_not_raised(self, app, tmp_path):
+        """It runs on the main thread; an escape crashed the display."""
+        app.save_to_file(str(tmp_path))      # a directory
+        assert _find(app, 'IsADirectoryError'), _events(app)
+
+    def test_a_non_oserror_is_reported_too(self, app, tmp_path):
+        with patch('builtins.open', side_effect=ValueError('bad encoding')):
+            app.save_to_file(str(tmp_path / 'x.log'))
+        assert _find(app, 'ValueError'), _events(app)
