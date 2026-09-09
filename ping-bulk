@@ -20,6 +20,7 @@ import sys
 import textwrap
 import threading
 import time
+import traceback
 import syslog as _syslog
 from abc import ABC, abstractmethod
 from collections import deque
@@ -73,6 +74,11 @@ LEVEL_NORMAL = 1   # + warnings and errors  (default)
 LEVEL_INFO   = 2   # + cmd output, config, settings, resolv
 LEVEL_DEBUG  = 3   # + bind-key dispatch and all internal events
 LEVEL_TRACE  = 4   # + every external program call (subprocess / execvp)
+
+# Set by Application._install_thread_excepthook: the hook we installed and the
+# one it chains to, so re-installing replaces ours instead of wrapping it.
+_PB_THREAD_HOOK = None
+_PB_THREAD_HOOK_PREV = None
 
 # Maps well-known category strings → minimum level at which they appear.
 # Any category not listed here is treated as a host-monitor event → LEVEL_QUIET.
@@ -857,7 +863,8 @@ _HELP_CMDS_INTERACTIVE = [
     "  :layout \\[all|ping|log]   screen layout; no arg cycles  (Ctrl+L)",
     "  :save \\[--follow] \\[file]   write event log to a file; --follow also streams there (W)",
     "                            the 'Write log to:' prompt completes paths with \\[Tab]",
-    "  :log \\[file|off]           show/set the streaming log file (future events), or disable logging",
+    "  :log \\[file|off]           set/disable the streaming log file (future events only);",
+    "                            no arg reports the path, lines written and the last write error",
     "  :fold-all                 fold (collapse) all sections",
     "  :unfold-all               unfold (expand) all sections",
     "  :fold close-other \\[pat]   fold all except sections matching regex pattern  (zx)",
@@ -5408,6 +5415,10 @@ class Application:
         self.highlighted_index = None  # None = no selection; int = index in self.entries
         self.log_file = None        # path to append event log, or None
         self._log_banner_path = None  # path the session banner was written for
+        self._log_lines_written = 0   # appended to the log file this session
+        self._log_write_error = None  # (message, timestamp) of the last failure
+        self._log_write_reported = False   # the failure above is on screen
+        self._loop_errors_seen: set = set()  # state-loop errors already reported
         # Counted from the caller's entries rather than len(self.monitors): the
         # first log line can be written while that list is still being filled
         # (a config-file ':log' plus a hosts-file parse warning does it), and a
@@ -5599,7 +5610,7 @@ class Application:
         elif self.help_tab == 5:
             self.help_tab = 0
 
-    def add_event(self, category, message, level=None):
+    def add_event(self, category, message, level=None, to_file=True):
         """Add an event to the in-memory log and, if a log file is configured,
         append it immediately to that file.
 
@@ -5607,6 +5618,8 @@ class Application:
                    'cmd', 'bind-key', or a host display name).
         message  — the event text.
         level    — explicit LEVEL_* constant; if None, inferred from category.
+        to_file  — False keeps the event on screen only.  Used to report a
+                   failed *file* write, which cannot go through the file.
 
         Timestamp format: ISO 8601 with timezone offset (e.g. 2026-03-20T14:05:32+0200).
         """
@@ -5645,7 +5658,8 @@ class Application:
                 del self._filtered_events[:excess]
         else:
             self._filtered_events_dirty = True
-        self._append_log_line(line)
+        if to_file:
+            self._append_log_line(line)
 
     def _log_banner(self):
         """Return the '###### log started' line that opens a logging session.
@@ -5679,14 +5693,50 @@ class Application:
         """
         if not self.log_file:
             return
+        path = self.log_file
         try:
-            with open(self.log_file, 'a') as f:
-                if self._log_banner_path != self.log_file:
+            # Explicit utf-8: display names carry '→' and the banner an em dash,
+            # and the locale encoding is whatever the service manager happened
+            # to start us with.  Under LANG=C that write raises
+            # UnicodeEncodeError — a ValueError, so it used to sail past the
+            # 'except OSError' below and kill this event's caller outright.
+            with open(path, 'a', encoding='utf-8', errors='replace') as f:
+                if self._log_banner_path != path:
                     f.write(self._log_banner() + "\n")
-                    self._log_banner_path = self.log_file
+                    self._log_banner_path = path
                 f.write(line + "\n")
-        except OSError:
-            pass  # silently ignore file write errors to avoid recursive events
+        except Exception as exc:
+            # Never raise: add_event is called from the state loop and from
+            # monitor threads, and an exception here would take one of them
+            # down — which is how "the log just stops" happened silently.
+            self._log_write_error = (f"{type(exc).__name__}: {exc}", time.time())
+            self._note_log_write_failure(path, exc)
+        else:
+            self._log_lines_written += 1
+            if self._log_write_reported:
+                # Say so: a log that resumes after a gap is otherwise
+                # indistinguishable from one that was never broken.
+                self._log_write_reported = False
+                self._log_write_error = None
+                self.add_event("log", f"log file writable again: {path}",
+                               level=LEVEL_NORMAL, to_file=False)
+
+    def _note_log_write_failure(self, path, exc):
+        """Report a failed log append once, in the on-screen log only.
+
+        Once, because the failure repeats for every event — a per-event error
+        would bury the log it is complaining about.  On screen only
+        ('to_file=False'), because the file is exactly what is not working:
+        reporting through it would re-enter this method.
+        """
+        if self._log_write_reported:
+            return
+        self._log_write_reported = True
+        self.add_event("log",
+            f"error: cannot write log file {path}: "
+            f"{type(exc).__name__}: {exc} — logging to file has stopped "
+            f"(':log' shows the state, ':log <path>' picks another file)",
+            level=LEVEL_NORMAL, to_file=False)
 
     def _load_config(self):
         """Load settings from the XDG config file, silently ignoring a missing file.
@@ -5992,9 +6042,56 @@ class Application:
         self._name_col_dirty = True
         self._name_col_cache.clear()
 
+    def _install_thread_excepthook(self):
+        """Report a background thread that dies on an exception.
+
+        Every worker here is a daemon thread, and Python's default hook prints
+        the traceback to stderr — which under curses is painted over by the
+        next redraw and lost.  So a thread could die and take its whole job
+        with it, silently and permanently:
+
+          - check_state_changes is the *only* producer of host up/down/recover
+            events, so losing it stops the event log dead while pings, history
+            and the UI carry on looking healthy;
+          - a monitor's ping loop dying stops that host being probed at all.
+
+        Both were invisible.  Now the traceback lands in the event log (and so
+        in the log file), naming the thread and the exception.
+        """
+        global _PB_THREAD_HOOK, _PB_THREAD_HOOK_PREV
+        if getattr(self, '_thread_hook_installed', False):
+            return
+        self._thread_hook_installed = True
+        # Chain to whatever was there (pytest installs its own), but replace an
+        # earlier hook of ours rather than nesting inside it.
+        previous = (_PB_THREAD_HOOK_PREV
+                    if threading.excepthook is _PB_THREAD_HOOK
+                    else threading.excepthook)
+        _PB_THREAD_HOOK_PREV = previous
+
+        def _hook(args):
+            try:
+                if args.exc_type is not SystemExit:
+                    name = getattr(args.thread, 'name', '?')
+                    tb = ''.join(traceback.format_exception(
+                        args.exc_type, args.exc_value, args.exc_traceback))
+                    self.add_event("error",
+                        f"error: thread {name} died: "
+                        f"{args.exc_type.__name__}: {args.exc_value}",
+                        level=LEVEL_NORMAL)
+                    for tb_line in tb.rstrip().splitlines():
+                        self.add_event("error", tb_line, level=LEVEL_DEBUG)
+            except Exception:
+                pass      # a reporting failure must not re-enter the hook
+            previous(args)
+
+        _PB_THREAD_HOOK = _hook
+        threading.excepthook = _hook
+
     def start_monitoring(self):
         """Start all ping threads"""
         self._monitoring_started = True
+        self._install_thread_excepthook()
         self._start_time = time.monotonic()
         for monitor in self.monitors:
             thread = threading.Thread(target=monitor.ping, daemon=True)
@@ -6164,116 +6261,156 @@ class Application:
         _DOWN_LOG_SECS = 3.0   # seconds of continuous DOWN before logging
 
         while self.running:
-            now = time.monotonic()
-            # Separate wall clock: _pending is stamped from ping's '-D' prefix
-            # (epoch seconds), so it must not be compared against monotonic.
-            wall_now = time.time()
-            clock_enabled = self._clock_enabled()
-            for monitor in self.monitors:
-                # Resolve probes that '-O' flagged and nothing ever answered.
-                # Done before reading .alive so an expired probe is observed in
-                # this same pass, keeping the down transition prompt.
-                monitor._expire_pending(wall_now, self.late_grace)
-
-                # Surface each distinct stderr message once.  A per-probe error
-                # repeats every second for as long as it lasts, so logging every
-                # occurrence would bury everything else.
-                for text in monitor.take_new_stderr():
-                    self.add_event(monitor.get_display_name(dns_mode='off'),
-                                   text, level=LEVEL_NORMAL)
-
-                # Log a fatal process error exactly once, as soon as it is detected.
-                if monitor.error is not None and not monitor.error_logged:
-                    monitor.error_logged = True
-                    display_name = monitor.get_display_name(dns_mode='off')
-                    for err_line in monitor.error.splitlines():
-                        if err_line.strip():
-                            self.add_event(display_name, f"error: {err_line.strip()}",
-                                           level=LEVEL_NORMAL)
-
-                current_state = monitor.alive
-                if monitor.last_state is None:
-                    # First observation — set initial state; never treat this as a down event.
-                    monitor.last_state = current_state
-                    if current_state is True:
-                        monitor.up_since = now
-                        display_name = monitor.get_display_name(dns_mode='off')
-                        self.add_event(display_name, "host starts up",
-                                       level=(LEVEL_INFO if monitor.no_alarm
-                                              else None))
-                    elif current_state is False:
-                        monitor.down_since = now
-                        monitor._down_pending_ts = now
-                        # Don't log yet — wait for the HWM threshold
-                elif monitor.last_state != current_state:
-                    display_name = monitor.get_display_name(dns_mode='off')
-                    if current_state is True:
-                        # DOWN → UP transition
-                        if monitor.down_since is not None:
-                            # A "host down" event was already logged; report recovery.
-                            downtime = now - monitor.down_since
-                            monitor.down_since = None
-                            msg = f"host recover. Down time: {self._format_downtime(downtime)}"
-                            self.add_event(display_name, msg,
-                                           level=(LEVEL_INFO if monitor.no_alarm
-                                                  else None))
-                        # If _down_pending_ts is set but down_since is None the host
-                        # recovered before the threshold — silent flicker, no log entry.
-                        monitor._down_pending_ts = None
-                        monitor.up_since = now
-                        # Re-arm the remote-clock probe: a host previously marked
-                        # no-remote-time gets another chance after recovery, and
-                        # a partially-failed verdict starts counting from zero.
-                        monitor._clock_fails = 0
-                        if monitor.clock_state == 'no-remote-time':
-                            monitor.clock_state = 'idle'
-                            monitor._clock_next_ts = now
-                    else:
-                        # UP → DOWN transition: start pending timer, don't log yet.
-                        monitor._pending_uptime = (now - monitor.up_since
-                                                   if monitor.up_since is not None else None)
-                        monitor.down_since = None
-                        monitor._down_pending_ts = now
-                        monitor.up_since = None
-                    monitor.last_state = current_state
-                else:
-                    # State unchanged — check whether the pending DOWN timer has expired.
-                    if (monitor._down_pending_ts is not None
-                            and monitor.down_since is None
-                            and now - monitor._down_pending_ts >= _DOWN_LOG_SECS):
-                        monitor.down_since = monitor._down_pending_ts
-                        monitor._down_pending_ts = None
-                        display_name = monitor.get_display_name(dns_mode='off')
-                        msg = "host down"
-                        if monitor._pending_uptime is not None:
-                            msg += f".    Up time:   {self._format_downtime(monitor._pending_uptime)}"
-                            monitor._pending_uptime = None
-                        reason = monitor.recent_stderr(wall_now)
-                        if reason:
-                            # Say why, when the child told us.  Without this the
-                            # only way to learn the cause was strace.
-                            msg += f"  ({reason})"
-                        # Still logged for a ':no-alarm' host — it is true, and
-                        # the file stays greppable — but at 'info', so it does
-                        # not fill the visible log with expected silence.
-                        self.add_event(display_name, msg,
-                                       level=(LEVEL_INFO if monitor.no_alarm
-                                              else None))
-
-                # Remote-clock probe dispatch: when the Drift stat is shown,
-                # probe up hosts that still answer -T (or haven't been tried),
-                # spacing polls by clock_interval.  Runs in a short-lived thread
-                # so the 0.5 s state loop never blocks on network I/O.
-                if (clock_enabled
-                        and monitor.alive is True
-                        and monitor.error is None
-                        and monitor.clock_state != 'no-remote-time'
-                        and not monitor._clock_probing
-                        and now >= monitor._clock_next_ts):
-                    monitor._clock_probing = True
-                    threading.Thread(target=self._run_clock_probe,
-                                     args=(monitor,), daemon=True).start()
+            try:
+                self._state_pass(_DOWN_LOG_SECS)
+            except Exception as exc:
+                # This loop is the only producer of host up/down events, so
+                # letting an exception out of it stops the event log for the
+                # rest of the run — the failure mode this guard exists for.
+                self._report_loop_error('state loop', exc)
             time.sleep(0.5)
+
+    def _state_pass(self, _DOWN_LOG_SECS):
+        """One sweep of every monitor: expire probes, log state changes."""
+        now = time.monotonic()
+        # Separate wall clock: _pending is stamped from ping's '-D' prefix
+        # (epoch seconds), so it must not be compared against monotonic.
+        wall_now = time.time()
+        clock_enabled = self._clock_enabled()
+        for monitor in self.monitors:
+            try:
+                self._monitor_pass(monitor, now, wall_now, clock_enabled,
+                                   _DOWN_LOG_SECS)
+            except Exception as exc:
+                # Per monitor, so one bad host does not cost the other 58
+                # their events.
+                self._report_loop_error(
+                    monitor.get_display_name(dns_mode='off'), exc)
+
+    def _report_loop_error(self, where, exc):
+        """Report a state-loop exception once per site.
+
+        Once per (site, exception type), because the sweep repeats twice a
+        second: reporting every pass would fill the log with one message and
+        hide everything else.  Keyed on the type as well as the site so a
+        *different* fault at the same site is still news.
+        """
+        key = f"{where}:{type(exc).__name__}"
+        if key in self._loop_errors_seen:
+            return
+        self._loop_errors_seen.add(key)
+        self.add_event("error",
+            f"error: {where}: {type(exc).__name__}: {exc} "
+            f"(reported once; the loop keeps running)", level=LEVEL_NORMAL)
+        for tb_line in traceback.format_exc().rstrip().splitlines():
+            self.add_event("error", tb_line, level=LEVEL_DEBUG)
+
+    def _monitor_pass(self, monitor, now, wall_now, clock_enabled,
+                      _DOWN_LOG_SECS):
+        """The per-monitor body of the state loop."""
+        # Resolve probes that '-O' flagged and nothing ever answered.
+        # Done before reading .alive so an expired probe is observed in
+        # this same pass, keeping the down transition prompt.
+        monitor._expire_pending(wall_now, self.late_grace)
+
+        # Surface each distinct stderr message once.  A per-probe error
+        # repeats every second for as long as it lasts, so logging every
+        # occurrence would bury everything else.
+        for text in monitor.take_new_stderr():
+            self.add_event(monitor.get_display_name(dns_mode='off'),
+                           text, level=LEVEL_NORMAL)
+
+        # Log a fatal process error exactly once, as soon as it is detected.
+        if monitor.error is not None and not monitor.error_logged:
+            monitor.error_logged = True
+            display_name = monitor.get_display_name(dns_mode='off')
+            for err_line in monitor.error.splitlines():
+                if err_line.strip():
+                    self.add_event(display_name, f"error: {err_line.strip()}",
+                                   level=LEVEL_NORMAL)
+
+        current_state = monitor.alive
+        if monitor.last_state is None:
+            # First observation — set initial state; never treat this as a down event.
+            monitor.last_state = current_state
+            if current_state is True:
+                monitor.up_since = now
+                display_name = monitor.get_display_name(dns_mode='off')
+                self.add_event(display_name, "host starts up",
+                               level=(LEVEL_INFO if monitor.no_alarm
+                                      else None))
+            elif current_state is False:
+                monitor.down_since = now
+                monitor._down_pending_ts = now
+                # Don't log yet — wait for the HWM threshold
+        elif monitor.last_state != current_state:
+            display_name = monitor.get_display_name(dns_mode='off')
+            if current_state is True:
+                # DOWN → UP transition
+                if monitor.down_since is not None:
+                    # A "host down" event was already logged; report recovery.
+                    downtime = now - monitor.down_since
+                    monitor.down_since = None
+                    msg = f"host recover. Down time: {self._format_downtime(downtime)}"
+                    self.add_event(display_name, msg,
+                                   level=(LEVEL_INFO if monitor.no_alarm
+                                          else None))
+                # If _down_pending_ts is set but down_since is None the host
+                # recovered before the threshold — silent flicker, no log entry.
+                monitor._down_pending_ts = None
+                monitor.up_since = now
+                # Re-arm the remote-clock probe: a host previously marked
+                # no-remote-time gets another chance after recovery, and
+                # a partially-failed verdict starts counting from zero.
+                monitor._clock_fails = 0
+                if monitor.clock_state == 'no-remote-time':
+                    monitor.clock_state = 'idle'
+                    monitor._clock_next_ts = now
+            else:
+                # UP → DOWN transition: start pending timer, don't log yet.
+                monitor._pending_uptime = (now - monitor.up_since
+                                           if monitor.up_since is not None else None)
+                monitor.down_since = None
+                monitor._down_pending_ts = now
+                monitor.up_since = None
+            monitor.last_state = current_state
+        else:
+            # State unchanged — check whether the pending DOWN timer has expired.
+            if (monitor._down_pending_ts is not None
+                    and monitor.down_since is None
+                    and now - monitor._down_pending_ts >= _DOWN_LOG_SECS):
+                monitor.down_since = monitor._down_pending_ts
+                monitor._down_pending_ts = None
+                display_name = monitor.get_display_name(dns_mode='off')
+                msg = "host down"
+                if monitor._pending_uptime is not None:
+                    msg += f".    Up time:   {self._format_downtime(monitor._pending_uptime)}"
+                    monitor._pending_uptime = None
+                reason = monitor.recent_stderr(wall_now)
+                if reason:
+                    # Say why, when the child told us.  Without this the
+                    # only way to learn the cause was strace.
+                    msg += f"  ({reason})"
+                # Still logged for a ':no-alarm' host — it is true, and
+                # the file stays greppable — but at 'info', so it does
+                # not fill the visible log with expected silence.
+                self.add_event(display_name, msg,
+                               level=(LEVEL_INFO if monitor.no_alarm
+                                      else None))
+
+        # Remote-clock probe dispatch: when the Drift stat is shown,
+        # probe up hosts that still answer -T (or haven't been tried),
+        # spacing polls by clock_interval.  Runs in a short-lived thread
+        # so the 0.5 s state loop never blocks on network I/O.
+        if (clock_enabled
+                and monitor.alive is True
+                and monitor.error is None
+                and monitor.clock_state != 'no-remote-time'
+                and not monitor._clock_probing
+                and now >= monitor._clock_next_ts):
+            monitor._clock_probing = True
+            threading.Thread(target=self._run_clock_probe,
+                             args=(monitor,), daemon=True).start()
 
     def cycle_dns(self, direction=1):
         """Cycle through DNS display modes. direction=1 forward, -1 backward."""
@@ -11447,10 +11584,34 @@ class Application:
                 if self._monitoring_started and old != path:
                     self.add_event("log", f"logging to: {path}")
         else:
-            if self.log_file:
-                self.add_event("log", f"active log file: {self.log_file}")
-            else:
-                self.add_event("log", "no log file active")
+            self._report_log_state()
+
+    def _report_log_state(self):
+        """':log' with no argument — say whether the file is actually working.
+
+        A quiet log and a broken one look identical from the outside: nothing
+        new arrives in either.  So report what only ping-bulk knows — how many
+        lines it believes it has appended, and whether the last attempt failed.
+        """
+        # LEVEL_NORMAL, not the category's default 'info': this is the answer
+        # to a question the user just asked, and an invisible answer to "is my
+        # log working?" is the bug, not a log level.
+        if not self.log_file:
+            self.add_event("log", "no log file active", level=LEVEL_NORMAL)
+            return
+        parts = [f"active log file: {self.log_file}",
+                 f"{self._log_lines_written} lines written this session"]
+        if self._log_write_error is not None:
+            msg, ts = self._log_write_error
+            when = datetime.fromtimestamp(ts).astimezone().strftime('%H:%M:%S')
+            parts.append(f"last write FAILED at {when}: {msg}")
+        else:
+            try:
+                size = os.path.getsize(self.log_file)
+                parts.append(f"file is {size} bytes")
+            except OSError as exc:
+                parts.append(f"cannot stat the file: {exc}")
+        self.add_event("log", "; ".join(parts), level=LEVEL_NORMAL)
 
     def _cmd_log_size(self, args=''):
         """Set the event log maximum line count: :set log-size <n>."""

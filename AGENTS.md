@@ -56,6 +56,42 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 17 (folding follows the marker; a silent log is no longer possible)**:
+  A `:no-alarm` host that is down no longer counts as down for a fold
+  decision — `_counts_as_down()` is the single predicate behind `autofold`,
+  the `(autofold lock)` label, `z[`/`z]` and the section badge, so they cannot
+  disagree. A folded list now releases its rows: the main draw loop sizes the
+  host area from `_get_visible_entry_indices()` rather than `len(self.entries)`,
+  which folding does not change.
+
+  **The observability lesson worth keeping.** A user reported "the log stops
+  while the script keeps running", and the code had exactly one way to do that
+  in silence: `check_state_changes` is the **only** producer of host
+  up/down/recover events, it runs in one unguarded daemon thread, and Python
+  sends a dying thread's traceback to stderr — which under curses is painted
+  over by the next redraw. So one escaped exception ended the event log for the
+  rest of the run while pings, history and the UI carried on looking healthy.
+  Three fixes, in order of value:
+
+  1. `threading.excepthook` reports any thread death into the event log. It
+     chains to the hook that was there (pytest installs one), and a failure
+     *inside the report* is swallowed so it cannot cascade. This also covers a
+     `monitor.ping` thread dying, which silently stopped probing one host
+     forever.
+  2. `check_state_changes` is split into `_state_pass` / `_monitor_pass` with a
+     `try/except` per monitor and one around the sweep. Reported once per
+     (site, exception type), so a *different* fault at the same host is still
+     news — one bad host must not cost the other 58 their events.
+  3. `_append_log_line` catches `Exception`, not `OSError`, opens the file as
+     explicit UTF-8, reports the first failure on screen only
+     (`add_event(..., to_file=False)` — reporting through the broken file would
+     recurse) and reports recovery. **Measured**: under `LC_ALL=C` the banner's
+     em dash raised `UnicodeEncodeError` — a `ValueError`, so it walked
+     straight past `except OSError`, out of `add_event`, and killed the caller;
+     the log file was left at 0 bytes. A service unit with no `LANG=` was
+     enough.
+  `:log` with no argument now answers "broken, or just quiet?" — path, lines
+  written this session, file size, and the last write error with its time.
 - **Phase 16 (probes, SSH hygiene, expected-silence hosts)**:
   `:probe-source` + `:probe` read arbitrary per-host values over **one
   persistent SSH connection per host** (`ProbeReader` on the shared

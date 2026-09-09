@@ -480,10 +480,36 @@ Event log
     setting, so it stays greppable.
 
 ``:log [file|off]``
-    With no argument, print the active log file path (or report that
-    logging is off).  With a file path, stream *future* events to that
-    file — it does not write the already-buffered log; use ``:save`` for
-    that.  With ``off``, disable streaming.  A leading ``~`` is expanded.
+    With a file path, stream *future* events to that file — it does not
+    write the already-buffered log; use ``:save`` for that.  With ``off``,
+    disable streaming.  A leading ``~`` is expanded.
+
+    With **no argument**, report the log's health: the active path, how many
+    lines this session has appended, the file's size, and — if the last
+    append failed — when and why.  A quiet log and a broken one look
+    identical from outside, so this is the way to tell them apart (each is one
+    line, wrapped here to fit the page)::
+
+        active log file: pb.log; 812 lines written this session;
+        file is 66104 bytes
+
+        active log file: pb.log; 2 lines written this session;
+        last write FAILED at 12:24:28: PermissionError: [Errno 13]
+        Permission denied: 'pb.log'
+
+    A failed append is also reported by itself, once, in the on-screen log —
+    it cannot be written to the file it is complaining about.  A later
+    successful append reports that the file is writable again, so a gap in
+    the file has a matching explanation at both ends.  ping-bulk never stops
+    trying: fix the permission or free the space and it resumes on the next
+    event.
+
+    The file is written as UTF-8 regardless of the locale ping-bulk was
+    started with.  A relayed host's name contains ``→`` and the session
+    banner an em dash, and under ``LANG=C`` those used to raise
+    ``UnicodeEncodeError`` mid-write — which, being a ``ValueError`` and not
+    an ``OSError``, escaped the log writer and killed the thread that had
+    called it.
 
     A ``:log`` in the config file or the hosts file yields to
     ``-l``/``--log-file`` on the command line, and the skipped path is
@@ -518,6 +544,18 @@ Log levels
 
     Event lines are colour-coded: errors are shown in red, warnings in
     yellow, and debug-level lines are dimmed.
+
+    A background thread that dies on an exception is reported here as an
+    ``error``, naming the thread and the exception, with the traceback at
+    ``debug`` level.  Python writes such a traceback to stderr, which under
+    curses is painted over by the next redraw and lost — so a worker could
+    die silently and take its whole job with it.  Two are worth knowing
+    about: the state loop is the only producer of host up/down events, so
+    losing it stops the event log dead while the pings, the history and the
+    display carry on looking healthy; and a monitor's own loop dying stops
+    that host being probed at all.  The state loop additionally survives a
+    failure in any single host, reporting it once and carrying on with the
+    rest.
 
     One exception to the table: a ``:command`` **rejected while a config or
     hosts file is being read** is reported at ``normal`` rather than ``info``.
