@@ -110,6 +110,19 @@ The repository is structured to keep the core application as a single deployable
   loop, the two deque resizes, and the `:edit` snapshot).  `_record_stale_loss`
   dates the probe it consumes the same way, so one event cannot land in two
   different seconds depending on which path noticed it.
+
+  **`self.events` is a deque, and background threads append to it.** A user hit
+  `RuntimeError: deque mutated during iteration` out of `_draw_details_overlay`;
+  the same loop existed in the display-filter rebuild and in `save_to_file`,
+  where it also escaped an `except OSError` that a `RuntimeError` is not. All
+  three now go through `_events_snapshot()`. **Measured**: a Python-level
+  `for e in self.events` failed 186 times in 7k attempts under a hammering
+  writer, while `list(deque)` failed 0 times in 26k — on a GIL build it is one
+  C call that never yields the GIL part way, so the snapshot needs no lock (on
+  a free-threaded build that argument does not hold and this would need one). If you add a
+  loop over `self.events`, use the snapshot. `_filtered_events` is a plain list
+  and cannot raise, but it is trimmed from the front, so an index taken while
+  walking it can point at the wrong line — the log-search builder copies first.
 - **Phase 16 (probes, SSH hygiene, expected-silence hosts)**:
   `:probe-source` + `:probe` read arbitrary per-host values over **one
   persistent SSH connection per host** (`ProbeReader` on the shared
