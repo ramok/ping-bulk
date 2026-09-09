@@ -123,6 +123,42 @@ The repository is structured to keep the core application as a single deployable
   loop over `self.events`, use the snapshot. `_filtered_events` is a plain list
   and cannot raise, but it is trimmed from the front, so an index taken while
   walking it can point at the wrong line — the log-search builder copies first.
+
+  **A reported thread death is not a recovered one.** Asked "is there a log
+  thread, and does it restart?" — there is none (logging is synchronous inside
+  `add_event`, which is *why* it recovers: no state, just the next `open()`),
+  but the question exposed that a dead `monitor.ping` thread was reported and
+  then left dead, taking that host off the display for the rest of the run.
+  Three parts:
+
+  - every `threading.Thread(...)` now passes `name=` (`ping:<host>`,
+    `probe:<host>`, `clock:<host>`, `dns:<host>`, `state-loop`); a death report
+    names the thread, and `Thread-42 (ping)` named nothing.
+    `tests/test_thread_supervision.py` greps the source to keep it that way.
+  - `_supervise_monitor_threads()`, run from `_state_pass` (which cannot die),
+    restarts a loop whose thread has ended while the monitor is still running
+    **and carries no `error`** — a fatal error is a deliberate `break`, not a
+    crash, and restarting it hits the same wall. Capped at
+    `_MONITOR_RESTART_LIMIT`, paced by `_MONITOR_RESTART_PAUSE`, and the
+    give-up is logged once as "no longer being probed". `_start_monitor_thread`
+    publishes `monitor._thread` *after* `start()`: a created-but-unstarted
+    thread reports `is_alive()` False, which the supervisor would read as a
+    loop to restart.
+  - `_read_until_exit()` was the only unguarded call in `ping()`, and it is the
+    one that parses child output; a fault there now costs one probe (reported
+    through the stderr machinery, capped like the child's own messages, so once
+    per distinct text) instead of the thread. `_run_clock_probe` clears
+    `_clock_probing` in a `finally` — leaving it set froze that host's Drift
+    with nothing retried.
+
+    **A caught reader fault must not reach `_is_fatal_error`.** The first cut
+    set `got_output = False`, which fed the post-exit classification and turned
+    a transient `network is unreachable` (printed per probe while ping carries
+    on) into a permanent kill — *and* set the `error` that makes the supervisor
+    skip the host, so dead-but-restartable became dead-and-never-restarted.
+    Measured both ways. A run whose reader failed is not a run that produced
+    nothing; it is a run we did not finish reading, so `reader_failed` skips
+    the classification while the backoff still grows.
 - **Phase 16 (probes, SSH hygiene, expected-silence hosts)**:
   `:probe-source` + `:probe` read arbitrary per-host values over **one
   persistent SSH connection per host** (`ProbeReader` on the shared

@@ -1,0 +1,409 @@
+"""Unit tests for keeping a host's probe loop alive, and naming it.
+
+A monitor's thread dying is the least visible failure this program has: the
+row keeps the history it had and simply stops changing, while the pings, the
+display and the event log all carry on looking healthy.  Three parts:
+
+  - every thread is named after what it is doing, because the thread name is
+    all a death report has to identify it by — and 'Thread-42 (ping)' says
+    nothing when there are fifty-nine of them;
+  - a fault in the read loop costs one probe, not the host;
+  - a thread that ends anyway is restarted, capped and paced, unless it
+    stopped on purpose (a fatal error) or because it was told to.
+"""
+
+import threading
+import time
+from unittest.mock import patch
+
+import pytest
+
+
+@pytest.fixture
+def app(pb):
+    a = pb.Application([('host', '10.0.0.1'), ('host', '10.0.0.2')])
+    a._monitoring_started = True
+    return a
+
+
+def _events(app):
+    return [e.text for e in app.events]
+
+
+def _find(app, needle):
+    return [t for t in _events(app) if needle in t]
+
+
+class _DeadThread:
+    """Stands in for a thread whose target has returned."""
+
+    def __init__(self, name='ping:10.0.0.1'):
+        self.name = name
+
+    @staticmethod
+    def is_alive():
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Naming
+# ---------------------------------------------------------------------------
+
+class TestThreadsAreNamed:
+
+    def test_a_probe_loop_is_named_after_its_host(self, app):
+        monitor = app.monitors[0]
+        with patch.object(type(monitor), 'ping', lambda self: None):
+            thread = app._start_monitor_thread(monitor)
+            thread.join(timeout=5)
+        assert thread.name == 'ping:10.0.0.1'
+
+    def test_the_handle_is_kept_on_the_monitor(self, app):
+        """The supervisor has nothing to check without it."""
+        monitor = app.monitors[0]
+        with patch.object(type(monitor), 'ping', lambda self: None):
+            thread = app._start_monitor_thread(monitor)
+            thread.join(timeout=5)
+        assert monitor._thread is thread
+
+    def test_a_relayed_host_carries_its_relay_in_the_name(self, pb, tmp_path):
+        a = pb.Application([('cmd', ':remote-ping relay 10.9.9.9')])
+        a._monitoring_started = True
+        monitor = a.monitors[0]
+        with patch.object(type(monitor), 'ping', lambda self: None):
+            thread = a._start_monitor_thread(monitor)
+            thread.join(timeout=5)
+        assert thread.name == 'ping:relay→10.9.9.9'
+
+    def test_no_thread_is_left_unnamed(self, app_path):
+        """Every Thread() in the source must say what it is.
+
+        Paren-counted rather than matched with a regex: a nested call in the
+        arguments ('args=(g(h),)') defeats any fixed nesting depth, and the
+        failure would be a silent pass on the very thing this guards.
+        """
+        src = open(app_path, encoding='utf-8').read()
+        calls = []
+        needle = 'threading.Thread('
+        at = src.find(needle)
+        while at != -1:
+            i = at + len(needle) - 1
+            depth = 0
+            while i < len(src):
+                if src[i] == '(':
+                    depth += 1
+                elif src[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            calls.append(src[at:i + 1])
+            at = src.find(needle, i)
+        assert len(calls) >= 5, f'expected every thread site, found {len(calls)}'
+        unnamed = [c for c in calls if 'name=' not in c]
+        assert not unnamed, f'unnamed threads: {unnamed}'
+
+
+# ---------------------------------------------------------------------------
+# A fault in the read loop
+# ---------------------------------------------------------------------------
+
+class TestReaderFaultCostsOneProbe:
+
+    def test_the_fault_is_reported_as_this_host_s_own_message(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_reader_fault(ValueError('could not convert string to float'))
+        assert m.take_new_stderr() == [
+            'ping-bulk: reader error: ValueError: '
+            'could not convert string to float']
+
+    def test_it_is_reported_once_however_often_it_repeats(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        for _ in range(5):
+            m._note_reader_fault(ValueError('same fault'))
+        assert len(m.take_new_stderr()) == 1
+
+    def test_it_can_explain_a_down_transition(self, pb):
+        """It goes through the stderr machinery, so 'why' picks it up."""
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_reader_fault(RuntimeError('boom'))
+        assert 'reader error' in (m.recent_stderr() or '')
+
+    def test_a_different_fault_is_news_again(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_reader_fault(ValueError('first'))
+        m.take_new_stderr()
+        m._note_reader_fault(KeyError('second'))
+        assert len(m.take_new_stderr()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Restarting
+# ---------------------------------------------------------------------------
+
+class TestReaderFaultDoesNotEndTheLoop:
+    """End to end: the guard around the one unguarded call in ping().
+
+    Driven through the real loop with a piped Popen stand-in, because the point
+    is that the exception does not leave ping() — a unit test on the reporting
+    helper cannot show that.
+    """
+
+    def _run(self, monitor, timeout=3.0):
+        t = threading.Thread(target=monitor.ping, daemon=True,
+                             name='ping:test')
+        t.start()
+        t.join(timeout)
+        return t
+
+    def test_the_loop_retries_instead_of_ending(self, pb):
+        """One probe lost, not the host: the loop backs off and goes again."""
+        from proc_helper import FakeProc
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(stdout_lines=[], stderr_text='')
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise ValueError('could not convert string to float')
+
+        try:
+            with patch('subprocess.Popen', return_value=proc), \
+                 patch.object(m, '_read_until_exit', side_effect=boom):
+                t = self._run(m, timeout=4.0)
+                assert t.is_alive(), 'the fault must not end the loop'
+                assert len(calls) >= 2, f'it must try again: {len(calls)} tries'
+                assert m.error is None, 'a reader fault is not a fatal error'
+        finally:
+            m.running = False
+            t.join(timeout=5)
+
+    def test_a_transient_stderr_does_not_become_fatal(self, pb):
+        """The regression this guard nearly introduced.
+
+        'network is unreachable' is in _FATAL_PING_ERRORS because a run that
+        produced nothing and said that is genuinely dead — but ping also prints
+        it per probe while carrying on.  A run whose reader failed is not a run
+        that produced nothing; it is a run we did not finish reading.  Marking
+        it fatal killed the host for good *and* set the flag that stops the
+        supervisor bringing it back: dead-but-restartable became
+        dead-and-never-restarted.
+        """
+        from proc_helper import FakeProc
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(stdout_lines=[], stderr_text='')
+
+        def read_then_raise():
+            # What really happens: the reader drains the child's stderr, then
+            # trips over a stdout line it cannot parse.  The stderr has to be
+            # recorded *before* the fault or there is nothing to misclassify
+            # and this test passes with the guard removed.
+            m._note_stderr('ping: network is unreachable')
+            raise ValueError("could not convert string to float: 'xyz'")
+
+        try:
+            with patch('subprocess.Popen', return_value=proc), \
+                 patch.object(m, '_read_until_exit',
+                              side_effect=read_then_raise):
+                t = self._run(m, timeout=2.5)
+                assert m.error is None, \
+                    f'a reader fault must not be classified: {m.error!r}'
+                assert t.is_alive(), 'and the loop must still be going'
+        finally:
+            m.running = False
+            t.join(timeout=5)
+
+    def test_a_real_fatal_error_still_stops_the_loop(self, pb):
+        """The exemption must not disarm the classification itself."""
+        from proc_helper import FakeProc
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(stdout_lines=[],
+                        stderr_text='ping: name or service not known\n')
+        with patch('subprocess.Popen', return_value=proc):
+            t = self._run(m, timeout=3.0)
+        assert not t.is_alive()
+        assert m.error and 'name or service not known' in m.error
+
+    def test_the_fault_report_is_capped(self, pb):
+        """The message carries the offending data, so it varies every time."""
+        m = pb.PingMonitor('10.0.0.1')
+        for i in range(m._SEEN_STDERR_MAX + 50):
+            m._note_reader_fault(ValueError(f"could not convert '{i}'"))
+        assert len(m._seen_stderr) == m._SEEN_STDERR_MAX
+
+    def test_the_fault_reaches_the_event_log_path(self, pb):
+        from proc_helper import FakeProc
+        m = pb.PingMonitor('10.0.0.1')
+        proc = FakeProc(stdout_lines=[],
+                        stderr_text='ping: name or service not known\n')
+        with patch('subprocess.Popen', return_value=proc), \
+             patch.object(m, '_read_until_exit',
+                          side_effect=ValueError('bad line')):
+            self._run(m)
+        pending = m.take_new_stderr()
+        assert any('reader error: ValueError: bad line' in t for t in pending), \
+            pending
+
+
+class TestSupervisor:
+
+    def test_a_dead_loop_is_restarted(self, app):
+        monitor = app.monitors[0]
+        monitor._thread = _DeadThread()
+        with patch.object(app, '_start_monitor_thread') as start:
+            app._supervise_monitor_threads()
+        start.assert_called_once_with(monitor)
+        assert _find(app, 'probe loop stopped and was restarted'), _events(app)
+
+    def test_a_live_loop_is_left_alone(self, app):
+        monitor = app.monitors[0]
+        monitor._thread = threading.Thread(target=lambda: time.sleep(5),
+                                           daemon=True, name='ping:x')
+        monitor._thread.start()
+        try:
+            with patch.object(app, '_start_monitor_thread') as start:
+                app._supervise_monitor_threads()
+            start.assert_not_called()
+        finally:
+            monitor.running = False
+
+    def test_a_stopped_monitor_is_left_alone(self, app):
+        """':edit' and quitting stop monitors on purpose."""
+        monitor = app.monitors[0]
+        monitor._thread = _DeadThread()
+        monitor.running = False
+        with patch.object(app, '_start_monitor_thread') as start:
+            app._supervise_monitor_threads()
+        start.assert_not_called()
+
+    def test_a_fatal_error_is_not_restarted(self, app):
+        """ping() breaks out on purpose there — restarting hits the same wall.
+
+        'Name or service not known' does not become true on a second attempt,
+        and the loop has no reset path for self.error.
+        """
+        monitor = app.monitors[0]
+        monitor._thread = _DeadThread()
+        monitor.error = 'Name or service not known'
+        with patch.object(app, '_start_monitor_thread') as start:
+            app._supervise_monitor_threads()
+        start.assert_not_called()
+        assert not _find(app, 'restarted')
+
+    def test_a_monitor_with_no_thread_yet_is_left_alone(self, app):
+        with patch.object(app, '_start_monitor_thread') as start:
+            app._supervise_monitor_threads()
+        start.assert_not_called()
+
+    def test_the_second_restart_waits(self, app):
+        """A fault that recurs at once must not respawn twice a second."""
+        monitor = app.monitors[0]
+        monitor._thread = _DeadThread()
+        with patch.object(app, '_start_monitor_thread'):
+            app._supervise_monitor_threads()      # first: immediate
+            monitor._thread = _DeadThread()
+            with patch.object(app, '_start_monitor_thread') as again:
+                app._supervise_monitor_threads()  # second: too soon
+            again.assert_not_called()
+        assert monitor._restarts == 1
+
+    def test_it_gives_up_after_the_cap(self, app):
+        monitor = app.monitors[0]
+        limit = app._MONITOR_RESTART_LIMIT
+        for i in range(limit + 3):
+            monitor._thread = _DeadThread()
+            monitor._restart_ts = 0.0          # pretend the pause elapsed
+            with patch.object(app, '_start_monitor_thread'):
+                app._supervise_monitor_threads()
+        assert monitor._restarts == limit
+        assert len(_find(app, 'not restarting it again')) == 1, _events(app)
+
+    def test_giving_up_says_the_host_is_unmonitored(self, app):
+        monitor = app.monitors[0]
+        for _ in range(app._MONITOR_RESTART_LIMIT):
+            monitor._thread = _DeadThread()
+            monitor._restart_ts = 0.0
+            with patch.object(app, '_start_monitor_thread'):
+                app._supervise_monitor_threads()
+        assert _find(app, 'no longer being probed'), _events(app)
+
+    def test_the_dead_handle_is_dropped_from_the_thread_list(self, app):
+        """Or a long-running session accumulates them."""
+        monitor = app.monitors[0]
+        dead = _DeadThread()
+        monitor._thread = dead
+        app.threads.append(dead)
+        with patch.object(app, '_start_monitor_thread'):
+            app._supervise_monitor_threads()
+        assert dead not in app.threads
+
+    def test_only_the_dead_monitor_is_touched(self, app):
+        alive, dead = app.monitors
+        alive._thread = threading.Thread(target=lambda: time.sleep(5),
+                                         daemon=True, name='ping:alive')
+        alive._thread.start()
+        dead._thread = _DeadThread()
+        try:
+            with patch.object(app, '_start_monitor_thread') as start:
+                app._supervise_monitor_threads()
+            start.assert_called_once_with(dead)
+        finally:
+            alive.running = False
+
+    def test_the_state_loop_runs_it(self, app):
+        """It has to be driven by something that cannot itself die."""
+        with patch.object(app, '_supervise_monitor_threads') as sup:
+            app._state_pass(3.0)
+        sup.assert_called_once()
+
+    def test_a_supervisor_fault_does_not_kill_the_state_loop(self, app):
+        app.running = True
+
+        def blow_up():
+            app.running = False
+            raise RuntimeError('boom')
+
+        with patch.object(app, '_supervise_monitor_threads',
+                          side_effect=blow_up):
+            app.check_state_changes()          # must return, not raise
+        assert _find(app, 'RuntimeError: boom'), _events(app)
+
+
+# ---------------------------------------------------------------------------
+# The clock probe's flag
+# ---------------------------------------------------------------------------
+
+class TestClockProbeReleasesItsFlag:
+    """The dispatcher only starts a probe when the flag is clear, so leaving
+    it set freezes that host's Drift and RTime with nothing re-attempted.
+    """
+
+    def test_cleared_after_a_successful_probe(self, app):
+        monitor = app.monitors[0]
+        monitor._clock_probing = True
+        with patch.object(app, '_clock_probe_once', return_value=1.5):
+            app._run_clock_probe(monitor)
+        assert monitor._clock_probing is False
+        assert monitor.clock_state == 'ok'
+
+    def test_cleared_after_a_failed_probe(self, app):
+        monitor = app.monitors[0]
+        monitor._clock_probing = True
+        with patch.object(app, '_clock_probe_once', return_value=None):
+            app._run_clock_probe(monitor)
+        assert monitor._clock_probing is False
+
+    def test_cleared_when_the_bookkeeping_itself_raises(self, app):
+        """The part that used to sit outside the try.
+
+        A bad clock_interval makes the 'now + interval' arithmetic raise after
+        the probe has already succeeded — which is exactly the shape that left
+        the flag set and the host's Drift frozen for good.
+        """
+        monitor = app.monitors[0]
+        monitor._clock_probing = True
+        app.clock_interval = 'not a number'
+        with patch.object(app, '_clock_probe_once', return_value=1.5):
+            with pytest.raises(TypeError):
+                app._run_clock_probe(monitor)
+        assert monitor._clock_probing is False
