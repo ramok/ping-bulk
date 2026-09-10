@@ -67,6 +67,11 @@ def _derive_prog_name(argv=None):
 # config paths, syslog identity, and error messages.
 _PROG_NAME = _derive_prog_name()
 
+# Kept visible at the right of the host row when the name column would
+# otherwise fill the terminal.  Small on purpose: this is the degraded case,
+# and a couple of cells of history still say whether the host is answering.
+_MIN_HIST_COLS = 8
+
 # Linux caps a task's name at 16 bytes including the terminator.
 _COMM_MAX = 15
 _PR_SET_NAME = 15          # prctl(2)
@@ -8704,12 +8709,23 @@ class Application:
         # their per-level indentation), the header label, and section title prefixes.
         dns_mode_str = DNS_MODES[self.dns_mode]
         name_col_width = self._get_name_col_width(dns_mode_str)
-        stat_col = name_col_width + 1   # stat value starts 1 col after hostname
         # Badge width: worst case is all monitors in one section → "N↑/N↓/N-"
         n = len(self.monitors)
         has_sections = any(isinstance(e, SectionLabel) for e in self.entries)
         max_badge_w = len(f"{n}↑/{n}↓/{n}○/{n}-") if has_sections else 0
         stat_field_w = max(6, max_badge_w)
+        # The name column is sized from the content, which knows nothing about
+        # the terminal: a section title or a host name wider than the screen
+        # pushed the stat column past the right edge, and the header wrote
+        # there unguarded.  A 70-character title on an 80-column terminal
+        # killed the whole draw with 'addwstr() returned ERR' before anything
+        # appeared — and examples/ping-bulk.advance carries a 65-character
+        # one.  Clamp so the stats and a little history always have room; the
+        # name and title are already truncated to the column by the callers.
+        name_col_width = min(name_col_width,
+                             max(len("Hostname"),
+                                 width - stat_field_w - _MIN_HIST_COLS - 2))
+        stat_col = name_col_width + 1   # stat value starts 1 col after hostname
         hist_col = stat_col + stat_field_w + 1  # history starts after stat field + 1 gap
 
         # In 'All' mode the stats block sits flush-left immediately after the hostname;
@@ -8759,12 +8775,16 @@ class Application:
             hist_col_effective = hist_col
 
         if show_header:
-            stdscr.addstr(start_row, 0, "Hostname", curses.A_BOLD)
+            self._safe_addstr(stdscr, start_row, 0, "Hostname", curses.A_BOLD)
 
             if not show_all and not show_custom:
                 # stat_col header: mode label when a single stat is active, "ms" otherwise
+                # _safe_addstr, not addstr: the clamp above keeps this on
+                # screen, but a header that raises takes the whole frame with
+                # it, and every other write in this method is already guarded.
                 col25_label = mode_name if show_single else "ms"
-                stdscr.addstr(start_row, stat_col, f"{col25_label:>{stat_field_w}}", curses.A_BOLD)
+                self._safe_addstr(stdscr, start_row, stat_col,
+                                  f"{col25_label:>{stat_field_w}}", curses.A_BOLD)
 
             # Title is plain text; [H] gets hotkey highlighting via _draw_hint_text.
             mode_name = self._history_mode_name()
@@ -8798,7 +8818,8 @@ class Application:
                 all_header = (f"{'ms':>6}  {'Up/Down':>{updown_col_w}}  "
                               f"{'Avg':>6}  {'Min':>6}  {'Max':>6}  "
                               f"{'Loss%':>6}  {'StDev':>6}  {'RX':>6}  {'TX':>6}  {'XX':>6}")
-                stdscr.addstr(start_row, all_stats_col, all_header, curses.A_BOLD)
+                self._safe_addstr(stdscr, start_row, all_stats_col, all_header,
+                                  curses.A_BOLD)
 
             if show_custom and self.stats_custom and custom_start_col < width:
                 parts = []
@@ -8807,8 +8828,9 @@ class Application:
                     header = self._stat_header(cname)
                     parts.append(f"{header:>{w}}")
                 custom_header = "  ".join(parts)
-                stdscr.addstr(start_row, custom_start_col,
-                              custom_header[:max(0, width - 1 - custom_start_col)], curses.A_BOLD)
+                self._safe_addstr(stdscr, start_row, custom_start_col,
+                                  custom_header[:max(0, width - 1 - custom_start_col)],
+                                  curses.A_BOLD)
 
         data_start = start_row + (1 if show_header else 0)
 
@@ -9048,25 +9070,32 @@ class Application:
             display_name = monitor.get_display_name(DNS_MODES[self.dns_mode])
             display_width = name_col_width - host_indent
             padded_name = (' ' * host_indent + display_name[:display_width]).ljust(name_col_width)
-            stdscr.addstr(row, 0, padded_name, row_attr)
+            self._safe_addstr(stdscr, row, 0, padded_name, row_attr)
 
             # Stat col: Last latency (off) or single stat value; hidden in All/custom mode
             if not show_all and not show_custom:
+                # The clamp above bounds stat_col, but the badge field widens
+                # this by (stat_field_w - 6) — 60 hosts in one section is 9
+                # columns more — so on a very narrow terminal the start column
+                # can still land off screen.  ncurses returns ERR only when the
+                # *start* column is past the edge (an overflowing string is
+                # clipped), and these three are the remaining ones that can.
                 stat_value_col = stat_col + (stat_field_w - 6)
                 if monitor.paused:
                     # Paused: show ⏸ in cyan regardless of stats mode
                     # Right-align in the stat field (5 spaces + symbol = 6 display cols)
-                    stdscr.addstr(row, stat_value_col, "     ⏸", curses.color_pair(6) | row_attr)
+                    self._safe_addstr(stdscr, row, stat_value_col, "     ⏸",
+                                      curses.color_pair(6) | row_attr)
                 elif show_single:
                     # _compute_stat() returns '    ??' when monitor.error is set
-                    stdscr.addstr(row, stat_value_col,
-                                  self._stat_cell(monitor, mode_name),
-                                  self._stat_attr(monitor, mode_name, row_attr))
+                    self._safe_addstr(stdscr, row, stat_value_col,
+                                      self._stat_cell(monitor, mode_name),
+                                      self._stat_attr(monitor, mode_name, row_attr))
                 else:
                     # off mode — show Last latency with color; '    ??' in bright red on error
-                    stdscr.addstr(row, stat_value_col,
-                                  self._stat_cell(monitor, 'Last'),
-                                  self._stat_attr(monitor, 'Last', row_attr))
+                    self._safe_addstr(stdscr, row, stat_value_col,
+                                      self._stat_cell(monitor, 'Last'),
+                                      self._stat_attr(monitor, 'Last', row_attr))
 
             probe = self._probe_def_for_label(hist_mode)
             if probe is not None:
@@ -9156,12 +9185,18 @@ class Application:
             # All-stats block flush-left after hostname
             if show_all and all_stats_col < width:
                 # ms (Last latency)
-                stdscr.addstr(row, ms_col, self._stat_cell(monitor, 'Last'),
-                              self._stat_attr(monitor, 'Last', row_attr))
+                # _safe_addstr: 'all_stats_col < width' above says the block
+                # starts on screen, not that every column inside it does —
+                # updown_col is ms_col + 8.
+                self._safe_addstr(stdscr, row, ms_col,
+                                  self._stat_cell(monitor, 'Last'),
+                                  self._stat_attr(monitor, 'Last', row_attr))
                 # Up/Down
                 updown_str, is_down = Application._compute_updown(monitor)
                 updown_color = curses.color_pair(2) if is_down else 0
-                stdscr.addstr(row, updown_col, f"{updown_str:>{updown_col_w}}", updown_color | row_attr)
+                self._safe_addstr(stdscr, row, updown_col,
+                                  f"{updown_str:>{updown_col_w}}",
+                                  updown_color | row_attr)
                 # Avg Min Max Loss% StDev RX TX XX — one addstr per 6-char
                 # field so each stat gets its own colour via _stat_attr.
                 for i, cname in enumerate(_ALL_STATS):
