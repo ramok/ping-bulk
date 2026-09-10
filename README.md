@@ -50,8 +50,8 @@ Events
 - **Loop blocks** — `:for`/`:done` repeats body lines with back-references
   (`$0`–`$9` or `$name`) per iteration.
 - **Conditionals** — `:if`/`:elif`/`:else`/`:fi` with variable expansion.
-- **Variables** — `:let` defines variables; `%r`, `%d`, `%j`, `%R` template
-  variables available in `:prog-options` and `:mux`.
+- **Variables** — `:let` defines variables; `%r`, `%d`, `%j`, `%J`, `%R`
+  template variables available in `:prog-options` and `:mux`.
 - **Key binding system** — fully rebindable keys via `:bind-key` /
   `:unbind-key`, with per-mode bindings (normal, help, details, command).
 - **Search** — `/` search in host list or event log with `n`/`N` navigation.

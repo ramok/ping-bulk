@@ -135,8 +135,11 @@ class TestCmdMuxDirection:
     def _held(tokens):
         """Return the ['sh', '-c', ...] wrapper that _cmd_mux builds."""
         import shlex
+        cmd = shlex.join(tokens)
+        # Mirrors Application._mux_pane_script: the pane shows the command
+        # it runs as its first line, then holds if the command failed.
         script = (
-            shlex.join(tokens)
+            "printf '$ %s\\n' " + shlex.quote(cmd) + '; ' + cmd
             + '; _rc=$?;'
               ' if [ "$_rc" -ne 0 ]; then'
               ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'

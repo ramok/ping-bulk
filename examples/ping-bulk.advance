@@ -386,16 +386,19 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 # 'ssh -t <relay> mtr <target>' instead of tracing from here (which has no
 # route to it).  Any program works this way -- traceroute, iperf3, curl, nmap.
 # The rule is read off the variables used: %h/%i/%r means "aimed at the host"
-# (wrap it), %d means "already relay-aware" (leave it), neither means it has
-# nothing to do with the host (stay local).
+# (wrap it), %d or %J means "already relay-aware" (leave it), neither means it
+# has nothing to do with the host (stay local).
 # Built-in default, bound only when mtr is installed:
 #   :bind-key --if-cmd mtr t :mux mtr %r
 #
 # Default 'c' binding (built-in, shown here for reference / override):
-#   SSH-proxied hosts (have %d):  :mux ssh -J %{j?%{j:,},}%d %r
+#   SSH-proxied hosts (have %d):  :mux ssh %{J?-J %{J:,} }%r
 #   Plain hosts:                  :mux ssh %r
 # For a remote-ping host, ping runs on the relay, so a shell on the host itself
-# goes through it: the relay is the last -J hop and %r is the destination.
+# goes through it: %J is the whole chain that reaches the host (its jump hosts,
+# then the relay) and %r is where it lands.  A relay that is also one of its
+# own monitored hosts is not asked to jump through itself -- %J stops before
+# it, and is empty (so no -J is written) when it was the only hop.
 # Override example:
 #   :bind-key c :mux ssh -l admin %r
 

@@ -452,6 +452,58 @@ same hop for 6 s, which the stale-child watchdog answered by restarting all 47
 at once. The gate belongs in the short-lived `clock:<host>` thread, before
 `subprocess.run`, so its timeout budget starts after the wait.
 
+### The jump chain is a list, and ssh options are built from it
+
+`SshPingMonitor._ssh_hops` holds the directive's jump hosts, read out of its
+flags **once**, in `__init__`. Everything that needs them — the display name,
+`ProbeReader._jump_args()`, `_relay_prefix_for()`, `connect_chain()` — reads
+that list. **Do not scan ssh flags again at runtime.** The first attempt at
+the fix below did, and taking ssh options apart is where the bugs are: `-J`
+has three spellings (`-J h`, `-Jh`, `-o ProxyJump=h`, and the `-oProxyJump=h`
+run-together form), roughly twenty short options swallow the next argument so
+the destination cannot be found without a table of them, a bracketed IPv6
+hop hides its port where the bare form does not, and a mistake rewrites the
+user's own command. Composing options from a list has none of those failure
+modes.
+
+### A relay is sometimes one of its own hosts
+
+`:remote-ping <relay> <relay>` is a real configuration — a relay worth
+watching as a host — and it puts the target in its own jump chain, which ssh
+refuses: `jumphost loop via <host>`. `connect_chain()` cuts the chain before
+that host and hands back the hop's own spelling of the login, which is the
+one ping-bulk already uses on it.
+
+**Measured** (OpenSSH 10, `-F /dev/null -G`, so nothing connects): ssh
+compares the *effective* user, host **and** port. `-J b b` is refused —
+both sides default to the same local user — while `-J admin@b b` is
+accepted, `-l admin -J admin@b b` refused, `-J b:2222 b` accepted and
+`-o ProxyJump=b b` refused. So the port is part of the identity, while the
+user deliberately is not: a difference that only `ssh_config` or a
+later-injected `-l` knows about cannot be seen from here, and a refused
+chain is the worse outcome. Two spellings collapse that ssh would have
+accepted (a port arriving via `:prog-options ssh <host> -p 2222`, and `[h]`
+against `h`); both still reach the host. Do not add a user comparison to
+recover them: a ping target never carries `user@` — `ping admin@host` is
+not a thing — so the branch would be unreachable.
+
+Endpoints are compared through the `:resolv` map *and* the monitor's
+`resolved_ip`, so an alias, a DNS name and the address behind them are one
+host whichever spelling each side used. A `:resolv` written after the
+`:remote-ping` line leaves the relay under its alias while the target is
+already an address, and the two would otherwise look unrelated. The one
+direction still open is a relay named in DNS against a target given as an
+address: resolving a hop's name would need DNS at keypress time.
+
+The `c`/`C` default binding is `:mux ssh %{J?-J %{J:,} }%r`, where `%J` and
+`%r` both come from `connect_chain()`. The `-J` sits *inside* the
+conditional because a relay with no hops in front of it leaves the chain
+empty, and `-J` with an empty value is not something ssh accepts. That in
+turn required `_expand_conditional()` to record the names a `%{var?…}` group
+mentions — guard included, fired or not — or `_relay_prefix_for()` sees a
+binding that names only `%r` and wraps the command in a second ssh to the
+relay.
+
 ### Sharing
 
 `_ssh_sharing_flags(share)` encodes the split rather than putting a single

@@ -206,8 +206,11 @@ def _make_mock_backend():
 
 def _held(tokens):
     """Return the ['sh', '-c', ...] wrapper that _cmd_mux builds."""
+    cmd = shlex.join(tokens)
+    # Mirrors Application._mux_pane_script: the pane shows the command it
+    # runs as its first line, then holds if the command failed.
     script = (
-        shlex.join(tokens)
+        "printf '$ %s\\n' " + shlex.quote(cmd) + '; ' + cmd
         + '; _rc=$?;'
           ' if [ "$_rc" -ne 0 ]; then'
           ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
@@ -592,3 +595,114 @@ class TestIsGlob:
                                          'host.example.com', 'a-b_c'])
     def test_literal_patterns(self, pb, pattern):
         assert pb._is_glob(pattern) is False
+
+
+class TestConnectChain:
+    """The chain that reaches a relayed host, composed from stored hops.
+
+    ping-bulk holds the jump hosts as a list (read out of the directive once,
+    when the monitor is built) and composes ssh options from it.  Taking
+    options apart again is what this replaced, and it was wrong three ways:
+    it missed '-o ProxyJump=', it dropped the port from a bracketed IPv6
+    hop, and it rewrote a two-user chain that ssh accepts.
+    """
+
+    def _chain(self, pb, ssh_args, target):
+        return pb.SshPingMonitor(ssh_args, target).connect_chain()
+
+    def test_ordinary_relayed_host(self, pb):
+        """The relay is the last hop and the target is the destination."""
+        assert self._chain(pb, ['-J', 'outer', 'admin@relay'], '10.111.1.1') \
+            == (['outer', 'admin@relay'], '10.111.1.1')
+
+    def test_relay_monitored_as_its_own_host(self, pb):
+        """ssh refuses a destination that is one of its hops, so the chain
+        stops before it and keeps the login the relay is already reached
+        with."""
+        assert self._chain(pb, ['-J', 'outer', 'admin@relay'], 'relay') \
+            == (['outer'], 'admin@relay')
+
+    def test_relay_as_own_host_without_outer_hops(self, pb):
+        """Nothing left to jump through: the caller drops '-J' entirely."""
+        assert self._chain(pb, ['admin@relay'], 'relay') \
+            == ([], 'admin@relay')
+
+    @pytest.mark.parametrize('flags', [
+        ['-o', 'ProxyJump=outer'],
+        ['-oProxyJump=outer'],
+        ['-J', 'outer'],
+    ])
+    def test_every_proxyjump_spelling_is_read(self, pb, flags):
+        assert self._chain(pb, flags + ['admin@relay'], 'relay') \
+            == (['outer'], 'admin@relay')
+
+    def test_kiosk_pane_does_not_echo_the_command(self, app, pb):
+        """The kiosk argv carries the key-isolation flags injected so the
+        user cannot see or change them, down to the key's path."""
+        app.kiosk_mode = True
+        script = app._mux_pane_script(['ssh', '-i', '/etc/pb/key', 'host'])
+        assert 'printf \'$ ' not in script
+        assert '/etc/pb/key' in script, "the command itself still runs"
+
+    def test_pane_echoes_the_command_normally(self, app, pb):
+        script = app._mux_pane_script(['ssh', '-J', 'a,b', 'c'])
+        assert script.startswith("printf '$ %s\\n' 'ssh -J a,b c'; ")
+
+    @pytest.mark.parametrize('hop,target', [
+        ('h:2222', 'h'),
+        ('[2001:db8::1]:2222', '[2001:db8::1]'),
+    ])
+    def test_a_differing_port_is_a_different_endpoint(self, pb, hop, target):
+        """ssh accepts '-J h:2222 h'; both port spellings must compare."""
+        hops, dest = self._chain(pb, ['-J', hop, 'relay'], target)
+        assert hops == [hop, 'relay'] and dest == target
+
+    def test_same_ipv6_endpoint_collapses(self, pb):
+        assert self._chain(pb, ['-J', 'outer', '[2001:db8::1]'],
+                           '[2001:db8::1]') == (['outer'], '[2001:db8::1]')
+
+    @pytest.mark.parametrize('order', ['before', 'after'])
+    def test_alias_and_address_are_one_host(self, app, pb, order):
+        """A ':resolv' written after the ':remote-ping' leaves the relay
+        under its alias while the target is already an address; compared
+        literally the two look unrelated and the loop slips through."""
+        resolv = ':resolv 10.123.254.2 proxmox'
+        directive = 'admin@proxmox 10.123.254.2'
+        if order == 'before':
+            app._dispatch_cmd(resolv)
+            app._cmd_remote_ping(directive)
+        else:
+            app._cmd_remote_ping(directive)
+            app._dispatch_cmd(resolv)
+        hops, dest = app.monitors[-1].connect_chain()
+        assert hops == []
+        assert dest in ('admin@proxmox', 'admin@10.123.254.2')
+
+    def test_connect_preview_for_the_relay_itself(self, app, pb):
+        """End to end: 'c', 'C' and the Connect: line all read this chain."""
+        app.hosts_map['proxmox'] = ('10.123.254.2', 'proxmox')
+        app.hosts_map['10.123.254.2'] = ('10.123.254.2', 'proxmox')
+        app._cmd_prog_options('ssh proxmox -l admin')
+        app._cmd_remote_ping('-J 217.160.7.176 admin@10.123.254.2 10.123.254.2')
+        m = app.monitors[-1]
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        assert app._connect_preview(m) == \
+            'ssh -l admin -J 217.160.7.176 admin@10.123.254.2'
+
+    def test_connect_preview_for_a_host_behind_the_relay(self, app, pb):
+        app._cmd_remote_ping('-J 217.160.7.176 admin@10.123.254.2 10.111.1.1')
+        m = app.monitors[-1]
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        assert app._connect_preview(m) == \
+            'ssh -J 217.160.7.176,admin@10.123.254.2 10.111.1.1'
+
+    def test_relay_as_own_host_with_no_hops_drops_the_option(self, app, pb):
+        """With no hops left there is no '%d', so the plain 'ssh %r' binding
+        takes over — a '-J' with an empty value would be rejected by ssh."""
+        app._cmd_remote_ping('admin@10.123.254.2 10.123.254.2')
+        m = app.monitors[-1]
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        assert app._connect_preview(m) == 'ssh admin@10.123.254.2'

@@ -1000,17 +1000,31 @@ Key bindings
 | Token             | Expands to                                            |
 +===================+=======================================================+
 | ``%h``            | Selected host display name                            |
++-------------------+-------------------------------------------------------+
 | ``%i``            | Selected host IP (resolved)                           |
++-------------------+-------------------------------------------------------+
 | ``%r``            | Connectable target: static ``:resolv`` IP if set,     |
 |                   | otherwise the display hostname                        |
++-------------------+-------------------------------------------------------+
 | ``%d``            | SSH destination (``SshPingMonitor`` only, e.g.        |
 |                   | ``user@gateway``)                                     |
++-------------------+-------------------------------------------------------+
 | ``%j``            | Jump host(s) (``SshPingMonitor`` only, from ``-J``    |
 |                   | flags; space-separated by default)                    |
++-------------------+-------------------------------------------------------+
+| ``%J``            | The whole chain that reaches the selected host: its   |
+|                   | jump hosts followed by the relay.  Absent when there  |
+|                   | is nothing to jump through, which is why the ``c``    |
+|                   | binding writes ``%{J?-J %{J:,} }`` — see below        |
++-------------------+-------------------------------------------------------+
 | ``%H``            | All hosts in section (space-sep)                      |
++-------------------+-------------------------------------------------------+
 | ``%R``            | All hosts in section using ``%r`` logic (space-sep)   |
++-------------------+-------------------------------------------------------+
 | ``%p``            | Port number (TCP monitor only)                        |
++-------------------+-------------------------------------------------------+
 | ``%s``            | Section title                                         |
++-------------------+-------------------------------------------------------+
 | ``%%``            | Literal ``%``                                         |
 +-------------------+-------------------------------------------------------+
 
@@ -1678,16 +1692,31 @@ The default ``c`` binding behaves as follows:
 - For ``SshPingMonitor`` hosts (those that have an SSH destination
   ``%d``, e.g. hosts added via ``:remote-ping`` or ``:with remote-ping``)::
 
-      :mux ssh -J %{j?%{j:,},}%d %r
+      :mux ssh %{J?-J %{J:,} }%r
 
   ping-bulk reaches these hosts by running ``ping`` on the relay, so a
-  shell on the host itself means jumping through that relay: the relay
-  becomes the final ``-J`` hop and the monitored host is the
-  destination.  Any jump hosts from the original ``:remote-ping``
-  directive are kept ahead of it in the same comma-separated list.  For
-  ``:with remote-ping ses-wg-video`` over ``10.111.1.1`` this runs::
+  shell on the host itself means jumping through that relay: ``%J`` is the
+  jump hosts from the ``:remote-ping`` directive followed by the relay, and
+  ``%r`` the monitored host.  For ``:with remote-ping ses-wg-video`` over
+  ``10.111.1.1`` this runs::
 
       ssh -J ses-wg-video 10.111.1.1
+
+  A relay that is also one of its own monitored hosts is the exception:
+  there the relay would be both the last hop and the destination, which
+  ssh refuses with *jumphost loop via <host>*.  ``%J`` stops before that
+  host instead and ``%r`` becomes the relay's own spelling of it — the
+  login ping-bulk already uses to reach it.  A ``proxmox`` monitored
+  through ``:with remote-ping -J ses-wg-video admin@proxmox`` therefore
+  connects with::
+
+      ssh -J ses-wg-video admin@proxmox
+
+  and with no jump host in front of it, with ``ssh admin@proxmox``: ``%J``
+  is then empty, so the ``-J`` inside the conditional is not written at
+  all.  An alias, a name and the address behind them count as one host
+  here, so it does not matter which spelling the directive and the host
+  line each used.
 
 - For plain ICMP/TCP hosts::
 
@@ -1695,6 +1724,15 @@ The default ``c`` binding behaves as follows:
 
   ``%r`` resolves to the static ``:resolv`` IP if one is registered,
   otherwise to the display hostname.
+
+A pane opened by ``:mux`` — including the one ``c`` opens — prints the
+command it is about to run as its first line, prefixed with ``$``::
+
+    $ ssh -J ses-wg-video 10.111.1.1
+
+That is the command after ``:prog-options`` injection and relay wrapping, so
+it is the whole story of what the key did, and it can be copied out of the
+pane to run a variant of it by hand.
 
 Users can override the ``c`` binding in their config or hosts file::
 

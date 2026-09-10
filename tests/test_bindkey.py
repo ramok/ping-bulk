@@ -14,6 +14,7 @@ so the real user config is never read or written.
 
 import curses
 import os
+import shlex
 import shutil
 import pytest
 from unittest.mock import patch, MagicMock
@@ -1748,6 +1749,47 @@ class TestContextFlagPercentI:
 # TestConnectPreview — the details overlay's 'Connect:' line
 # ===========================================================================
 
+class TestJumpChainVariable:
+    """%J — the whole chain that reaches the selected host."""
+
+    def _relayed(self, app, pb, ssh_args, target):
+        m = pb.SshPingMonitor(list(ssh_args), target)
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        return m
+
+    def _expand(self, app, template):
+        cmds, warning = app._expand_binding_commands([template])
+        assert warning is None, warning
+        return cmds[0]
+
+    def test_chain_includes_the_relay(self, app, pb):
+        self._relayed(app, pb, ['-J', 'outer', 'admin@relay'], '10.1.2.3')
+        assert self._expand(app, '%{J:,}') == 'outer,admin@relay'
+
+    def test_plain_form_joins_with_spaces(self, app, pb):
+        self._relayed(app, pb, ['-J', 'outer', 'admin@relay'], '10.1.2.3')
+        assert self._expand(app, '%J') == 'outer admin@relay'
+
+    def test_absent_for_a_host_that_is_its_own_relay(self, app, pb):
+        self._relayed(app, pb, ['admin@relay'], 'relay')
+        assert self._expand(app, 'x%{J?-J %{J:,} }y') == 'xy'
+
+    def test_absent_for_a_plain_host(self, app, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        app.entries.append(m)
+        app.highlighted_index = len(app.entries) - 1
+        assert self._expand(app, 'x%{J?-J %{J:,} }y') == 'xy'
+
+    def test_context_flag_is_accepted(self, pb):
+        context, rest = pb._parse_context_flags('--%J c :mux ssh %J')
+        assert context == frozenset({'J'})
+        assert rest == 'c :mux ssh %J'
+
+    def test_context_flag_round_trips_through_format(self, pb):
+        assert '--%J' in pb._format_context(frozenset({'J'}))
+
+
 class TestConnectPreview:
     """'Connect:' previews what 'c' would run, so it must not be rebuilt.
 
@@ -1774,8 +1816,11 @@ class TestConnectPreview:
             app._execute_binding(binding)
         if not backend.split.called:
             return None
-        launched = ' '.join(backend.split.call_args[0][1])
-        return launched.replace('sh -c ', '').split(';')[0].strip()
+        # The pane script echoes the command it is about to run as the
+        # pane's first line, so printf's argument *is* that command.
+        script = backend.split.call_args[0][1][-1]
+        echo, _, _rest = script.partition('; ')
+        return shlex.split(echo)[-1]
 
     # ── preview matches reality ─────────────────────────────────────────────
 
@@ -1793,6 +1838,31 @@ class TestConnectPreview:
         preview = app._connect_preview(m)
         assert preview == 'ssh -J relay 10.1.2.3', preview
         assert '→' not in preview
+
+    def test_relay_that_is_its_own_host_matches(self, app, pb):
+        """ssh refuses a destination that is one of its own hops, so %J stops
+        before it — and 'c', 'C' and the preview must still agree."""
+        m = self._select(app, pb.SshPingMonitor(['-J', 'outer', 'admin@relay'],
+                                                'relay'))
+        assert app._connect_preview(m) == 'ssh -J outer admin@relay'
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    def test_relay_as_own_host_without_hops_writes_no_dash_j(self, app, pb):
+        """%J is empty here, so the '-J' inside the conditional is not
+        written: ssh has no use for an empty jump list."""
+        m = self._select(app, pb.SshPingMonitor(['admin@relay'], 'relay'))
+        assert app._connect_preview(m) == 'ssh admin@relay'
+        assert app._connect_preview(m) == self._real_c(app, pb)
+
+    def test_relay_as_own_host_is_not_wrapped_in_a_second_ssh(self, app, pb):
+        """With the chain empty the binding names only %J and %r; %J must
+        still mark it relay-aware, or the command is wrapped in an ssh to
+        the relay and the user logs in twice."""
+        self._select(app, pb.SshPingMonitor(['admin@relay'], 'relay'))
+        used = set()
+        app._expand_binding_commands([':mux ssh %{J?-J %{J:,} }%r'], used=used)
+        assert 'J' in used
+        assert app._relay_prefix_for(used) == []
 
     def test_prog_options_are_shown(self, app, pb):
         app._cmd_prog_options('ssh *-router -l admin')

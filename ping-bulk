@@ -524,7 +524,7 @@ _SECTION_FOLD_ACTIONS = frozenset({'za', 'zA', 'zo', 'zO', 'zc', 'zC'})
 # 'i' (resolved IP) was missing from the original set and stayed missing when
 # 'r' and 'd' were added, so '--%i' was rejected while every other per-host
 # variable could be guarded on.
-_BINDING_CONTEXT_VARS = frozenset('hisrdjpHR')
+_BINDING_CONTEXT_VARS = frozenset('hisrdjJpHR')
 
 
 class _BindingVarMissing(Exception):
@@ -1103,6 +1103,7 @@ _HELP_BINDINGS = [
     "  keys: a-z A-Z 0-9   <CR> <Esc> <Space> <C-x>  <Up>/<Down>/<Left>/<Right>",
     "        <PageUp> <PageDown>  za zc zo …  (arbitrary multi-key sequences)",
     "  %h = host  %i = IP  %r = connectable target  %d = SSH dest  %j = jump hosts",
+    "  %J = whole chain reaching the host (its jump hosts, then the relay)",
     "  %H = section hosts  %p = port  %s = section  %% = literal %",
     "  %{H:,} = custom separator for multi-value variables",
     "  \\\\; separates multiple commands: :bind-key x :set stats down \\\\; :set dns hostname",
@@ -3321,7 +3322,7 @@ class ProbeReader(_PipeReaderLoop):
         m = self.monitor
         if not isinstance(m, SshPingMonitor):
             return []
-        hops = m._extract_jump_hosts(m._ssh_args) + [m._ssh_dest]
+        hops = list(m._ssh_hops) + [m._ssh_dest]
         # One comma-separated -J: ssh keeps only the first value of a repeated
         # option, so '-J a -J b' would silently drop b.
         return ['-J', ','.join(hops)]
@@ -3899,6 +3900,14 @@ class SshPingMonitor(SubprocessMonitor):
         super().__init__(display)
         self._ssh_args = ssh_args      # e.g. ['-J', '10.0.0.1', 'user@remote'] (resolved)
         self._original_ssh_args = original_ssh_args or ssh_args.copy()  # original args before :resolv
+        # The jump chain, read out of the directive's flags once, here, and
+        # kept as a list.  Everything that needs the hops — the display name,
+        # the probe reader, the relay wrapper, the connect binding — reads
+        # this instead of scanning ssh flags again.  Composing options from a
+        # list is safe; taking them apart again is not: '-J' has three
+        # spellings, half of ssh's short options swallow the next argument,
+        # and a mistake there rewrites the user's own command.
+        self._ssh_hops = self._extract_jump_hosts(ssh_args)
         self._ping_host = ping_host    # host that the remote ping targets
         # 'is not None', not 'or': an empty dict is falsy, so 'hosts_map or {}'
         # silently replaced a shared-but-still-empty map with a private one.
@@ -3994,6 +4003,61 @@ class SshPingMonitor(SubprocessMonitor):
                 i += 1
         return jump_hosts
 
+    def _canonical_endpoint(self, spec):
+        """``(host, port)`` for *spec*, with a ':resolv' alias resolved.
+
+        The map holds both directions (address and alias each key the same
+        pair), so looking the host part up in it turns either spelling into
+        the address.
+        """
+        host, port = _ssh_endpoint_key(spec)
+        mapped = self._hosts_map.get(host)
+        if mapped and mapped[0]:
+            host = mapped[0].lower()
+        return (host, port)
+
+    def connect_chain(self):
+        """Return ``(hops, destination)`` for reaching the monitored host.
+
+        ping-bulk reaches these hosts by running ping on the relay, so a
+        shell on the host itself goes through the relay: the chain is the
+        directive's own jump hosts followed by the relay, and the
+        destination is the target.
+
+        A relay that is also one of its own monitored hosts is the exception.
+        There the target already appears in the chain, and ssh refuses a
+        destination that is one of its hops — *jumphost loop via <host>*.
+        Reaching a hop means going through the hops *before* it, so the
+        chain is cut there, and the hop's own spelling of the login is kept:
+        for such a host that is the login ping-bulk already uses on it,
+        which is what a shell there should be.
+
+        Ports are part of the identity, because ssh accepts ``-J h:2222 h``.
+        Two spellings it cannot see are accepted as false positives, since
+        both still reach the host: a port arriving later through
+        ``:prog-options ssh <host> -p 2222``, and the bracketed form of a
+        plain name (``[h]`` against ``h``).
+
+        Endpoints are compared through the ':resolv' map and the target's
+        resolved address, so an alias, a name and the address behind them are
+        one host however each side happens to be spelled — a ':resolv'
+        written *after* the ':remote-ping' line leaves the relay under its
+        alias while the target is already an address, and a relay named in
+        DNS is compared against the address its host line gave.
+        """
+        chain = list(self._ssh_hops) + [self._ssh_dest]
+        target = self._ping_host
+        target_keys = {self._canonical_endpoint(target)}
+        if self.resolved_ip:
+            target_keys.add(self._canonical_endpoint(
+                f'{self.resolved_ip}:{self._canonical_endpoint(target)[1]}'))
+        for k, hop in enumerate(chain):
+            if self._canonical_endpoint(hop) not in target_keys:
+                continue
+            hop_user = _ssh_spec_user(hop)
+            return chain[:k], (hop if hop_user else target)
+        return chain, target
+
     @property
     def _dns_lookup_target(self) -> str:
         """Target self._ping_host so dns_mode='ip'/'hostname' show the pinged host."""
@@ -4055,8 +4119,7 @@ class SshPingMonitor(SubprocessMonitor):
         display_parts = []
 
         # Add jump host chain respecting dns_mode
-        jump_hosts = self._extract_jump_hosts(self._ssh_args)
-        for jump_host in jump_hosts:
+        for jump_host in self._ssh_hops:
             if dns_mode in ('ip', 'ip+name'):
                 display_parts.append(self._strip_username(jump_host))
             else:
@@ -5613,11 +5676,12 @@ CMD_REGISTRY = [
     CmdDef(['bind-key'],             '_cmd_bindkey',    None,
            '[--show] [key] [command]', 'bind/query/list key bindings',
            flags=['--show', '--mode', '--desc', '--hint',
-                  '--%h', '--%i', '--%s', '--%p', '--%r', '--%d', '--%j']),
+                  '--%h', '--%i', '--%s', '--%p', '--%r', '--%d', '--%j',
+                  '--%J']),
     CmdDef(['unbind-key'],           '_cmd_bindkey',    None,
            '<key>',              'unbind a key binding',
            flags=['--mode', '--%h', '--%i', '--%s', '--%p', '--%r',
-                    '--%d', '--%j']),
+                    '--%d', '--%j', '--%J']),
     CmdDef(['select'],           '_cmd_select',     ['up', 'down', 'first', 'last', 'none'],
            '[up|down|first|last|none]', 'navigate or clear host selection'),
     CmdDef(['details'],          '_cmd_details',    None,
@@ -6211,6 +6275,31 @@ def _ssh_control_dir():
 def _ssh_monitor_flags() -> list:
     """Return the SSH options for ping-bulk's own monitoring connections."""
     return list(_ssh_monitor_options)
+
+
+def _ssh_endpoint_key(spec):
+    """``(host, port)`` for an ssh destination or jump hop, for comparison.
+
+    The port is part of the identity: ssh treats ``-J h:2222 h`` as two
+    different endpoints and accepts that chain.  Both spellings of a port
+    are handled, since dropping it from only one of them made the bracketed
+    IPv6 form compare equal where the bare form did not.
+    """
+    host = spec.rsplit('@', 1)[-1]
+    port = ''
+    if host.startswith('['):                      # [2001:db8::1]:2222
+        end = host.find(']')
+        if end != -1:
+            port = host[end + 1:].lstrip(':')
+            host = host[1:end]
+    elif host.count(':') == 1:                    # host:2222
+        host, _, port = host.partition(':')
+    return (host.lower(), port or '22')
+
+
+def _ssh_spec_user(spec):
+    """The user named in an ssh destination, or '' when it names none."""
+    return spec.rsplit('@', 1)[0] if '@' in spec else ''
 
 
 def _ssh_quiet_flags(user_args=()) -> list:
@@ -8119,7 +8208,7 @@ class Application:
         # forward.  Not Ctrl-Shift-C: a terminal sends byte 3 for that just as
         # it does for Ctrl-C, so the two cannot be told apart, and it is the
         # emulator's own copy shortcut.
-        _b('C', ':mux ssh -J %{j?%{j:,},}%d %r', edit=True,
+        _b('C', ':mux ssh %{J?-J %{J:,} }%r', edit=True,
            context=frozenset('d'),
            desc='edit an SSH command for the selected host before running it')
         _b('C', ':mux ssh %r', edit=True,
@@ -8128,12 +8217,16 @@ class Application:
         _b('l', ':layout --toggle log', desc='full-screen event log, and back')
         _b('<C-l>', ':layout', desc='cycle layout: all / ping only / log only')
         # Remote-ping host: ping runs on the relay, so a shell on the *host*
-        # means jumping through that relay — the relay becomes the last hop and
-        # %r is the destination.  Connecting to %d instead landed on the relay
-        # and dropped the selected host entirely.
+        # means jumping through that relay.  %J is that whole chain and %r
+        # where it lands — both from connect_chain(), so a relay that is one
+        # of its own monitored hosts is not asked to jump through itself
+        # (ssh refuses: 'jumphost loop').  Connecting to %d instead landed on
+        # the relay and dropped the selected host entirely.
         # One comma-separated -J, never repeated flags: ssh takes the first
-        # value of a repeated option, so '-J a -J b' silently ignores b.
-        _b('c', ':mux ssh -J %{j?%{j:,},}%d %r', context=frozenset('d'),
+        # value of a repeated option, so '-J a -J b' silently ignores b.  The
+        # '-J' is inside the conditional because with nothing left to jump
+        # through, an empty value is not something ssh accepts.
+        _b('c', ':mux ssh %{J?-J %{J:,} }%r', context=frozenset('d'),
            desc='open SSH connection to selected host (via its relay)')
         _b('c', ':mux ssh %r', desc='open SSH connection to selected host')
         # No relay handling here: because this names %r and not %d, a host
@@ -8324,15 +8417,15 @@ class Application:
 
         * ``%h``/``%i``/``%r`` — the command names the host, so it is aimed at
           the host and needs the relay's vantage point.
-        * ``%d`` — the binding already handles the relay itself (as the ``c``
-          binding does, jumping through it), so it is left alone.
+        * ``%d``/``%J`` — the binding already handles the relay itself (as the
+          ``c`` binding does, jumping through it), so it is left alone.
         * neither — the command has nothing to do with the host (``:mux man
           ping-bulk`` from the help overlay), so it stays local.
 
         ``-t`` is always added: these are interactive terminal tools, and their
         UI needs a tty on the far side.
         """
-        if not used_vars or 'd' in used_vars:
+        if not used_vars or used_vars & {'d', 'J'}:
             return []
         if not used_vars & {'h', 'i', 'r'}:
             return []
@@ -8343,7 +8436,7 @@ class Application:
         if not isinstance(entry, SshPingMonitor):
             return []
         prefix = ['ssh', '-t']
-        jumps = entry._extract_jump_hosts(entry._ssh_args)
+        jumps = list(entry._ssh_hops)
         if jumps:
             # One comma-separated list: ssh keeps only the first value of a
             # repeated option, so '-J a -J b' would silently drop b.  These
@@ -8375,20 +8468,29 @@ class Application:
     # (to support patterns like %{j?-J %{j:,}}).
     _COND_RE = re.compile(r'%\{(\w+)\?([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}')
 
-    def _expand_conditional(self, s, ctx):
+    def _expand_conditional(self, s, ctx, used=None):
         """Expand %{var?template} blocks before the main variable pass.
 
         If *var* is present in *ctx* the inner *template* is expanded using
         the normal ``_replace_var`` logic.  Any missing variable inside the
         template (or an absent *var*) causes the whole block to become ``''``.
+
+        *used* collects the names the template mentions, the guard included
+        and whether or not the group fired: naming a variable is what tells
+        :meth:`_relay_prefix_for` what the binding is about, and a binding
+        that says ``%{J?-J %{J:,} }`` is relay-aware even for the host where
+        the chain turns out to be empty.  Without the guard recorded, that
+        host's command was wrapped in a second ssh to the relay.
         """
         def replace_cond(m):
             var, template = m.group(1), m.group(2)
+            if used is not None:
+                used.add(var)
             if var not in ctx:
                 return ''
             try:
                 return self._BINDING_VAR_RE.sub(
-                    lambda tm: self._replace_var(tm, ctx), template)
+                    lambda tm: self._replace_var(tm, ctx, used), template)
             except _BindingVarMissing:
                 return ''
         return self._COND_RE.sub(replace_cond, s)
@@ -8406,7 +8508,8 @@ class Application:
         """
         ctx = self._binding_context()
         try:
-            expanded = [self._expand_conditional(c, ctx) for c in commands]
+            expanded = [self._expand_conditional(c, ctx, used)
+                        for c in commands]
             return ([self._BINDING_VAR_RE.sub(
                 lambda m: self._replace_var(m, ctx, used), c)
                 for c in expanded], None)
@@ -8452,13 +8555,21 @@ class Application:
                 ctx['p'] = str(entry.port)
                 ctx['r'] = _entry_r(entry)
             elif isinstance(entry, SshPingMonitor):
-                ctx['r'] = _entry_r(entry)
                 # %d — the SSH endpoint being connected to
                 ctx['d'] = entry._ssh_dest
                 # %j — jump host list from -J flags (absent when no jumps)
-                jump_hosts = entry._extract_jump_hosts(entry._ssh_args)
-                if jump_hosts:
-                    ctx['j'] = jump_hosts
+                if entry._ssh_hops:
+                    ctx['j'] = list(entry._ssh_hops)
+                # %J / %r — the whole chain that reaches this host and where
+                # it lands, from SshPingMonitor.connect_chain(): normally the
+                # jump hosts plus the relay with the target as destination,
+                # but cut short for a relay that is one of its own monitored
+                # hosts.  %J is absent when nothing is left to jump through,
+                # which is what lets the binding drop '-J' altogether.
+                hops, dest = entry.connect_chain()
+                ctx['r'] = dest
+                if hops:
+                    ctx['J'] = hops
             else:
                 ctx['r'] = _entry_r(entry)
         elif isinstance(entry, SectionLabel):
@@ -8534,7 +8645,8 @@ class Application:
         --hint TEXT:  short label shown in the menu bar (e.g. "[t]ool")
         --if-cmd PRG: only bind if PRG is found in PATH (shutil.which)
         --if-sh "CMD": only bind if CMD exits 0 (blocked in kiosk mode)
-        Context flags (--%h/--%s/--%p/--%r/--%d/--%j) restrict to context (normal only).
+        Context flags (--%h/--%s/--%p/--%r/--%d/--%j/--%J) restrict to context
+        (normal only).
         """
         if self.kiosk_mode and not getattr(self, '_loading_file', False):
             self.add_event("cmd", "bind-key: blocked in kiosk mode")
@@ -8648,7 +8760,8 @@ class Application:
                                level=LEVEL_INFO)
                 return
 
-        # Parse context flags (--%h, --%i, --%r, --%d, --%s, --%p, --%j)
+        # Parse context flags (--%h, --%i, --%r, --%d, --%s, --%p,
+        # --%j, --%J)
         # — only for normal mode
         context = None
         if bind_modes == ['normal']:
@@ -11701,16 +11814,9 @@ class Application:
         self.add_event("cmd",
             f"mux: {shlex.join(tokens)}", level=LEVEL_DEBUG)
         try:
-            # Wrap the command so the pane stays open after the process exits,
-            # letting the user see any error output before the pane closes.
-            hold_script = (
-                shlex.join(tokens)
-                + '; _rc=$?;'
-                  ' if [ "$_rc" -ne 0 ]; then'
-                  ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
-                  ' read _ignored; fi'
-            )
-            held_tokens = ['sh', '-c', hold_script]
+            # Wrapped so the pane shows what it ran and stays open after the
+            # process exits, letting the user see any error output first.
+            held_tokens = ['sh', '-c', self._mux_pane_script(tokens)]
             if direction == 'window':
                 backend.new_window(held_tokens, focus=not no_focus)
             else:
@@ -11718,17 +11824,36 @@ class Application:
         except RuntimeError as e:
             self.add_event("cmd", f"mux: {e}")
 
+    def _mux_pane_script(self, tokens):
+        """Shell for a mux pane: show the command, run it, hold on failure.
+
+        The command is echoed as the pane's first line because the pane is
+        all the user gets to see: a relayed host's connection carries a jump
+        chain and injected ':prog-options' that are chosen for it, and
+        without the echo there is nothing to read them off — nor to copy,
+        when the next step is to run a variant of it by hand.  It is passed
+        as an argument to printf rather than as its format, so a '%' in the
+        command is not read as a conversion.
+
+        Not in kiosk mode: the argv there carries the key isolation flags
+        that _kiosk_ssh_flags() injects precisely so the user cannot see or
+        change them, down to the path of the key in use.
+        """
+        cmd = shlex.join(tokens)
+        echo = ('' if self.kiosk_mode
+                else "printf '$ %s\\n' " + shlex.quote(cmd) + '; ')
+        return (
+            echo + cmd
+            + '; _rc=$?;'
+              ' if [ "$_rc" -ne 0 ]; then'
+              ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
+              ' read _ignored; fi'
+        )
+
     def _mux_open_pane(self, tokens, direction, backend, no_focus=False):
         """Open a mux split/window with pre-built command tokens (called after confirmation)."""
         try:
-            hold_script = (
-                shlex.join(tokens)
-                + '; _rc=$?;'
-                  ' if [ "$_rc" -ne 0 ]; then'
-                  ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
-                  ' read _ignored; fi'
-            )
-            held_tokens = ['sh', '-c', hold_script]
+            held_tokens = ['sh', '-c', self._mux_pane_script(tokens)]
             if direction == 'window':
                 backend.new_window(held_tokens, focus=not no_focus)
             else:
