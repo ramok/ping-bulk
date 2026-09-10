@@ -14,6 +14,7 @@ every monitor retry at once and the backoff carries no jitter.
 
 import threading
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -136,6 +137,46 @@ class TestSpawnEndpoint:
         a = pb.SshPingMonitor(['relay'], '10.1.2.3')
         b = pb.SshPingMonitor(['relay'], '10.1.2.4')
         assert a._spawn_endpoint() == b._spawn_endpoint()
+
+
+class TestEveryConnectionKindIsPaced:
+    """All three connections ping-bulk opens itself go through the gate.
+
+    The clock probe was missed, and it is the worst offender: each host
+    schedules the next probe one interval after the last, so they never
+    drift apart and every host's probe comes due on the same tick.  A relay
+    carrying 47 hosts therefore saw 47 simultaneous handshakes every
+    clock-interval, far past sshd's MaxStartups — measured in a production
+    log as a 6 s stall that restarted all 47 monitors at once.
+    """
+
+    def test_clock_probe_is_paced_against_the_jump_host(self, pb, tmp_path):
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app = pb.Application([])
+        m = pb.SshPingMonitor(['-J', 'bastion', 'admin@relay'], '10.1.2.3')
+        m.resolved_ip = '10.1.2.3'
+        gates = []
+        with patch.object(pb, '_ssh_spawn_gate', side_effect=gates.append):
+            with patch('subprocess.run',
+                       side_effect=OSError('not actually run')):
+                app._clock_probe_once(m)
+        assert gates == ['bastion'], \
+            "the probe authenticates to the first hop, like any connection"
+
+    def test_local_clock_probe_is_not_paced(self, pb, tmp_path):
+        """A local 'ping -T' contacts no daemon."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app = pb.Application([])
+        m = pb.PingMonitor('10.1.2.3')
+        m.resolved_ip = '10.1.2.3'
+        gates = []
+        with patch.object(pb, '_ssh_spawn_gate', side_effect=gates.append):
+            with patch('subprocess.run',
+                       side_effect=OSError('not actually run')):
+                app._clock_probe_once(m)
+        assert gates == []
 
 
 class TestSetCommand:

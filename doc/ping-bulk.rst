@@ -286,10 +286,8 @@ Display
         relay → 10.0.0.1   ......._____
 
     Both bars are anchored at *now* on the left, so the marked seconds are
-    the oldest.  Without the marker the second bar was simply shorter, with
-    nothing to say whether the missing seconds were a connection being set
-    up or data that never existed — a blank still means exactly that, no
-    sample and no explanation.
+    the oldest.  A blank means the other thing: no sample and no
+    explanation.
 
     These seconds carry no probe, so they are absent from every statistic;
     a recorded reply, a loss or a process error always outranks the marker
@@ -306,11 +304,10 @@ Display
         > ``o`` (expected loss) > ``_`` (no ping running) > blank
 
     So a loss is never overwritten by a reply that happened to land in the
-    same second.  It used to be: the cell was filled last-writer-wins, and
-    the sync bar of a relayed host consequently showed noticeably fewer
-    ``X`` than the dense bar of the same history.  Two replies rank equal,
-    and there the slower one is kept — in the ``rtt`` and ``scaled`` views
-    that is the reading the cell shows.
+    same second, and the sync bar of a relayed host shows as many ``X`` as
+    the dense bar of the same history.  Two replies rank equal, and there
+    the slower one is kept — in the ``rtt`` and ``scaled`` views that is the
+    reading the cell shows.
 
     **A lost probe is dated when it was sent**, not when it was written off.
     ``ping -O`` reports an unanswered probe one interval after it went out,
@@ -357,8 +354,7 @@ Display
     prompt offers ``[t]runcate`` or ``[a]ppend``.
 
 ``X``
-    Open the *clear event log* confirmation prompt.  (This was ``C`` until
-    that key was given to the editable SSH command below.)
+    Open the *clear event log* confirmation prompt.
 
 ``C``
     Put the SSH command for the selected host on the command line **without
@@ -542,11 +538,8 @@ Event log
     event.
 
     The file is written as UTF-8 regardless of the locale ping-bulk was
-    started with.  A relayed host's name contains ``→`` and the session
-    banner an em dash, and under ``LANG=C`` those used to raise
-    ``UnicodeEncodeError`` mid-write — which, being a ``ValueError`` and not
-    an ``OSError``, escaped the log writer and killed the thread that had
-    called it.
+    started with, so a relayed host's ``→`` and the session banner's em dash
+    are written even under ``LANG=C``.
 
     A ``:log`` in the config file or the hosts file yields to
     ``-l``/``--log-file`` on the command line, and the skipped path is
@@ -781,6 +774,23 @@ Key bindings
     ``LocalForward`` meant for an interactive session from being set up once
     per monitored host, where the first to bind holds the port.
 
+    **Log level.** ``-o LogLevel=ERROR`` is added to every connection
+    ping-bulk opens, unless you name ``LogLevel`` yourself here or in the
+    ``:remote-ping`` arguments.  ssh's *notices* are per connection while
+    ping-bulk opens one per host, so each arrives as many times as there are
+    hosts: *Warning: Permanently added '<relay>' to the list of known
+    hosts.* comes once per host on every startup — and on every reconnect
+    for ever with a ``UserKnownHostsFile=/dev/null`` in ``ssh_config``,
+    where every connection is then a first connection.  ``ERROR`` still
+    carries everything that decides anything — *permission denied*, *host
+    key verification failed*, *kex_exchange_identification*, *channel N:
+    open failed* — so fatal-error classification is unaffected.  Write
+    ``-o LogLevel=INFO`` to get the notices back.
+
+    Like the sharing flags below, it is applied *outside* this setting, so
+    replacing the value here does not switch it off.  Naming ``LogLevel`` in
+    the value does.
+
     **Connection sharing** is deliberately not part of that default, because
     the right answer differs by connection kind:
 
@@ -841,8 +851,8 @@ Key bindings
     A marked host draws a dim ``o`` in the history strip instead of a red
     ``X``, is counted apart in a section badge (``8↑/1↓/1○``), and logs its
     up and down events at ``info`` rather than the default level — still
-    recorded, so the log file stays greppable, but no longer filling the
-    visible log with expected silence.
+    recorded, so the log file stays greppable, without filling the visible
+    log with expected silence.
 
     Not yellow, and not only a colour: yellow already means *answered,
     slowly* in that strip (``x`` for a late reply, ``5``-``9`` for 50-90 ms),
@@ -894,8 +904,8 @@ Key bindings
     ``0`` removes the limit.
 
     ping-bulk opens one connection per monitored host, and without a limit it
-    opens them all at once — 20 relayed hosts were measured spawning 20 ``ssh``
-    processes within 10 ms.  ``sshd``'s ``MaxStartups`` defaults to
+    opens them all at once — twenty relayed hosts spawn twenty ``ssh``
+    processes within milliseconds.  ``sshd``'s ``MaxStartups`` defaults to
     ``10:30:100``, meaning it starts refusing at ten concurrent
     *unauthenticated* connections, so a relay carrying dozens of monitored
     hosts drops a share of them at every startup with *kex_exchange_
@@ -916,6 +926,19 @@ Key bindings
     The limit applies to reconnections as well as startup, which is the reason
     it is a rate rather than a one-off stagger: a relay restart has every
     monitor behind it retry at once.
+
+    Every connection ping-bulk opens for itself is paced: the monitoring
+    ``ping``, a ``:probe-source`` reader, the remote-clock probe behind the
+    *Drift* column, and the one ``uname -s`` that identifies a relay's OS.
+
+    The clock probe is the one to watch on a large relay, because its bursts
+    repeat: each host schedules its next probe one interval after the last,
+    so the probes stay in step and all of them come due on the same tick.
+    Dozens at once are enough to trip ``MaxStartups`` on the shared hop and
+    stall the monitoring connections behind it, which the stale-child
+    watchdog answers by restarting them.  Pacing spreads the burst; raising
+    ``:set clock-interval`` spreads it further, and a ``:set stats`` without
+    ``drift``/``rtime`` stops the probes entirely.
 
 ``:set late-grace <seconds>``
     How long a probe reported unanswered by ``ping -O`` may still be
@@ -1075,22 +1098,33 @@ Hosts and DNS
 Monitoring via SSH
 ------------------
 
-``:remote-ping [ssh-opts] <relay> <target>``
-    Add a monitor that runs ``ping -O -D <target>`` on the remote
-    machine *relay* via ``ssh -o BatchMode=yes``.  *ssh-opts* may include
-    any SSH flags (e.g. ``-J bastion``).  The last token is always the
-    ping target; everything before the last token is the SSH command line.
+``:remote-ping [--os <os>] [ssh-opts] <relay> <target>``
+    Add a monitor that runs ping on the remote machine *relay* via
+    ``ssh -o BatchMode=yes``.  *ssh-opts* may include any SSH flags
+    (e.g. ``-J bastion``).  The last token is always the ping target;
+    everything before the last token is the SSH command line.
+
+    ``--os`` names the operating system the relay runs — ``auto`` (the
+    default), ``linux``, ``freebsd`` or ``mikrotik`` (alias
+    ``routeros``) — which decides the ping command and how its output is
+    read: ``ping -O -D`` on Linux, plain ``ping`` on FreeBSD/OPNsense,
+    ``/ping`` on RouterOS.  With ``auto`` the relay is probed once with
+    ``uname -s`` on the first connection (RouterOS gives itself away by
+    answering ``bad command name``); the answer is cached for the run, and
+    the flag beats any ``:relay-os`` rule.  See `Relay operating systems`_
+    for what each OS can and cannot report.
 
     Examples::
 
         :remote-ping user@remote 8.8.8.8
         :remote-ping -J bastion ops@remote-a 10.10.0.1
+        :remote-ping --os mikrotik admin@192.168.190.9 10.0.0.197
 
-``:with remote-ping [ssh-opts] <relay>``
+``:with remote-ping [--os <os>] [ssh-opts] <relay>``
     Open a remote-ping block.  Every plain host line that follows (until
     ``:end``) is automatically wrapped as
-    ``:remote-ping [ssh-opts] <relay> <host>``.  ``:for`` loops may appear
-    inside the block.  Only valid inside a hosts file.
+    ``:remote-ping [--os <os>] [ssh-opts] <relay> <host>``.  ``:for``
+    loops may appear inside the block.  Only valid inside a hosts file.
 
     Example::
 
@@ -1100,6 +1134,62 @@ Monitoring via SSH
                 10.10.1.$1
             :end
         :end
+
+``:relay-os [--remove] <host|glob> <auto|linux|freebsd|mikrotik>``
+    Declare the OS of every relay matching the pattern, instead of writing
+    ``--os`` on each ``:remote-ping``.  Patterns are ``fnmatch`` globs
+    matched against the relay destination (with and without ``user@``) and
+    its ``:resolv`` alias, the same resolution ``:no-alarm`` applies to
+    hosts; the last matching rule wins, and an ``--os`` flag on the
+    directive itself beats any rule.  ``:relay-os <glob> auto`` also
+    forgets a cached detection answer, so the matching relays are probed
+    again on their next connection.  With no argument, lists the current
+    rules.  Saved by ``:save-config``.
+
+    Example::
+
+        :relay-os *-router    mikrotik
+        :relay-os tent-router freebsd
+
+.. _Relay operating systems:
+
+Relay operating systems
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Not every feature is available through every relay OS, because the three
+pings differ in what they report.  What each one can do:
+
+======================  =====================  ==========================  ==========================
+Feature                 linux (iputils)        freebsd / OPNsense          mikrotik RouterOS
+======================  =====================  ==========================  ==========================
+Per-probe loss report   yes (``-O``)           no; losses come from        yes (``timeout`` rows)
+                                               silence at ~1/s, corrected
+                                               by the next reply's
+                                               icmp_seq
+Remote ``-D`` stamps    printed, and ignored   not available (``-D``       not available; receipt
+                        over ssh in favour of  there sets Don't            time is used
+                        local receipt time     Fragment)
+Late-reply detection    yes (icmp_seq          no; a slow reply is         a timed-out probe becomes
+                        pairing)               recorded as a normal one    a loss after
+                                                                           ``late-grace``
+Drift / RTime column    yes, via               not available; the column   not available; the column
+                        ``-T tsandaddr``       reads ``no-remote-time``    reads ``no-remote-time``
+``:probe-source``       yes                    yes; the loop runs under    only if RouterOS ssh
+                                               ``sh -c``, so a csh login   forwarding is enabled
+                                               shell is fine               (see below)
+Stale-child watchdog    restarts after 3       never restarts for          restarts after 3 silent
+                        silent windows         silence; a wedged link is   windows — ``/ping`` prints
+                                               caught by ssh keepalive     a row every second
+======================  =====================  ==========================  ==========================
+
+Two RouterOS notes.  A MikroTik used as a **jump hop** (``-J``) must have
+ssh forwarding enabled — ``/ip ssh set forwarding-enabled=both`` — or every
+connection through it fails with ``administratively prohibited``; when that
+error appears, ping-bulk logs the tip alongside it.  And a FreeBSD relay
+gets ``ServerAliveInterval=5`` added to its ssh connection (unless your
+``:set ssh-options`` already names a ``ServerAlive*`` option): with no
+``-O`` output to watch, a dead link would otherwise be indistinguishable
+from a down target, so ssh itself is made to notice and exit.
 
 ``:with prog-options <prog>``
     Open a :prog-options block for *prog*.  Every non-directive line
@@ -1528,10 +1618,9 @@ above depends on it.
         *-router     -l admin     # every other router
 
     Among rules of the same kind the **last match wins**, so an exact rule
-    can be overridden by a later exact rule and a glob by a later glob.
-    Ordering alone used to decide everything, which meant a specific rule
-    had to be written after the glob it refined — and stopped working as
-    soon as another glob was appended.
+    can be overridden by a later exact rule and a glob by a later glob.  A
+    specific rule therefore keeps working wherever it sits in the file, and
+    a glob appended after it does not take it over.
 
     For a host monitored through a relay (``:remote-ping`` or ``:with
     remote-ping``) the patterns are matched against the **target** — its
@@ -2161,7 +2250,31 @@ offset::
 When ``ping`` reported a reason shortly before the host went down, that reason
 is appended to the *host down* line, so the log says why and not merely that::
 
-    2026-03-20T14:05:32+0200   192.168.1.1   host down.    Up time:   3600 sec (60 min 0 sec)  (ping: sendmsg: Network is unreachable)
+    2026-03-20T14:05:32+0200   192.168.1.1   host down.    Up time:   3600 sec (60 min 0 sec)  (network is unreachable)
+
+A complaint from ``ping`` or ``ssh`` is also reported on its own line, once per
+distinct message — but rephrased around the host, because the original names
+the system call that failed and says nothing about whether the host ever
+worked.  Which of three headings it gets depends on the host's own history::
+
+    host startup fail: no route to host  (ping: sendmsg: No route to host)
+    host unreachable: no route to host   (ping: sendmsg: No route to host)
+    probe error: no route to host        (ping: sendmsg: No route to host)
+
+The first is a host that has never answered, the second one that answered
+before and does not now, the third a single failed probe on a host that is
+answering — worth a line, not an alarm.  The original text is kept in
+brackets, so the log stays greppable for the exact wording.  A message with
+no known meaning is passed through untouched.
+
+One ssh wording is worth naming here, because it names nothing itself:
+*Connection closed by UNKNOWN port 65535*.  With ``-J`` the connection to the
+relay rides a channel through the jump host, which has no peer address of its
+own, so when the far sshd drops it during the handshake ssh cannot say who
+did.  It is the same event as *kex_exchange_identification: Connection reset
+by peer*: the relay's ``sshd`` refusing an unauthenticated connection under
+``MaxStartups``, or the jump hop tearing the channel down.  Lower
+``:set ssh-connect-rate`` if it happens on every startup.
 
 The log is scrollable in the UI (``↑``/``↓``/``PgUp``/``PgDn``) and
 can be streamed to a file with ``-l``/``--log-file`` or ``:log``.

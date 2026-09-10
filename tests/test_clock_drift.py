@@ -385,7 +385,7 @@ class TestProbeCmd:
         cmd = pb.Application._clock_probe_cmd(m, '10.0.0.5')
         assert cmd == (
             ['ssh', '-o', 'BatchMode=yes'] + pb._ssh_sharing_flags(False)
-            + pb._ssh_monitor_flags()
+            + pb._ssh_quiet_flags() + pb._ssh_monitor_flags()
             + ['-J', 'bastion', 'user@relay',
                'ping', '-n', '-c', '1', '-W', '2', '-T', 'tsandaddr',
                '10.0.0.5'])

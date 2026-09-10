@@ -56,6 +56,33 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 18 (relays that do not run Linux)**: `:remote-ping` works through
+  FreeBSD/OPNsense and MikroTik RouterOS relays. Declared with `--os
+  auto|linux|freebsd|mikrotik` on the directive or a `:relay-os <glob> <os>`
+  rule (matched like `:no-alarm`, flag beats rule, last rule wins);
+  `auto` (the default) probes each relay once with `uname -s` — RouterOS
+  answers `bad command name` — cached per `tuple(ssh_args)`, connection
+  failures fall back to linux uncached. Per-OS profiles
+  (`_RELAY_OS_PROFILES`) supply the argv (`/ping` on RouterOS, plain `ping`
+  behind an `echo PING-BULK-READY` preamble on FreeBSD), the parser, and the
+  loss model. **Everything measured on the real machines** (FreeBSD 14.3,
+  RouterOS 7.22): RouterOS prints one row per second forever with no
+  `count=`, its `timeout` rows reuse the `-O` `_pending` back-dating, and an
+  ICMP-error row names the *reporting* router in HOST with that router's own
+  TIME — a row with status text is a loss no matter its TIME, so only the
+  exact five-token shape is a reply. FreeBSD has no `-O` and a down target
+  produces zero stdout (the banner is stdio-buffered until the first reply),
+  so losses are synthesized from silence at ~1/s after the ready marker and
+  reconciled against the next reply's icmp_seq; the stale kill is disabled
+  for that profile and `ServerAliveInterval=5` turns a wedged link into a
+  child exit. Clock probe (`Drift`/`RTime`) verdicts `no-remote-time`
+  immediately on both. `ProbeReader`'s `while` loop now runs under `sh -c`
+  (FreeBSD root logs in with csh). A `channel open failed:
+  administratively prohibited` stderr gets a one-time tip naming
+  `/ip ssh set forwarding-enabled=both`. Fatal wordings extended per OS
+  (`cannot resolve`, `bad command name`, `failure: resolve failed`).
+  Tests: `tests/test_relay_os.py` (51 tests, fixtures are verbatim captured
+  output).
 - **Phase 17 (folding follows the marker; a silent log is no longer possible)**:
   A `:no-alarm` host that is down no longer counts as down for a fold
   decision — `_counts_as_down()` is the single predicate behind `autofold`,
@@ -302,9 +329,37 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
   empty read windows the child is terminated so the backoff loop replaces it —
   a stuck process neither exits nor speaks, so nothing else would ever end that
   state. Gated on having seen output first, or a slow SSH connect would be cut
-  short in a loop.
-- Subclasses override only `_build_ping_cmd()`, `_is_fatal_error()`, and the class
-  attributes `_STALE_SECS` / `_STALE_MAX_WINDOWS` / `_trust_ping_timestamp`.
+  short in a loop. **"Silent" means no bytes on either pipe, not "no line this
+  parser understood."** Measured the hard way: counting staleness from the
+  last parsed *result* killed every host that answers with an ICMP error
+  (`From … Destination Host Unreachable` matches neither `time=` nor `no
+  answer yet`), and a 52-host production run logged 50 restarts and 13
+  `Broken pipe` in one minute where the previous build had one restart in
+  fourteen hours. A transport that needs result-recency instead — FreeBSD,
+  whose stderr chatter would otherwise mask its only loss signal — gets it
+  through `_stale_without_output`, and those windows never count towards the
+  kill. **Exception:** the FreeBSD relay profile — FreeBSD ping has
+  no `-O` and (measured) a down target produces *zero* stdout; even the PING
+  banner sits in ping's stdio buffer until the first reply flushes it, so
+  silence there means "target down", not "child wedged". That profile
+  synthesizes ~1 loss/s from silence (reconciled against the next reply's
+  icmp_seq so nothing is billed twice), disables the stale kill, and hands
+  wedged-link detection to `ServerAliveInterval=5` (ssh exits → the backoff
+  loop respawns). Silence only counts once the `echo PING-BULK-READY`
+  preamble proves the session up (`_stale_without_output`).
+- Subclasses override only `_build_ping_cmd()`, `_is_fatal_error()`,
+  `_prepare_spawn()`, and the class attributes `_STALE_SECS` /
+  `_STALE_MAX_WINDOWS` / `_trust_ping_timestamp`. `SshPingMonitor` further
+  dispatches per relay OS through `_RELAY_OS_PROFILES` (linux/freebsd/
+  mikrotik): the profile picks the remote ping argv (`ping -O -D` / plain
+  `ping` / `/ping`), an optional stdout parser, the silence policy above,
+  extra fatal-stderr wordings, extra ssh options, and whether the
+  `-T tsandaddr` clock probe can work (`no-remote-time` verdict is immediate
+  when it cannot). The OS comes from `--os` on `:remote-ping`, else the last
+  matching `:relay-os` glob rule (matched like `:no-alarm`), else one cached
+  `uname -s` probe per relay (`_detect_relay_os`; RouterOS answers `bad
+  command name`, and connection failures fall back to linux *uncached* so a
+  relay that is down at startup is not branded forever).
 
 ### Method Categorization
 
@@ -381,6 +436,21 @@ Three details that are deliberate:
 
 A local `ping` returns `None` from `_spawn_endpoint()` and is never paced: it
 contacts no daemon.
+
+**Every connection ping-bulk opens for itself must pass the gate.** All four
+now do: `SubprocessMonitor.ping()`, `ProbeReader.run()`, `_detect_relay_os()`
+and `_clock_probe_once()`. The clock probe was missed for a long time and was
+the worst of them, because its burst is *periodic*, not one-off: each host
+sets `_clock_next_ts = now + clock_interval` when its probe finishes, so the
+probes never drift apart and all of them come due on the same tick. **Measured
+in a production log**: 47 relayed hosts, `clock-interval` 30 s, and one tick's
+worth of 47 simultaneous handshakes was enough to trip `MaxStartups` on the
+jump host — `Connection closed by UNKNOWN port 65535` (ssh cannot name the
+peer, because with `-J` the relay connection rides a channel that has no peer
+address of its own) — and to stall the *monitoring* connections through the
+same hop for 6 s, which the stale-child watchdog answered by restarting all 47
+at once. The gate belongs in the short-lived `clock:<host>` thread, before
+`subprocess.run`, so its timeout budget starts after the wait.
 
 ### Sharing
 

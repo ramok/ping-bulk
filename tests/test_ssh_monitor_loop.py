@@ -34,8 +34,13 @@ _FATAL_STDERR_PING = 'ping: name or service not known\n'
 _REPLY = '[1700000000.0] 64 bytes from 10.0.0.1: icmp_seq=1 ttl=64 time=%s ms\n'
 
 
-def _ssh_monitor(pb, ping_host='10.0.0.1', ssh_dest='relay'):
-    return pb.SshPingMonitor([ssh_dest], ping_host)
+def _ssh_monitor(pb, ping_host='10.0.0.1', ssh_dest='relay', relay_os='linux'):
+    # relay_os is pinned: 'auto' (the production default) would probe the
+    # relay with `uname -s` through subprocess.run, which these tests patch
+    # at the Popen level — the detection probe would consume the FakeProc
+    # meant for the monitor's own ping.  Detection has its own tests in
+    # test_relay_os.py.
+    return pb.SshPingMonitor([ssh_dest], ping_host, relay_os=relay_os)
 
 
 def _run_ping(monitor, timeout=5.0):

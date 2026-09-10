@@ -37,8 +37,10 @@ Events
   sees through NAT.  See [Remote clock monitoring](#remote-clock-monitoring).
 - **DNS display modes** — off, hostname, IP, name+ip, ip+name.
 - **Flexible sorting** — by name, status, or latency.
-- **Remote monitoring** — run `ping` on a remote host via
-  `:remote-ping` / `:remote-ping-begin`/`:remote-ping-end` (SSH).
+- **Remote monitoring** — run `ping` on a remote host via `:remote-ping`
+  (SSH), one host at a time or a whole `:with remote-ping` block.  The relay
+  may run Linux, FreeBSD/OPNsense or MikroTik RouterOS; its OS is detected
+  automatically, or declared with `--os` / `:relay-os`.
 - **Mux sessions** — open `mtr`, `ssh`, or any command in a tmux split
   pane directly from the host list (`:mux`).
 - **Custom program options** — `:prog-options` / `:prog-options-begin`
@@ -254,9 +256,14 @@ comments, and command directives:
 :remote-ping user@remote-server 10.20.0.1
 
 ## Remote site — many hosts via SSH (one SSH connection per host)
-:remote-ping-begin user@remote-server
+:with remote-ping user@remote-server
 10.10.0.{1..8}
-:remote-ping-end
+:end
+
+## Behind a MikroTik router (RouterOS '/ping'; 'auto' would detect it too)
+:with remote-ping --os mikrotik admin@10.0.0.1
+10.30.0.{1..4}
+:end
 
 :log /var/log/ping-bulk.log
 ```

@@ -311,6 +311,16 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 :remote-ping ops@remote-b 10.20.0.1
 :remote-ping ops@remote-b 10.20.0.{2..3}
 
+### Relays that do not run Linux (FreeBSD/OPNsense, MikroTik RouterOS)
+# The relay's OS decides which ping is run there and how its output is
+# read: iputils `ping -O -D` on Linux, plain `ping` on FreeBSD, `/ping` on
+# RouterOS.  With nothing declared the relay is probed once with `uname -s`
+# and the answer cached; declare it to skip the probe.  A MikroTik used as
+# a -J jump hop also needs: /ip ssh set forwarding-enabled=both
+:relay-os *-router       mikrotik   # glob rules, matched like :no-alarm
+:relay-os fw.example.com freebsd    # last matching rule wins
+:remote-ping --os mikrotik admin@192.168.88.1 10.40.0.1   # per-directive
+
 ### Sensors 5-7 behind a jumphost (conditional :with inside :for)
 # Inline :if can open and close a :with remote-ping block for selected
 # iterations only.  Both lines must use the same condition so the block

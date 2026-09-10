@@ -409,6 +409,7 @@ def _make_app(pb, entries):
     app.hosts_map = {}
     app.port_map  = {}
     app.no_alarm_patterns = []
+    app.relay_os_rules = []
     app.events    = pb.deque(maxlen=1000)
     app.history_size   = 100
     app.sync_history   = True

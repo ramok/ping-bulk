@@ -351,9 +351,18 @@ class TestStderrDiagnostics:
         assert m.take_new_stderr() == []
 
     def test_recent_stderr_offered_as_reason(self, pb):
+        """A recognised wording is shortened to its host-level meaning: this
+        text goes in brackets after 'host down', where the system call that
+        hit the error is mostly punctuation.  The stderr pass still logs the
+        line in full, so the exact text stays greppable."""
         m = pb.PingMonitor('10.0.0.1')
         m._note_stderr('ping: sendmsg: Network is unreachable')
-        assert m.recent_stderr() == 'ping: sendmsg: Network is unreachable'
+        assert m.recent_stderr() == 'network is unreachable'
+
+    def test_unrecognised_reason_passed_through_verbatim(self, pb):
+        m = pb.PingMonitor('10.0.0.1')
+        m._note_stderr('ping: local error: Message too long')
+        assert m.recent_stderr() == 'ping: local error: Message too long'
 
     def test_stale_stderr_not_offered_as_reason(self, pb):
         """An old warning must not be blamed for a fresh outage."""

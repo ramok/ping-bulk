@@ -1004,7 +1004,11 @@ _HELP_CMDS_HOSTSFILE = [
     "  Hosts file directives",
     "  :ping <host>\\[:port]       add a new host to monitor  (port → TCP connect check)",
     "  :resolv-port <port> <svc> static port→service mapping (overrides default port names)",
-    "  :remote-ping \\[ssh-opts] <relay> <target>  remote ping (runs on relay via SSH)",
+    "  :remote-ping \\[--os <os>] \\[ssh-opts] <relay> <target>  remote ping (runs on relay via SSH)",
+    "                            --os auto|linux|freebsd|mikrotik: the relay's OS decides",
+    "                            the ping command; auto (default) probes it once with uname -s",
+    "  :relay-os <host|glob> <os>  declare the OS for every relay matching the glob",
+    "                            (matched like :no-alarm; --os on the directive beats a rule)",
     "  :source <file>            load hosts/commands from file",
     "",
     "  :resolv <ip-pat> <host>   static name→IP mapping (overrides DNS for ping and SSH)",
@@ -1025,7 +1029,7 @@ _HELP_CMDS_HOSTSFILE = [
     "                            declare how one key is displayed; undeclared keys ignored",
     "                            show it: :set stats <name> | :set ping-view <name> | \\[Enter] on a host",
     "",
-    "  :with remote-ping \\[ssh-opts] <relay>      open block; host lines → :remote-ping commands",
+    "  :with remote-ping \\[--os <os>] \\[ssh-opts] <relay>  open block; host lines → :remote-ping commands",
     "  :with prog-options <prog>                   open :prog-options block; inner lines are <glob> [opts]",
     "  :end  (:done)                               close :with, :for, or :if block",
     "",
@@ -1224,6 +1228,13 @@ example.com:443
 ### Site B
 :remote-ping ops@remote-b 10.20.0.{1..5}
 
+### Relays that do not run Linux (FreeBSD/OPNsense, MikroTik RouterOS)
+# The relay's OS decides the remote ping command; 'auto' (the default)
+# probes it once with uname -s.  Declare it by glob, or per directive.
+:relay-os *-router    mikrotik
+:relay-os fw.example.com freebsd
+:remote-ping --os mikrotik admin@192.168.88.1 10.40.0.1
+
 ### Sensors 5-7 via relay, 1-3 direct (conditional :with inside :for)
 :for sensor-{1-3,5-7}
     :if $1 in 5,6,7 -> :with remote-ping ops@relay.example.com
@@ -1312,19 +1323,145 @@ _FATAL_SSH_ERRORS = (
     'no supported authentication methods available',
 )
 
+
+# Transport complaints that say something about the *host*, mapped to the
+# phrase to say it in.  ping and ssh describe a failure in terms of the system
+# call that hit it ('sendmsg: No route to host'), which reads as plumbing in a
+# log whose other lines are host states; the same text also has to serve as
+# the parenthesised reason on a 'host down' line.  Substring matches on the
+# lowercased line, first hit wins, so the more specific wordings come first.
+_HOST_DIAGNOSES = (
+    ('no route to host',              'no route to host'),
+    ('host is down',                  'host is down (no ARP reply)'),
+    ('destination host unreachable',  'destination host unreachable'),
+    ('destination net unreachable',   'destination network unreachable'),
+    ('network is unreachable',        'network is unreachable'),
+    ('name or service not known',     'name does not resolve'),
+    ('cannot resolve',                'name does not resolve'),
+    ('unknown host',                  'name does not resolve'),
+    ('operation not permitted',       'ping not permitted on the relay'),
+    ('no such device',                'no such interface on the relay'),
+    ('permission denied',             'ssh refused the credentials'),
+    ('host key verification failed',  'ssh host key mismatch'),
+    # Closed before the peer could be named: with '-J' the connection to the
+    # relay rides a channel through the jump host, which has no peer address
+    # of its own — hence ssh's 'UNKNOWN port 65535'.  Same family as
+    # 'kex_exchange_identification', i.e. the relay's sshd dropping an
+    # unauthenticated connection (MaxStartups) or the jump hop tearing the
+    # channel down.  See AGENTS.md §9a.
+    ('connection closed by',          'ssh closed during handshake '
+                                      '(relay busy? see ssh-connect-rate)'),
+    ('kex_exchange_identification',   'ssh closed during handshake '
+                                      '(relay busy? see ssh-connect-rate)'),
+    ('connection refused',            'ssh connection refused'),
+    ('connection timed out',          'ssh connection timed out'),
+    ('operation timed out',           'ssh connection timed out'),
+    ('administratively prohibited',   'jump host refuses to forward'),
+)
+
+
+def _host_diagnosis(text):
+    """Return a short host-level reason for a transport line, or None."""
+    low = (text or '').lower()
+    for mark, reason in _HOST_DIAGNOSES:
+        if mark in low:
+            return reason
+    return None
+
+
+# OpenSSH's wording when a jump hop refuses to forward a channel.  RouterOS
+# ships with ssh forwarding disabled on some versions, and a MikroTik used as
+# a '-J' hop then fails every connection through it with exactly this — an
+# error that names neither the hop nor the fix, hence the tip below.
+_SSH_FORWARD_REFUSED_MARK = 'administratively prohibited'
+_MIKROTIK_FORWARD_TIP = (
+    'tip: if a jump host on this chain is a MikroTik, enable forwarding '
+    'on it: /ip ssh set forwarding-enabled=both')
+
+
+def _is_fatal_ssh_text(stderr_text, extra=()):
+    """True if *stderr_text* names a non-retryable SSH or ping failure.
+
+    *extra* adds the relay-OS-specific wordings (a RouterOS 'bad command
+    name', FreeBSD's 'cannot resolve') on top of the shared lists.
+    """
+    text = stderr_text.lower()
+    return any(pattern in text
+               for pattern in _FATAL_SSH_ERRORS + _FATAL_PING_ERRORS
+               + tuple(extra))
+
 # First words that strongly suggest a mistyped directive (missing ':').
 # Used to produce a helpful warning when a host line contains spaces.
 _DIRECTIVE_KEYWORDS = frozenset({
     'if', 'elif', 'else', 'end', 'for', 'with', 'let',
     'resolv', 'resolv-port', 'title', 'title2', 'title3',
     'remote-ping', 'source', 'log', 'edit', 'bind-key', 'section',
-    'probe', 'probe-source', 'no-alarm',
+    'probe', 'probe-source', 'no-alarm', 'relay-os',
 })
 
 
 # fnmatch metacharacters.  A pattern without any of these matches exactly one
 # name, which is what lets :prog-options rank a literal above a glob.
 _GLOB_METACHARS = frozenset('*?[')
+
+
+# Accepted values for ':relay-os' and the '--os' flag on ':remote-ping'.
+# 'routeros' is what MikroTik calls the system; normalised to one spelling so
+# rules, flags and detection results always compare equal.
+_RELAY_OS_CHOICES = ('auto', 'linux', 'freebsd', 'mikrotik')
+_RELAY_OS_ALIASES = {'routeros': 'mikrotik'}
+
+
+def _normalize_relay_os(value):
+    """Return the canonical relay-OS name, or None when *value* is unknown."""
+    v = (value or '').lower()
+    v = _RELAY_OS_ALIASES.get(v, v)
+    return v if v in _RELAY_OS_CHOICES else None
+
+
+def _os_flag_error(raw):
+    """The complaint for an unusable ``--os`` value, or None if it is fine."""
+    if raw is None or _normalize_relay_os(raw) is not None:
+        return None
+    return (f"unknown --os {raw!r}; expected "
+            + ', '.join(_RELAY_OS_CHOICES) + " — detecting instead")
+
+
+# '--os <value>' in a :remote-ping argument string.  Matched on the raw text
+# (not through shlex) at the two places the parser re-serialises a :with
+# block's arguments, so the user's own quoting is left untouched.
+_OS_FLAG_RE = re.compile(r'(^|\s)--os\s+(\S+)\s*')
+
+
+def _split_os_flag(args):
+    """Extract ``--os <value>`` from :remote-ping arguments.
+
+    *args* is either the token list from ``shlex.split`` or the raw argument
+    string the hosts-file parser carries verbatim.  Returns ``(value, rest)``
+    with the flag removed from *rest*; *value* is None when no flag is
+    present, and is returned as written so the caller can report an unknown
+    OS in the user's own spelling.
+    """
+    value = None
+    if isinstance(args, str):
+        rest = args
+        while True:
+            m = _OS_FLAG_RE.search(rest)
+            if not m:
+                return value, rest.strip()
+            if value is None:
+                value = m.group(2)
+            # Every occurrence is removed, not just the first: a leftover
+            # '--os' reaches ssh as an unknown option and fails the
+            # connection at run time instead of here.
+            rest = rest[:m.start()] + m.group(1) + rest[m.end():]
+    tokens = list(args)
+    while '--os' in tokens:
+        i = tokens.index('--os')
+        if value is None:
+            value = tokens[i + 1] if i + 1 < len(tokens) else ''
+        del tokens[i:i + 2]
+    return value, tokens
 
 
 def _is_glob(pattern):
@@ -2377,13 +2514,21 @@ class Monitor(ABC):
     _SEEN_STDERR_MAX = 100
 
     def recent_stderr(self, now=None):
-        """Return the last stderr line if recent enough to explain a state change."""
+        """Return the last stderr line if recent enough to explain a state change.
+
+        A recognised wording is shortened to its host-level meaning: this
+        goes in brackets after 'host down', where the full
+        'ping: sendmsg: No route to host' is mostly punctuation.  The
+        original text is still logged in full by the stderr pass.
+        """
         now = time.time() if now is None else now
         with self.lock:
             if not self.last_stderr:
                 return None
             text, ts = self.last_stderr
-        return text if now - ts <= self._STDERR_REASON_MAX_AGE else None
+        if now - ts > self._STDERR_REASON_MAX_AGE:
+            return None
+        return _host_diagnosis(text) or text
 
     def take_new_stderr(self):
         """Pop stderr messages seen for the first time, for the event log."""
@@ -2721,6 +2866,13 @@ class _PipeReaderLoop:
     _STALE_MAX_WINDOWS = 3
     # Named in the watchdog message, so it says what is being restarted.
     _child_label = 'child'
+    # Normally a silent window only counts once the child has produced a
+    # result line, so a slow ssh connect is never reported as packet loss.
+    # The FreeBSD relay profile flips this per instance once its session
+    # marker arrives: there a down target never produces a result line at
+    # all, and the silence *is* the loss signal.  The kill threshold stays
+    # gated on real output either way.
+    _stale_without_output = False
 
     def _handle_stdout_line(self, line):
         """Handle one stdout line; return True if it was a usable result."""
@@ -2750,6 +2902,14 @@ class _PipeReaderLoop:
         open_fds = set(fds)
         got_output = False
         stale = 0            # consecutive empty select windows, for the watchdog
+        # Only for a transport where silence means a lost probe (see
+        # _stale_without_output): when the child was last heard saying
+        # something we could parse.  The watchdog itself deliberately still
+        # counts *any* output as the child being alive — a host answering
+        # with an ICMP error prints a line per probe that this parser does
+        # not recognise ('From … Destination Host Unreachable'), and killing
+        # the child for that put every unreachable host into a restart loop.
+        last_result = time.monotonic()
 
         while self.running:
             if not open_fds:
@@ -2759,9 +2919,10 @@ class _PipeReaderLoop:
                 # Nothing for _STALE_SECS: the link is stuck.  Only synthesise a
                 # loss once the child has proven it can talk, so a slow start is
                 # not reported as packet loss.
-                if got_output:
+                if got_output or self._stale_without_output:
                     self._on_stale_window()
                     stale += 1
+                last_result = time.monotonic()
                 if self._proc.poll() is not None:
                     break
                 if got_output and stale >= self._STALE_MAX_WINDOWS:
@@ -2780,6 +2941,7 @@ class _PipeReaderLoop:
                 continue
             if not self.running:
                 break        # shutting down: do not consume further output
+            produced = False
             for fd in rlist:
                 which = fds[fd]
                 try:
@@ -2801,6 +2963,20 @@ class _PipeReaderLoop:
                         self._handle_stderr_line(line)
                     elif self._handle_stdout_line(line):
                         got_output = True
+                        produced = True
+            now = time.monotonic()
+            if produced:
+                last_result = now
+            elif (self._stale_without_output
+                    and now - last_result >= self._STALE_SECS):
+                # Talking, but not about probes.  Measured on a FreeBSD
+                # relay: a down neighbour makes ping write 'sendto: Host is
+                # down' to stderr once a second, which keeps select busy for
+                # ever — so the silence that *is* this transport's loss
+                # signal was never noticed and the host showed neither reply
+                # nor loss.  Reported, never counted towards the kill.
+                self._on_stale_window()
+                last_result = now
             if not open_fds and self._proc.poll() is not None:
                 break
         # A trailing fragment without a newline is still worth parsing.
@@ -2904,6 +3080,16 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
         """
         return None
 
+    def _prepare_spawn(self):
+        """Hook run in the monitor thread before each child spawn.
+
+        The base transports need no preparation; SshPingMonitor resolves the
+        relay's OS profile here (which may block on the one detection probe
+        per relay).  Runs inside the spawn try-block, where an escaped
+        exception sets self.error permanently — implementations must catch
+        their own failures.
+        """
+
     # ── _PipeReaderLoop hooks ────────────────────────────────────────────────
     def _handle_stdout_line(self, line):
         handled = self._handle_ping_line(line)
@@ -2947,6 +3133,10 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
                 # Queued rather than logged here: a Monitor has no route to the
                 # event log, and the state loop already visits every monitor.
                 self._new_stderr.append(line)
+        if fresh and _SSH_FORWARD_REFUSED_MARK in line.lower():
+            # Follow the refusal with the likely fix; its constant text is
+            # deduped like any stderr line, so the tip appears once per host.
+            self._note_stderr(_MIKROTIK_FORWARD_TIP)
         return fresh
 
     def ping(self):
@@ -2969,6 +3159,9 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
                     # connections spends most of its time there, not in connect().
                     if self._connect_since is None:
                         self._connect_since = time.time()
+                self._prepare_spawn()
+                if not self.running:
+                    break
                 # Pace attempts to the same sshd; see _ssh_spawn_gate.  Done
                 # here rather than in start_monitoring() so it also applies to
                 # a reconnect, and so the UI is not blocked while waiting.
@@ -3092,15 +3285,24 @@ class ProbeReader(_PipeReaderLoop):
     # ── command ─────────────────────────────────────────────────────────────
 
     def _build_cmd(self):
-        """ssh <host> 'while :; do <cmd>; echo ---; sleep N; done'"""
-        remote = (f"while :; do {self.source_cmd}; echo ---; "
-                  f"sleep {self.interval:g}; done")
+        """ssh <host> sh -c 'while :; do <cmd>; echo ---; sleep N; done'"""
+        loop = (f"while :; do {self.source_cmd}; echo ---; "
+                f"sleep {self.interval:g}; done")
+        # The login shell parses whatever ssh sends, and `while` is Bourne
+        # syntax: a FreeBSD root logs in with csh, which rejects the loop
+        # outright.  `sh -c '<loop>'` parses the same everywhere /bin/sh
+        # exists, and the single quotes from shlex.quote are literal to csh
+        # too.  (A source_cmd carrying its own single quotes yields POSIX
+        # '\'' escapes that csh cannot digest — quoted commands stay a
+        # Bourne-login-shell feature.)
+        remote = 'sh -c ' + shlex.quote(loop)
         # Kiosk mode isolates ssh from the user's home directory for :mux and
         # :remote-ping; a probe connection has to do the same or it would read
         # ~/.ssh/config and the user's keys, which is exactly what kiosk keeps
         # out of reach.
         flags = _kiosk_ssh_flags() if self.kiosk_mode else []
         return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(True)
+                + _ssh_quiet_flags(self._ssh_args)
                 + _ssh_monitor_flags() + flags
                 + self._jump_args() + self._ssh_args
                 + [self._ssh_target(), remote])
@@ -3150,8 +3352,24 @@ class ProbeReader(_PipeReaderLoop):
         return True
 
     def _handle_stderr_line(self, line):
-        if line.strip():
-            self.error = line.strip()
+        line = line.strip()
+        if not line:
+            return
+        self.error = line
+        m = self.monitor
+        if (_SSH_FORWARD_REFUSED_MARK in line.lower()
+                and isinstance(m, SshPingMonitor)):
+            # A probe reaches its host *through* the relay, so a refusal here
+            # points at the relay itself — and when its OS is known, the tip
+            # can name it instead of hedging.  Routed through the monitor's
+            # stderr machinery: deduped, and visible in the event log.
+            if m._relay_os_resolved == 'mikrotik':
+                m._note_stderr(
+                    f'probe: relay {m._ssh_dest} is a MikroTik and refuses '
+                    f'ssh forwarding; run on it: '
+                    f'/ip ssh set forwarding-enabled=both')
+            else:
+                m._note_stderr('probe: ' + _MIKROTIK_FORWARD_TIP)
 
     def _on_stale_window(self):
         # No round arrived within several intervals: the values on screen are
@@ -3220,7 +3438,7 @@ class ProbeReader(_PipeReaderLoop):
                 except (OSError, subprocess.TimeoutExpired):
                     pass
 
-            if self.error and SshPingMonitor._is_fatal_error(self.error):
+            if self.error and _is_fatal_ssh_text(self.error):
                 # No credentials or no such host: retrying cannot help.
                 self._fail_all()
                 break
@@ -3413,6 +3631,238 @@ class PortMonitor(Monitor):
             time.sleep(sleep_time)
 
 
+# ── Relay OS profiles ───────────────────────────────────────────────────────
+#
+# A relay reached by :remote-ping does not have to run Linux, and the two
+# others seen in the field speak a different ping entirely.  Everything below
+# was measured on the real machines (FreeBSD 14.3/OPNsense, RouterOS 7.22),
+# not read from documentation — see the shapes quoted in each parser.
+
+# Emitted by the FreeBSD profile's `echo` preamble before ping starts.  It is
+# the proof that the ssh session is up: FreeBSD ping has no '-O', prints
+# *nothing* for a lost probe, and (measured) even its own PING banner sits in
+# a stdio buffer until the first reply flushes it — so against a down target
+# the child is silent from the first byte, indistinguishable from an ssh
+# still connecting.  After this marker, silence means lost probes.
+_FBSD_READY_MARKER = 'PING-BULK-READY'
+
+# A seq jump larger than this is a ping restart or reordering artefact, not
+# that many genuinely lost probes; the anchor resets without synthesising.
+_FBSD_MAX_SEQ_GAP = 900
+
+# Probe intervals of silence tolerated before any of it is called a loss.
+# Measured over 40 s through a real FreeBSD relay: replies arrive 0.94-1.10 s
+# apart (ssh, scheduling and the reader all add jitter to ping's 1 s), so
+# counting on a bare interval booked a loss for every long gap and a healthy
+# host read 25 % loss.  One interval of slack costs one interval of delay
+# before a genuine outage shows, which the next reply's icmp_seq then
+# reconciles exactly.
+_FBSD_SILENCE_MARGIN = 1.0
+
+
+def _fbsd_reconcile_seq(mon, seq, now):
+    """Account a FreeBSD reply's icmp_seq against the silence-made losses.
+
+    FreeBSD reports no losses, so they are synthesised from silence while the
+    target is quiet (_record_silence_losses).  When a reply arrives, its seq
+    says exactly how many probes went unanswered since the previous one —
+    record the ones the silence path has not already covered, back-dated at
+    one probe interval apart, and reset the bookkeeping.
+    """
+    if seq is None:
+        return
+
+    def anchor():
+        mon._fbsd_last_seq = seq
+        mon._fbsd_unaccounted_since = now
+        mon._fbsd_synth = 0
+
+    last = mon._fbsd_last_seq
+    if last is None:
+        anchor()
+        return
+    delta = (seq - last) % 65536      # 1 = the very next probe
+    if delta == 0:
+        return                        # duplicate reply for the same probe
+    if delta > _FBSD_MAX_SEQ_GAP:
+        # Either seq is *older* than the anchor — a reordered or very late
+        # reply, which must not drag the anchor backwards, or the next
+        # in-order reply would be read as a forward gap and booked as losses
+        # that never happened — or the child restarted and began numbering
+        # again, in which case the anchor has to follow it or nothing is
+        # ever reconciled again.  Distance decides which.
+        if (last - seq) % 65536 <= _FBSD_MAX_SEQ_GAP:
+            return                    # reordered: keep the anchor
+        anchor()                      # renumbered: follow, synthesise nothing
+        return
+    synth = mon._fbsd_synth
+    anchor()
+    interval = mon._PING_PROBE_INTERVAL
+    for k in range((delta - 1) - synth, 0, -1):
+        # Oldest first, ending one interval before this reply.
+        mon._record_loss(now - interval * k)
+
+
+def _fbsd_parse_line(mon, line, now):
+    """Parse one stdout line from FreeBSD ping (measured on 14.3/OPNsense):
+
+        64 bytes from 10.111.1.10: icmp_seq=0 ttl=64 time=0.197 ms
+
+    There is no '-O' and no timeout line; losses come from silence (the
+    stale-window hook) reconciled against the icmp_seq of the next reply.
+    """
+    if line.strip() == _FBSD_READY_MARKER:
+        # Session proven up: silence is the target's fault from here on.
+        # Deliberately *not* a result line — a run that produced only the
+        # marker and died must still classify its stderr and keep its
+        # backoff, like any run that never got a reply.
+        mon._stale_without_output = True
+        if mon._fbsd_unaccounted_since is None:
+            mon._fbsd_unaccounted_since = now
+        return False
+    if 'time=' not in line:
+        return False   # banner or statistics block — ignored
+    try:
+        latency = float(line.split('time=')[1].split()[0])
+    except (IndexError, ValueError):
+        return False
+    seq = _parse_icmp_seq(line)
+    _fbsd_reconcile_seq(mon, seq, now)
+    mon._record_reply(latency, now, seq)
+    return True
+
+
+# RouterOS time values: '349us', '12ms', '1ms433us', '2s', or (v6) a bare
+# integer of milliseconds.
+_ROS_TIME_RE = re.compile(r'^\d+$|^(?:\d+(?:us|ms|s))+$')
+_ROS_TIME_PARTS = re.compile(r'(\d+)(us|ms|s)')
+_ROS_UNIT_MS = {'us': 0.001, 'ms': 1.0, 's': 1000.0}
+
+
+def _parse_routeros_time(token):
+    """Return a RouterOS TIME cell as float milliseconds, or None."""
+    if not _ROS_TIME_RE.match(token):
+        return None
+    if token.isdigit():
+        return float(token)
+    return sum(int(n) * _ROS_UNIT_MS[u]
+               for n, u in _ROS_TIME_PARTS.findall(token))
+
+
+def _ros_parse_line(mon, line, now):
+    """Parse one stdout row from RouterOS `/ping` (measured on 7.22):
+
+          SEQ HOST                                     SIZE TTL TIME       STATUS
+            0 10.123.254.2                               56  64 349us
+            1 10.123.254.199                                              timeout
+            3 10.123.254.1                               84  64 134ms76us  host unre...
+
+    A timeout row is printed one reply-window (~1 s) after its probe, the
+    same model as iputils '-O', so it goes through the same _pending
+    machinery and gets the same back-dating.  Note the third shape: an ICMP
+    error row names the *reporting* router in HOST and carries that router's
+    round-trip in TIME — a row with status text is a failed probe no matter
+    what its TIME column says, which is why a reply must be exactly the
+    five-token shape.  Headers, the 'sent=… packet-loss=…' summary and
+    'failure:'/'bad command name' complaints (which RouterOS also writes to
+    stderr, where the fatal classification reads them) all fail the leading
+    integer test.
+    """
+    tokens = line.split()
+    if len(tokens) < 2:
+        return False
+    try:
+        seq = int(tokens[0])
+    except ValueError:
+        return False
+    if 'timeout' in tokens[1:]:
+        mon._record_no_answer(now, seq)
+        return True
+    if len(tokens) == 5:
+        latency = _parse_routeros_time(tokens[4])
+        if latency is not None:
+            mon._record_reply(latency, now, seq)
+            return True
+    # A row with a seq but no clean reply shape: 'host unreachable',
+    # 'net unreachable', 'ttl exceeded', … — the probe did not succeed.
+    mon._record_no_answer(now, seq)
+    return True
+
+
+class _RelayOsLinux:
+    """OS profile for a relay running Linux/iputils — today's behaviour.
+
+    A profile bundles what genuinely differs per relay OS: the remote ping
+    argv, an optional stdout parser (None = the inherited iputils one), the
+    loss model for silence, watchdog tuning, extra ssh options, extra fatal
+    stderr wordings, and whether the '-T tsandaddr' clock probe can work.
+    Consulted only by SshPingMonitor — the local PingMonitor stays
+    iputils-only.  Kept as class-namespaces rather than SshPingMonitor
+    subclasses because with 'auto' the OS is only known after the monitor's
+    thread has probed the relay, and a ':relay-os' rule can change it
+    mid-run; swapping one attribute is cheap, swapping a class is not.
+    """
+    name = 'linux'
+    stale_secs = 2.0           # mirror SubprocessMonitor's defaults
+    stale_max_windows = 3
+    silence_is_loss = False    # '-O' guarantees output; silence = stuck child
+    clock_probe = True
+    extra_fatal = ()
+    extra_ssh_opts = ()
+    parse_line = None          # None → inherited _handle_ping_line
+
+    @staticmethod
+    def ping_argv(target):
+        return ['ping', '-O', '-D', target]
+
+
+class _RelayOsFreebsd(_RelayOsLinux):
+    name = 'freebsd'
+    # Never kill for silence: a down target is silent by design here.  A
+    # genuinely wedged link is ssh's to notice — ServerAlive below turns it
+    # into a child exit, which the backoff loop already handles.  The window
+    # only sets how often silence is examined; how many losses it yields is
+    # computed from elapsed time, so the base 2 s costs nothing but latency.
+    stale_max_windows = 10 ** 9
+    silence_is_loss = True
+    clock_probe = False        # '-T' is FreeBSD's multicast TTL, no timestamps
+    extra_fatal = ('cannot resolve',)   # 'ping: cannot resolve x: …' (measured)
+    extra_ssh_opts = ('-o', 'ServerAliveInterval=5',
+                      '-o', 'ServerAliveCountMax=3')
+    parse_line = staticmethod(_fbsd_parse_line)
+
+    @staticmethod
+    def ping_argv(target):
+        # One argv token: ssh joins its argument words with spaces and hands
+        # the string to the remote login shell.  Plain `;` + `exec` parse the
+        # same under sh, csh (FreeBSD root's default) and OPNsense's shell.
+        return [f'echo {_FBSD_READY_MARKER}; exec ping {shlex.quote(target)}']
+
+
+class _RelayOsMikrotik(_RelayOsLinux):
+    name = 'mikrotik'
+    # /ping prints a row per probe, so silence still means a stuck child —
+    # but a busy router's rows arrive up to 1.12 s apart (measured), and the
+    # base 2 s window turned a hiccup into an invented loss on a host that
+    # was reporting fine.  Three windows still kill, now after 9 s.
+    stale_secs = 3.0
+    clock_probe = False        # /ping has no ICMP-timestamp mode
+    # All three land on stderr and the child exits without a result row
+    # (measured), which is exactly when the classification runs.
+    extra_fatal = ('bad command name', 'invalid value for argument',
+                   'failure: resolve failed')
+    parse_line = staticmethod(_ros_parse_line)
+
+    @staticmethod
+    def ping_argv(target):
+        # Continuous at 1 row/s without any count= (measured on 7.22).
+        return ['/ping', target]
+
+
+_RELAY_OS_PROFILES = {p.name: p for p in
+                      (_RelayOsLinux, _RelayOsFreebsd, _RelayOsMikrotik)}
+
+
 class SshPingMonitor(SubprocessMonitor):
     """A PingMonitor that runs ping remotely over an SSH connection.
 
@@ -3440,7 +3890,8 @@ class SshPingMonitor(SubprocessMonitor):
     route, timeout) are transient and trigger the normal retry/backoff loop.
     """
 
-    def __init__(self, ssh_args, ping_host='localhost', ping_host_label=None, original_ssh_args=None, hosts_map=None):
+    def __init__(self, ssh_args, ping_host='localhost', ping_host_label=None,
+                 original_ssh_args=None, hosts_map=None, relay_os=None):
         self._ssh_dest = ssh_args[-1] if ssh_args else ''
         self._ssh_dest_label = (original_ssh_args[-1] if original_ssh_args else None) or self._ssh_dest
         self._ping_host_label = ping_host_label or ping_host
@@ -3456,6 +3907,27 @@ class SshPingMonitor(SubprocessMonitor):
         # display name stayed an IP, and a glob rule matched on the alias
         # (':prog-options' and the like) could never match it.
         self._hosts_map = hosts_map if hosts_map is not None else {}
+        # Which OS the relay runs, in three stages: the '--os' flag on this
+        # monitor's own :remote-ping (beats everything), the value currently
+        # declared for it (flag, or a ':relay-os' rule, or 'auto'), and what
+        # the last spawn actually resolved 'auto' to.  The resolved profile is
+        # only consulted between _prepare_spawn() and the child's exit, so the
+        # linux placeholder never parses a non-Linux line.
+        #
+        # An explicit '--os auto' is kept as a flag rather than folded into
+        # the default: it is how one relay is excused from a ':relay-os'
+        # glob that would otherwise claim it, and the flag is documented as
+        # beating any rule.
+        self._relay_os_flag = relay_os
+        self._relay_os_declared = relay_os or 'auto'
+        self._relay_os_resolved = None
+        self._os = _RELAY_OS_PROFILES['linux']
+        # FreeBSD loss bookkeeping: the last icmp_seq seen, and how many
+        # losses were synthesised from silence since that reply (so the
+        # seq-gap reconciliation does not count the same probe twice).
+        self._fbsd_last_seq = None
+        self._fbsd_synth = 0
+        self._fbsd_unaccounted_since = None
         # Pre-populate resolved_ip when ping_host is already an IP address.
         # This covers the :resolv case where actual_ping_host is already an IP
         # so dns_mode='ip' works immediately without an extra resolution thread.
@@ -3625,19 +4097,113 @@ class SshPingMonitor(SubprocessMonitor):
     _trust_ping_timestamp = False
 
     def _build_ping_cmd(self):
-        """Build: ssh -o BatchMode=yes <ssh_args…> ping -O -D <ping_host>"""
+        """Build: ssh -o BatchMode=yes <ssh_args…> <profile ping command>"""
         return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
-                + _ssh_monitor_flags() + self._ssh_args
-                + ['ping', '-O', '-D', self._ping_host])
+                + _ssh_quiet_flags(self._ssh_args)
+                + _ssh_monitor_flags() + self._relay_extra_ssh_opts()
+                + self._ssh_args
+                + self._os.ping_argv(self._ping_host))
+
+    def _relay_extra_ssh_opts(self):
+        """The profile's ssh options, unless the user picked their own.
+
+        ssh takes the first value of a repeated option and these sit before
+        the user's arguments, so injecting blindly would silently override an
+        explicit choice — the same courtesy _ssh_sharing_flags extends to
+        Control* options.
+        """
+        extra = list(self._os.extra_ssh_opts)
+        if not extra:
+            return []
+        named = ' '.join(_ssh_monitor_flags() + self._ssh_args).lower()
+        if 'serveralive' in named:
+            return []
+        return extra
+
+    def _prepare_spawn(self):
+        """Resolve the relay OS and arm its profile before each child spawn.
+
+        Runs in the monitor thread: an 'auto' declaration may block here on
+        the one detection probe per relay (cached afterwards), which must
+        never happen on the UI thread.  Also resets the per-child parser
+        state — a new child starts a new icmp_seq space, so pairings and
+        seq anchors from the old one mean nothing to it.
+        """
+        declared = self._relay_os_declared
+        if declared != 'auto':
+            os_name = declared
+        else:
+            os_name = _detect_relay_os(self._ssh_args, self._ssh_dest,
+                                       self._note_stderr)
+        self._relay_os_resolved = os_name
+        self._os = _RELAY_OS_PROFILES[os_name]
+        # Instance attributes shadow the class defaults _read_until_exit
+        # reads through self.
+        self._STALE_SECS = self._os.stale_secs
+        self._STALE_MAX_WINDOWS = self._os.stale_max_windows
+        self._stale_without_output = False
+        self._fbsd_last_seq = None
+        self._fbsd_synth = 0
+        self._fbsd_unaccounted_since = None
+        # _pending is deliberately left alone: the old child's outstanding
+        # probes are real unanswered probes, and _expire_pending writes them
+        # off as losses within late-grace — well before this respawn (backoff
+        # ≥ 1 s plus a connect) can produce a colliding seq.
+
+    def _request_respawn(self):
+        """Make a changed OS declaration take effect: terminate the child so
+        the backoff loop respawns it — the spawn path is the single place a
+        profile is resolved and applied."""
+        self._relay_os_resolved = None
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except (OSError, ProcessLookupError):
+                pass
+
+    def _handle_ping_line(self, line, now=None):
+        parse = self._os.parse_line
+        if parse is None:
+            return super()._handle_ping_line(line, now)
+        return parse(self, line, time.time() if now is None else now)
+
+    def _on_stale_window(self):
+        if self._os.silence_is_loss:
+            self._record_silence_losses(time.time())
+        else:
+            self._record_stale_loss(time.time())
+
+    def _record_silence_losses(self, now):
+        """FreeBSD loss model: silence at probe cadence *is* the signal.
+
+        Measured: a down target produces no stdout at all (no '-O' there, and
+        even the banner stays in ping's stdio buffer until a reply flushes
+        it).  Synthesise one loss per elapsed probe interval since the last
+        accounted event, each stamped in its own second, so a dead host shows
+        the same ~1/s cadence as the '-O' transports.  The count is kept in
+        _fbsd_synth so the seq-gap reconciliation does not bill the same
+        probes again when the target recovers.
+        """
+        since = self._fbsd_unaccounted_since
+        if since is None:
+            self._fbsd_unaccounted_since = now
+            return
+        interval = self._PING_PROBE_INTERVAL
+        n = int((now - since) / interval - _FBSD_SILENCE_MARGIN)
+        if n <= 0:
+            return
+        for k in range(n):
+            self._record_loss(since + interval * (k + 1))
+        self._fbsd_unaccounted_since = since + interval * n
+        self._fbsd_synth += n
 
     def _spawn_endpoint(self):
         return _ssh_first_hop(self._ssh_args, self._ssh_dest)
 
-    @staticmethod
-    def _is_fatal_error(stderr_text):
-        """Return True if stderr_text contains a known non-retryable SSH or ping error."""
-        text = stderr_text.lower()
-        return any(pattern in text for pattern in _FATAL_SSH_ERRORS + _FATAL_PING_ERRORS)
+    def _is_fatal_error(self, stderr_text):
+        """True if stderr_text has a non-retryable SSH/ping error for this OS."""
+        return _is_fatal_ssh_text(stderr_text, self._os.extra_fatal)
 
 class SectionLabel:
     """A non-pingable display row for section headers (## / :title)."""
@@ -3870,6 +4436,12 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                             entries.append(('error',
                                 ':with prog-options requires a program name'))
                         else:
+                            if w_type == 'remote-ping':
+                                _raw_os, _ = _split_os_flag(w_args)
+                                _err = _os_flag_error(_raw_os)
+                                if _err:
+                                    entries.append(
+                                        ('warn', f':with remote-ping: {_err}'))
                             local_with_type = w_type
                             local_with_args = w_args
 
@@ -3889,8 +4461,11 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                         inner_ssh_args = _apply_backref(inner_ssh_args_tmpl, captures, full_str)
 
                         if effective_ssh_args is not None:
-                            # Chain with -J: :remote-ping -J <outer> <inner>
-                            chained_cmd = f':remote-ping -J {effective_ssh_args} {inner_ssh_args}'
+                            # Chain with -J: :remote-ping -J <outer> <inner>.
+                            # The outer '--os' is dropped — the outer relay is
+                            # only a jump hop here; the inner one runs ping.
+                            _outer_os, outer_rest = _split_os_flag(effective_ssh_args)
+                            chained_cmd = f':remote-ping -J {outer_rest} {inner_ssh_args}'
                         else:
                             # No outer SSH context, emit as-is
                             chained_cmd = f':remote-ping {inner_ssh_args}'
@@ -4390,6 +4965,14 @@ class _HostsParser:
                             entries.append(('error',
                                 ':with prog-options requires a program name'))
                         else:
+                            # Report a bad '--os' once, here, rather than
+                            # once per host line the block wraps.
+                            if w_type == 'remote-ping':
+                                _raw_os, _ = _split_os_flag(w_args)
+                                _err = _os_flag_error(_raw_os)
+                                if _err:
+                                    entries.append(
+                                        ('warn', f':with remote-ping: {_err}'))
                             # ## label on the :with line → :resolv for the relay IP.
                             if w_type == 'remote-ping' and comment:
                                 relay_host = w_args.split()[-1].split('@', 1)[-1] if w_args else ''
@@ -4405,8 +4988,12 @@ class _HostsParser:
                         entries.append(('error', ':end without :with, :for, or :if'))
                 elif (cmd_word == 'remote-ping' and with_stack
                         and with_stack[-1][0] == 'remote-ping'):
-                    # Nested :remote-ping inside :with remote-ping → chain jump hosts.
-                    entries.append(('cmd', f':remote-ping -J {with_stack[-1][1]} {args}'))
+                    # Nested :remote-ping inside :with remote-ping → chain jump
+                    # hosts.  The outer '--os' is dropped: the outer relay is
+                    # now only a -J hop, and the flag describes the machine
+                    # that runs ping — the inner relay names its own.
+                    _outer_os, outer_rest = _split_os_flag(with_stack[-1][1])
+                    entries.append(('cmd', f':remote-ping -J {outer_rest} {args}'))
                 elif with_stack:
                     # Any unrecognised command inside a :with block is an error.
                     # Pop the stack so subsequent host lines are not silently
@@ -4966,7 +5553,8 @@ CMD_REGISTRY = [
     CmdDef(['resolv-port'],      '_cmd_resolv_port', None,
            '<port> <service>',    'static port→service mapping (overrides default port names from /etc/services)'),
     CmdDef(['remote-ping'],      '_cmd_remote_ping',  None,
-           '[ssh-opts] <relay>', 'add remote ping monitor (runs ping on relay via SSH)', completable=False),
+           '[--os <os>] [ssh-opts] <relay>',
+           'add remote ping monitor (runs ping on relay via SSH)', completable=False),
     CmdDef(['with'],             '_cmd_with',         None,
            '<type> [args]',      'open a context block (hosts file only)', completable=False),
     CmdDef(['fold-all'],         '_cmd_fold_all',   None,
@@ -5046,6 +5634,10 @@ CMD_REGISTRY = [
            '[--remove|--toggle] <host|glob>',
            'a lost reply is expected on these hosts (grey o, no alarm)',
            flags=['--remove', '--toggle']),
+    CmdDef(['relay-os'],         '_cmd_relay_os',   None,
+           '[--remove] <host|glob> <auto|linux|freebsd|mikrotik>',
+           'declare the OS a :remote-ping relay runs (default: auto-detect)',
+           flags=['--remove', '-r']),
     CmdDef(['probe'],            '_cmd_probe',      None,
            '<name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N]',
            'declare how a probe value is displayed',
@@ -5393,6 +5985,23 @@ _SSH_MONITOR_OPTIONS_DEFAULT = [
     '-o', 'ClearAllForwardings=yes',
 ]
 
+# ssh's *notices* are per connection, and ping-bulk opens one per host, so
+# each one arrives as many times as there are hosts: "Warning: Permanently
+# added '<relay>' to the list of known hosts." came 50 times per startup from
+# a 52-host file — and on every reconnect for ever with a
+# 'UserKnownHostsFile=/dev/null' in ssh_config, where every connection is a
+# first connection.  ERROR still carries everything that decides anything —
+# permission denied, host key verification failed, kex reset, 'channel N:
+# open failed' — so the fatal classification and the forwarding tip are
+# unaffected (verified by connecting at each level in turn).
+#
+# Applied outside ':set ssh-options' rather than inside its default, the way
+# the sharing flags are: an ssh-options value the user set once (or that
+# ':save-config' wrote for them) would otherwise keep a whole release's worth
+# of new defaults from ever reaching them.  Naming LogLevel yourself still
+# wins — '-o LogLevel=INFO' brings the notices back.
+_SSH_QUIET_OPTIONS = ('-o', 'LogLevel=ERROR')
+
 # Live value, replaced by ':set ssh-options'.  Module-level because the three
 # command builders that need it are spread across a Monitor method, a
 # ProbeReader method and an Application method, none of which share an object.
@@ -5458,6 +6067,106 @@ def _ssh_spawn_gate(endpoint):
         time.sleep(delay)
 
 
+# ── Relay OS auto-detection ─────────────────────────────────────────────────
+#
+# Result cache for ':remote-ping' relays declared (or defaulting to) 'auto',
+# keyed on tuple(ssh_args): every host behind one ':with remote-ping' block
+# carries identical ssh args, so one probe serves them all.  Per-key
+# once-locks make the latecomers wait in their own monitor threads for the
+# first probe's answer instead of each paying for their own.  The cache
+# survives ':edit' reloads on purpose — monitors are rebuilt, relays keep
+# their OS — and is purged explicitly by ':relay-os <glob> auto'.
+_relay_os_cache: dict = {}
+_relay_os_locks: dict = {}
+_relay_os_guard = threading.Lock()
+
+# A failed probe is not cached — a relay that is down at startup must not be
+# branded linux for the rest of the run — but it must not be *retried* by
+# every host either.  All hosts behind one relay share one key, so without
+# this they queue on that key's lock and each pays the probe's own timeout
+# before it may even try its ping: 47 hosts behind an unreachable relay is
+# 47 waits, on top of the load a failing relay is already under.  One probe
+# per relay per pause; the rest assume linux and go straight to their ping,
+# whose failure is the one that matters.
+_relay_os_retry_after: dict = {}
+_RELAY_OS_RETRY_PAUSE = 60.0
+
+# RouterOS has no uname; its CLI answers on stderr (measured on 7.22):
+#   bad command name uname (line 1 column 1)
+_ROUTEROS_ERROR_MARKS = ('bad command name', 'syntax error',
+                         'expected end of command')
+
+# uname -s answers mapped to the freebsd profile: all print nothing for a
+# lost probe and take the plain-`ping` command shape.
+_BSD_UNAMES = ('freebsd', 'openbsd', 'netbsd', 'dragonfly', 'darwin')
+
+
+def _detect_relay_os(ssh_args, ssh_dest, note_cb=None):
+    """Probe the relay with ``uname -s`` and return its canonical OS name.
+
+    Classification is on output, not exit status: 'Linux'/'FreeBSD'/… name
+    the OS directly, and RouterOS gives itself away with 'bad command name'.
+    A connection-shaped failure (timeout, kex reset, refused, silence) falls
+    back to 'linux' **without caching** — a relay that happens to be down at
+    startup must not be branded linux forever; the ping spawn right after
+    will fail the same way and re-enter backoff, and the next round probes
+    again.  *note_cb* (a monitor's _note_stderr) reports the verdict once per
+    distinct text through the usual event-log machinery.
+    """
+    key = tuple(ssh_args)
+    cached = _relay_os_cache.get(key)
+    if cached:
+        return cached
+    if time.monotonic() < _relay_os_retry_after.get(key, 0.0):
+        return 'linux'          # probed recently and got nothing; see above
+    with _relay_os_guard:
+        lock = _relay_os_locks.setdefault(key, threading.Lock())
+    with lock:
+        cached = _relay_os_cache.get(key)
+        if cached:
+            return cached
+        if time.monotonic() < _relay_os_retry_after.get(key, 0.0):
+            return 'linux'      # another thread probed while we waited
+        _relay_os_retry_after[key] = time.monotonic() + _RELAY_OS_RETRY_PAUSE
+        # One more connection to the same sshd: it pays the same toll as any
+        # monitor connection.
+        _ssh_spawn_gate(_ssh_first_hop(list(ssh_args), ssh_dest))
+        cmd = (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
+               + _ssh_quiet_flags(ssh_args)
+               # Bounded twice over: ConnectTimeout for a black hole that
+               # would otherwise sit in the TCP handshake, and run()'s own
+               # timeout for a relay that connects and then says nothing.
+               + ['-o', 'ConnectTimeout=10']
+               + _ssh_monitor_flags() + list(ssh_args) + ['uname', '-s'])
+        try:
+            proc = subprocess.run(cmd, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError) as exc:
+            if note_cb:
+                note_cb(f'{_PROG_NAME}: relay OS detection failed '
+                        f'({type(exc).__name__}) — assuming linux')
+            return 'linux'
+        first_words = proc.stdout.strip().lower().split()
+        first = first_words[0] if first_words else ''
+        combined = (proc.stdout + '\n' + proc.stderr).lower()
+        if first == 'linux':
+            name = 'linux'
+        elif first in _BSD_UNAMES:
+            name = 'freebsd'
+        elif any(mark in combined for mark in _ROUTEROS_ERROR_MARKS):
+            name = 'mikrotik'
+        else:
+            if note_cb:
+                note_cb(f'{_PROG_NAME}: relay OS detection got no answer '
+                        f'— assuming linux until the relay responds')
+            return 'linux'
+        _relay_os_retry_after.pop(key, None)
+        _relay_os_cache[key] = name
+        if note_cb:
+            note_cb(f'{_PROG_NAME}: relay OS detected: {name}')
+        return name
+
+
 def _ssh_control_dir():
     """Return a private 0700 directory for SSH control sockets, or None.
 
@@ -5502,6 +6211,21 @@ def _ssh_control_dir():
 def _ssh_monitor_flags() -> list:
     """Return the SSH options for ping-bulk's own monitoring connections."""
     return list(_ssh_monitor_options)
+
+
+def _ssh_quiet_flags(user_args=()) -> list:
+    """Return the log-level option, or [] when the user has named one.
+
+    See _SSH_QUIET_OPTIONS: ssh's per-connection notices multiply by the host
+    count, so they are silenced on ping-bulk's own connections.  Skipped as
+    soon as LogLevel appears in ':set ssh-options' or in the directive's own
+    ssh arguments, since ssh keeps the first value of a repeated option and
+    these are placed first — an explicit choice would otherwise be ignored.
+    """
+    named = ' '.join(list(_ssh_monitor_options) + list(user_args)).lower()
+    if 'loglevel' in named:
+        return []
+    return list(_SSH_QUIET_OPTIONS)
 
 
 def _ssh_sharing_flags(share: bool) -> list:
@@ -5680,6 +6404,7 @@ class Application:
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
         self.no_alarm_patterns: list = []  # globs from ':no-alarm'
+        self.relay_os_rules: list = []     # (pattern, os) from ':relay-os'
         self.probe_defs: dict = {}     # probe name → ProbeDef (':probe')
         self.probe_readers: list = []  # one ProbeReader per host, while running
         self.probe_source = None       # command run on each host (':probe-source')
@@ -5815,9 +6540,11 @@ class Application:
             elif kind == 'error':
                 self.add_event("hosts", f"expansion error: {value}")
 
-        # Applied after the loop as well as inside ':no-alarm': a rule may be
-        # written after the hosts it names, and a ':for' body emits both.
+        # Applied after the loop as well as inside ':no-alarm' / ':relay-os':
+        # a rule may be written after the hosts it names, and a ':for' body
+        # emits both.
         self._apply_no_alarm()
+        self._apply_relay_os()
 
     @property
     def help_scroll(self):
@@ -6057,6 +6784,8 @@ class Application:
                     f.write(f":set late-grace {self.late_grace:g}\n")
                 for pattern in self.no_alarm_patterns:
                     f.write(f":no-alarm {pattern}\n")
+                for pattern, os_name in self.relay_os_rules:
+                    f.write(f":relay-os {pattern} {os_name}\n")
                 if _ssh_connect_rate != _SSH_CONNECT_RATE_DEFAULT:
                     f.write(f":set ssh-connect-rate {_ssh_connect_rate:g}\n")
                 if _ssh_monitor_flags() != _SSH_MONITOR_OPTIONS_DEFAULT:
@@ -6484,6 +7213,7 @@ class Application:
         ping_args = ['ping', '-n', '-c', '1', '-W', '2', '-T', 'tsandaddr', ip]
         if isinstance(monitor, SshPingMonitor):
             return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
+                    + _ssh_quiet_flags(monitor._ssh_args)
                     + _ssh_monitor_flags() + monitor._ssh_args + ping_args)
         return ping_args
 
@@ -6500,6 +7230,21 @@ class Application:
         if ip is None:
             return None
         cmd = self._clock_probe_cmd(monitor, ip)
+        if isinstance(monitor, SshPingMonitor):
+            # Pace it like every other connection ping-bulk opens.  This one
+            # was missed, and it is the worst offender of the three: every
+            # host's probe comes due on the same tick (each schedules the
+            # next one interval after the last, so they never drift apart),
+            # so a relay carrying 47 hosts saw 47 simultaneous handshakes
+            # every clock-interval — well past sshd's MaxStartups, whose
+            # random early drop shows up as 'Connection closed by UNKNOWN
+            # port 65535' and takes monitor connections down with it.
+            # Blocking here is free: this runs in a short-lived clock:<host>
+            # thread, and the run() timeout below starts after the wait.
+            _ssh_spawn_gate(_ssh_first_hop(monitor._ssh_args,
+                                           monitor._ssh_dest))
+            if not monitor.running:
+                return None
         try:
             proc = subprocess.run(
                 cmd, stdin=subprocess.DEVNULL,
@@ -6634,7 +7379,8 @@ class Application:
         # occurrence would bury everything else.
         for text in monitor.take_new_stderr():
             self.add_event(monitor.get_display_name(dns_mode='off'),
-                           text, level=LEVEL_NORMAL)
+                           self._phrase_transport_error(monitor, text),
+                           level=LEVEL_NORMAL)
 
         # Log a fatal process error exactly once, as soon as it is detected.
         if monitor.error is not None and not monitor.error_logged:
@@ -6724,9 +7470,18 @@ class Application:
                 and monitor.clock_state != 'no-remote-time'
                 and not monitor._clock_probing
                 and now >= monitor._clock_next_ts):
-            monitor._clock_probing = True
-            _spawn(self._run_clock_probe, f'clock:{monitor.host}',
-                   args=(monitor,))
+            # A relay whose resolved OS has no '-T tsandaddr' (FreeBSD's -T
+            # is the multicast TTL, RouterOS has no ping flags at all) can
+            # never answer: give the immediate verdict instead of paying
+            # _CLOCK_NO_RT_PROBES doomed ssh connections to reach it.
+            profile = getattr(monitor, '_os', None)
+            if profile is not None and not profile.clock_probe \
+                    and monitor._relay_os_resolved is not None:
+                monitor.clock_state = 'no-remote-time'
+            else:
+                monitor._clock_probing = True
+                _spawn(self._run_clock_probe, f'clock:{monitor.host}',
+                       args=(monitor,))
 
     def cycle_dns(self, direction=1):
         """Cycle through DNS display modes. direction=1 forward, -1 backward."""
@@ -11153,6 +11908,117 @@ class Application:
                 or (alias and fnmatch.fnmatch(alias, pattern))
                 for pattern in self.no_alarm_patterns)
 
+    def _cmd_relay_os(self, args=''):
+        """:relay-os [--remove] <host|glob> [<os>] — the OS a relay runs.
+
+        A relay that is not Linux needs a different ping command and a
+        different parser (FreeBSD has no ``-O``; RouterOS spells the whole
+        thing ``/ping``).  Patterns are ``fnmatch`` globs matched against the
+        relay destination (with and without ``user@``) and its ':resolv'
+        alias — the same resolution ':no-alarm' applies to hosts — and the
+        last matching rule wins.  With no rule and no '--os' flag the relay
+        is probed once with ``uname -s``; ``:relay-os <glob> auto`` forgets a
+        cached answer so those relays are probed again.  With no argument,
+        lists the current rules.
+        """
+        if not args:
+            if not self.relay_os_rules:
+                self.add_event("config",
+                    "relay-os: no rules (relays are auto-detected)")
+            else:
+                self.add_event("config", "relay-os: " + '  '.join(
+                    f"{pat} {os_name}" for pat, os_name in self.relay_os_rules))
+            return
+        rest = args.strip()
+        remove = False
+        for flag in ('--remove', '-r'):
+            if rest == flag or rest.startswith(flag + ' '):
+                remove = True
+                rest = rest[len(flag):].strip()
+                break
+        parts = rest.split()
+        if not parts:
+            self.add_event("cmd", "relay-os: missing host or glob")
+            return
+        if remove:
+            removed = [r for r in self.relay_os_rules if r[0] in parts]
+            if not removed and self._monitoring_started:
+                self.add_event("cmd",
+                    f"relay-os: no rule {' '.join(parts)!r}")
+                return
+            self.relay_os_rules = [r for r in self.relay_os_rules
+                                   if r[0] not in parts]
+            self._apply_relay_os()
+            if self._monitoring_started and removed:
+                self.add_event("config", "relay-os: removed "
+                               + ' '.join(pat for pat, _ in removed))
+            return
+        if len(parts) != 2:
+            self.add_event("cmd", "relay-os: usage: :relay-os [--remove] "
+                           "<host|glob> <auto|linux|freebsd|mikrotik>")
+            return
+        pattern, raw_os = parts
+        os_name = _normalize_relay_os(raw_os)
+        if os_name is None:
+            self.add_event("cmd",
+                f"relay-os: unknown OS {raw_os!r}; expected "
+                + ', '.join(_RELAY_OS_CHOICES))
+            return
+        # Replace an existing rule for the same pattern instead of stacking a
+        # duplicate; append otherwise, so the last-written rule wins.
+        self.relay_os_rules = [r for r in self.relay_os_rules
+                               if r[0] != pattern]
+        self.relay_os_rules.append((pattern, os_name))
+        if os_name == 'auto':
+            # 'auto' is a request to re-detect, not just a default: forget the
+            # cached answer for every relay the pattern matches, or the next
+            # spawn would simply read the old value back.
+            for monitor in self.monitors:
+                if (isinstance(monitor, SshPingMonitor)
+                        and self._match_relay_os(monitor) == 'auto'):
+                    _relay_os_cache.pop(tuple(monitor._ssh_args), None)
+        self._apply_relay_os()
+        if self._monitoring_started:
+            self.add_event("config", f"relay-os: {pattern} {os_name}")
+
+    def _match_relay_os(self, monitor):
+        """Return the OS ':relay-os' rules declare for *monitor*'s relay.
+
+        None when no rule matches.  Matching follows :no-alarm: plain fnmatch
+        (a pattern without glob characters is an exact name), against the
+        relay destination with and without ``user@`` and its ':resolv' alias,
+        last matching rule wins.
+        """
+        name, alias = self._relay_match_names(monitor)
+        if not name:
+            return None
+        short = SshPingMonitor._strip_username(name)
+        result = None
+        for pattern, os_name in self.relay_os_rules:
+            if (fnmatch.fnmatch(name, pattern)
+                    or fnmatch.fnmatch(short, pattern)
+                    or (alias and fnmatch.fnmatch(alias, pattern))):
+                result = os_name
+        return result
+
+    def _apply_relay_os(self):
+        """Recompute every relayed monitor's declared OS from flag + rules.
+
+        The '--os' flag on the monitor's own :remote-ping beats any
+        ':relay-os' rule; with neither, 'auto' probes the relay on the next
+        spawn.  A monitor whose declaration changed has its child terminated
+        so the backoff loop respawns it under the new profile — the loop is
+        the one place a profile is ever applied.
+        """
+        for monitor in self.monitors:
+            if not isinstance(monitor, SshPingMonitor):
+                continue
+            declared = (monitor._relay_os_flag
+                        or self._match_relay_os(monitor) or 'auto')
+            if declared != monitor._relay_os_declared:
+                monitor._relay_os_declared = declared
+                monitor._request_respawn()
+
     def _cmd_probe_source(self, args=''):
         """:probe-source --cmd '<command>' [--interval <seconds>]
 
@@ -11324,6 +12190,36 @@ class Application:
         """:with is a hosts-file-only directive; cannot be used interactively."""
         self.add_event("cmd",
             "with: this directive is only valid in a hosts file, not interactively")
+
+    @staticmethod
+    def _phrase_transport_error(monitor, text):
+        """Say what a ping/ssh complaint means for the host, where we can.
+
+        The raw line is what the child said, in terms of the system call that
+        failed; on its own in a log of host states it reads as plumbing, and
+        it says nothing about whether the host ever worked.  A recognised
+        wording is rephrased around the host and keeps the original in
+        brackets, so the log stays greppable for the exact text:
+
+            host startup fail: no route to host  (ping: sendmsg: No route to host)
+            host unreachable: no route to host   (ping: sendmsg: No route to host)
+            probe error: no route to host        (ping: sendmsg: No route to host)
+
+        Which of the three depends on the host's own history, not on the
+        message: never up, up before and down now, or answering right now (a
+        single failed probe on a live host — worth a line, not an alarm).
+        Anything unrecognised is passed through untouched.
+        """
+        reason = _host_diagnosis(text)
+        if reason is None:
+            return text
+        if monitor.rx_count == 0 and monitor.up_since is None:
+            head = 'host startup fail'
+        elif monitor.alive is True:
+            head = 'probe error'
+        else:
+            head = 'host unreachable'
+        return f'{head}: {reason}  ({text})'
 
     def _prog_match_names(self, entry):
         """Return the (name, alias) pair :prog-options patterns are matched on.
@@ -12252,6 +13148,19 @@ class Application:
             except ValueError as e:
                 self.add_event("cmd", f"remote-ping: parse error: {e}")
             else:
+                # '--os' comes out first: it is ping-bulk's flag, not ssh's, so
+                # it must never reach the ssh argv (or the kiosk blocklist).
+                relay_os = None
+                if '--os' in tokens:
+                    raw_os, tokens = _split_os_flag(tokens)
+                    relay_os = _normalize_relay_os(raw_os)
+                    err = _os_flag_error(raw_os)
+                    if err:
+                        # Complain and carry on: a typo in a ':with
+                        # remote-ping --os' line would otherwise drop every
+                        # host in the block, and a detected OS is a far
+                        # better answer than an unmonitored host.
+                        self.add_event("hosts", f"remote-ping: {err}")
                 if len(tokens) < 2:
                     self.add_event("cmd",
                         "remote-ping: usage: :remote-ping [ssh-opts] <relay> <target>")
@@ -12363,7 +13272,8 @@ class Application:
                             monitor = SshPingMonitor(ssh_args, actual_ping_host,
                                                      ping_host_label=ping_host,
                                                      original_ssh_args=original_ssh_args,
-                                                     hosts_map=self.hosts_map)
+                                                     hosts_map=self.hosts_map,
+                                                     relay_os=relay_os)
                             if no_alarm_target:
                                 pattern = actual_ping_host
                                 if pattern not in self.no_alarm_patterns:
@@ -12371,6 +13281,7 @@ class Application:
                             self.monitors.append(monitor)
                             self._add_entry(monitor)
                             self._apply_no_alarm()
+                            self._apply_relay_os()
                             if self._monitoring_started:
                                 self._start_monitor_thread(monitor)
 
