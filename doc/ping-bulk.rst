@@ -203,8 +203,8 @@ Navigation
     Move host selection down / up.
 
 ``↑`` / ``↓``
-    When no host is selected: scroll the event log up / down one line.
-    When a host is selected: move selection up / down.
+    Move host selection down / up (same as ``j``/``k``).  With nothing
+    selected yet, ``↑`` starts at the last host and ``↓`` at the first.
 
 ``G``
     Move selection to the last host.
@@ -219,7 +219,14 @@ Navigation
     Scroll the ping-history strip backwards / forwards in time.
 
 ``PgUp`` / ``PgDn``
-    Scroll the event log up / down one page.
+    With a host or a section selected, move the selection up / down by one
+    page — as many entries as the host list is showing.  Paging stops at
+    the first and last entry instead of wrapping around.  With nothing
+    selected, scroll the event log up / down one page instead.
+
+    ``Ctrl-B`` / ``Ctrl-F`` page the event log in both cases, so the log
+    stays reachable while a host is selected.  The **Events** header names
+    whichever pair currently drives it.
 
 ``Space``
     With a section header selected, fold or unfold it **and its
@@ -477,10 +484,10 @@ Event log
     ``:layout --toggle log``.  Coming back from ``log`` returns to ``ping`` if
     that is where you were, not blindly to ``all``.
 
-    Switching to ``log`` clears the host selection so ``↑``/``↓`` scroll the
-    log rather than moving an invisible cursor.  The mode is shown in the
-    status bar as ``layout:<mode>`` while it is not ``all``, and is saved by
-    ``:save-config``.
+    Switching to ``log`` clears the host selection: with the host list
+    hidden there is no cursor to page, so ``PgUp``/``PgDn`` stay with the
+    log.  The mode is shown in the status bar as ``layout:<mode>`` while it
+    is not ``all``, and is saved by ``:save-config``.
 
 ``:save [--follow] [file]``
     Write the buffered event log to *file* (same as ``W``).
@@ -2314,8 +2321,9 @@ by peer*: the relay's ``sshd`` refusing an unauthenticated connection under
 ``MaxStartups``, or the jump hop tearing the channel down.  Lower
 ``:set ssh-connect-rate`` if it happens on every startup.
 
-The log is scrollable in the UI (``↑``/``↓``/``PgUp``/``PgDn``) and
-can be streamed to a file with ``-l``/``--log-file`` or ``:log``.
+The log is scrollable in the UI (``PgUp``/``PgDn`` with nothing selected,
+``Ctrl-B``/``Ctrl-F`` always) and can be streamed to a file with
+``-l``/``--log-file`` or ``:log``.
 
 Each logging session opens with a banner line naming the process and what it
 is watching::

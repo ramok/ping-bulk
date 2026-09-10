@@ -582,6 +582,38 @@ Users write `:bind-key` directives:
 - Mode lookup does **not** fall back to normal mode: a key unbound in `help`
   does nothing rather than firing its normal-mode binding.
 
+### One key, two lists: guarded bindings and the hint that follows them
+
+`PgUp`/`PgDn` page the *host selection* while there is one, and the *event log*
+otherwise. That is three bindings per key in the same normal-mode bucket —
+`context=frozenset('h')`, `context=frozenset('s')`, and an unguarded fallback —
+resolved by `_resolve_binding`, which takes the largest context that is a
+subset of `_binding_context()`. Two guarded copies are needed because a
+selected section builds `%s` and a selected host builds `%h`; there is no key
+both states share (`%H`/`%R` are absent for a section that owns no hosts).
+`<C-f>`/`<C-b>` stay unguarded, so the log is never unreachable.
+
+**The direction is inverted between the two commands.** Per §11 a trailing dash
+is backwards, and for a *list* backwards is up — so `<PageUp>` is
+`:select page-`. For the *log*, bare `page` already scrolls up, which is what
+the neighbouring `:scroll event-history page` binding says. Copying the line
+below it pages the wrong way, and both spellings look right in review.
+
+**A hint that describes a key must live in exactly one place — never zero.**
+The selection banner carries `[PgUp/PgDn page]` and `draw_events` stops naming
+those keys for the log, so `_selection_active()` is the single predicate both
+ask. Written twice, the state where the command line is open (banner
+suppressed, keys back on the log) is one edit away from showing the hint
+nowhere. `draw_events` names `C-b/C-f` instead while a selection is active —
+scrolled back in the log, a hint naming keys that no longer resume it is a
+dead end.
+
+Paging **clamps** where `:select up`/`down` wrap: a held `PgDn` must come to
+rest on the last host rather than silently start over at the top. The step is
+`_host_page_size`, cached by the layout maths in `run()` exactly as
+`_log_page_size` is, and read through `getattr` because the `log` layout draws
+no hosts.
+
 ### Built-in overlay commands
 | Command                 | Effect                                                                    |
 | ----------------------- | ------------------------------------------------------------------------- |

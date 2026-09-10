@@ -891,8 +891,8 @@ _HELP_HOTKEYS = [
     "  [←]/[→]               (:scroll ping-history half/half-)  scroll history ← older / → live",
     "  [Ctrl+←]/[Ctrl+→]     (:scroll ping-history full/full-)  scroll history ← older (page) / → live (page)",
     "  [Esc] (in history)    (:scroll ping-history reset)       return to live view",
-    "  [↑]/[↓]               (:scroll event-history page/page-) scroll event log up / down",
-    "  [PgUp]/[PgDn]         (:scroll event-history page/page-) scroll event log by page",
+    "  [PgUp]/[PgDn]         (:select page-/page)               move host selection by a page",
+    "  [PgUp]/[PgDn]         (:scroll event-history page/page-) scroll event log by page (nothing selected)",
     "  [Ctrl+B]/[Ctrl+F]     (:scroll event-history page/page-) vim-style event log scroll",
     "  [:]                                                      open command line",
 ]
@@ -5682,8 +5682,10 @@ CMD_REGISTRY = [
            '<key>',              'unbind a key binding',
            flags=['--mode', '--%h', '--%i', '--%s', '--%p', '--%r',
                     '--%d', '--%j', '--%J']),
-    CmdDef(['select'],           '_cmd_select',     ['up', 'down', 'first', 'last', 'none'],
-           '[up|down|first|last|none]', 'navigate or clear host selection'),
+    CmdDef(['select'],           '_cmd_select',
+           ['up', 'down', 'page', 'page-', 'first', 'last', 'none'],
+           '[up|down|page|page-|first|last|none]',
+           'navigate or clear host selection'),
     CmdDef(['details'],          '_cmd_details',    None,
            '',                    'show detailed stats for highlighted host'),
     CmdDef(['fold'],             '_cmd_fold',
@@ -7981,7 +7983,7 @@ class Application:
     # ── Bindable command methods ──────────────────────────────────────────────
 
     def _cmd_select(self, args=''):
-        """Navigate or clear host selection: up/down/first/last/none."""
+        """Navigate or clear host selection: up/down/page/page-/first/last/none."""
         action = (args.strip().lower() or 'none')
         visible = self._get_visible_entry_indices()
         if not visible:
@@ -8018,6 +8020,23 @@ class Application:
                     self.highlighted_index = visible[(pos + 1) % len(visible)]
                 except ValueError:
                     self.highlighted_index = visible[0]
+        elif action in ('page', 'page-'):
+            # A page is as many entries as the host area shows, cached by the
+            # draw loop.  Paging clamps at the ends rather than wrapping like
+            # up/down: PgDn held down should come to rest on the last host,
+            # not silently start over from the top.
+            step = max(1, getattr(self, '_host_page_size', 10))
+            if self.highlighted_index is None:
+                self.highlighted_index = (visible[-1] if action == 'page-'
+                                          else visible[0])
+            else:
+                try:
+                    pos = visible.index(self.highlighted_index)
+                except ValueError:
+                    pos = 0 if action == 'page' else len(visible) - 1
+                pos = pos - step if action == 'page-' else pos + step
+                self.highlighted_index = visible[max(0, min(len(visible) - 1,
+                                                            pos))]
 
 
     def _cmd_details(self, args=''):
@@ -8286,7 +8305,19 @@ class Application:
         _b('<Right>',   ':scroll ping-history half-', desc='scroll ping history newer')
         _b('<C-Left>',  ':scroll ping-history full',  desc='scroll ping history to oldest')
         _b('<C-Right>', ':scroll ping-history full-', desc='scroll ping history to newest')
-        # Log scrolling
+        # Log scrolling — but while a host or a section is selected, PgUp/PgDn
+        # belong to the selection: that is the cursor the keys are next to on
+        # screen.  <C-f>/<C-b> stay the log's page keys in both states, so the
+        # log is never out of reach.  Note the inversion: ':select page-' is
+        # backwards (up the list), while the log's bare 'page' scrolls up.
+        _b('<PageUp>',   ':select page-', context=frozenset('h'),
+           desc='select host one page up')
+        _b('<PageDown>', ':select page',  context=frozenset('h'),
+           desc='select host one page down')
+        _b('<PageUp>',   ':select page-', context=frozenset('s'),
+           desc='select entry one page up (section selected)')
+        _b('<PageDown>', ':select page',  context=frozenset('s'),
+           desc='select entry one page down (section selected)')
         _b('<PageUp>',   ':scroll event-history page',  desc='scroll event log up')
         _b('<PageDown>', ':scroll event-history page-', desc='scroll event log down')
         # Search
@@ -9569,6 +9600,25 @@ class Application:
                 max_rtt = v
         return max(3, len(str(int(max_rtt))) + 1)
 
+    def _selection_active(self):
+        """True when the selection banner is on screen and owns PgUp/PgDn.
+
+        Two places need the same answer and must not disagree: the banner
+        that carries the ``[PgUp/PgDn page]`` hint, and ``draw_events``,
+        which drops the hint for the log because those keys no longer reach
+        it.  Split into two copies, a state where neither line showed it
+        would be one edit away.
+
+        The ``log`` layout is exactly such a state: it draws no host list, so
+        no banner is drawn either, and a selection left over from before the
+        switch would have taken the hint off screen altogether.
+        """
+        return (self.highlighted_index is not None
+                and 0 <= self.highlighted_index < len(self.entries)
+                and self.layout != 'log'
+                and not self.help_open and not self.details_open
+                and self.cmd is None and self.prompt is None)
+
     def _mode_banners(self):
         """Yield (label, attr) for each active mode banner row.
 
@@ -9587,10 +9637,7 @@ class Application:
             label = (f"  🔍  FILTER  {self._filter_query}"
                      f"  [{n_vis}/{n_tot}]  [f] edit  [F/Esc] clear")
             yield label, curses.A_REVERSE | curses.A_BOLD
-        if (self.highlighted_index is not None
-                and 0 <= self.highlighted_index < len(self.entries)
-                and not self.help_open and not self.details_open
-                and self.cmd is None and self.prompt is None):
+        if self._selection_active():
             entry = self.entries[self.highlighted_index]
             if isinstance(entry, SectionLabel):
                 locked = self._section_autofold_locked(self.highlighted_index)
@@ -9606,6 +9653,9 @@ class Application:
                         'ssh', *self._prog_match_names(entry))
                     if not disabled:
                         label += "  [c connect]"
+            # PgUp/PgDn page the selection while it exists; the Events header
+            # stops advertising them for the log (see _selection_active).
+            label += "  [PgUp/PgDn page]"
             yield label, curses.A_REVERSE | curses.A_BOLD
 
     def draw_hosts(self, stdscr, start_row, max_rows, width, height, show_header=True):
@@ -10624,6 +10674,11 @@ class Application:
 
         overflows = total > page_size  # True when the log cannot fit on screen
 
+        # With a host selected, PgUp/PgDn move that selection, so naming them
+        # here would send the reader to the wrong list.  Ctrl-B/Ctrl-F page
+        # the log in both states, and are what is left to name.
+        scroll_keys = 'C-b/C-f' if self._selection_active() else 'PgUp/PgDn'
+
         if self.log_offset == 0:
             # Live tail mode
             visible = event_list[-page_size:]
@@ -10631,7 +10686,7 @@ class Application:
             header_title = 'Events'
             header_suffix = ' [SPACE seen]'
             if overflows:
-                header_suffix += " [PgUp/PgDn scroll]"
+                header_suffix += f" [{scroll_keys} scroll]"
         else:
             end = total - self.log_offset
             start = max(0, end - page_size)
@@ -10640,14 +10695,15 @@ class Application:
             line_start = start + 1
             line_end = end
             header_title = 'Events'
-            header_suffix = f" lines {line_start}-{line_end}/{total} [PgUp/PgDn scroll] [Esc resume]"
+            header_suffix = (f" lines {line_start}-{line_end}/{total}"
+                             f" [{scroll_keys} scroll] [Esc resume]")
 
         # Key hints are appended before the log path and always win the space:
         # the path is informational, the hints are how you drive the log.
         # The [l] label tracks the layout, because the same key means
         # "make this full screen" and "give me the hosts back".
         header_suffix += " [l back]" if self.layout == 'log' else " [l full]"
-        header_suffix += " [W|rite] [C|lear]"
+        header_suffix += " [W|rite] [X clear]"
         if self.log_file:
             used = len(header_title) + self._hint_text_width(header_suffix)
             room = width - 1 - used - 3        # 3 = ' → '
@@ -12804,9 +12860,8 @@ class Application:
           makes one key a there-and-back peek at the log instead of a cycle
           the user has to walk around.
 
-        Switching to 'log' clears the host selection, because with the host
-        list hidden the arrow keys should scroll the log rather than move an
-        invisible cursor.
+        Switching to 'log' clears the host selection: with the host list
+        hidden there is no cursor to page, so PgUp/PgDn stay with the log.
         """
         rest = args.strip()
         toggle = False
@@ -14644,6 +14699,9 @@ class Application:
                     header_rows = 1 if show_header else 0
                     n_banners = sum(1 for _ in self._mode_banners())
                     visible_hosts = min(num_hosts, max(0, height - 1 - header_rows - n_banners))
+                    # ':select page' steps by a screenful of hosts, the same
+                    # way ':scroll event-history page' reads _log_page_size.
+                    self._host_page_size = max(1, visible_hosts)
 
                     # Events get whatever space remains between hosts and the
                     # menu row.  Banners sit above the host rows and consume
