@@ -1901,6 +1901,40 @@ Make the file executable and invoke it directly::
     Because ``-S`` splits on whitespace, all tokens after ``env -S``
     are passed verbatim to ``ping-bulk``.
 
+**What** ``ps`` **shows**
+    ping-bulk names itself, so nothing in the process table says
+    ``python3``::
+
+        $ ps -o comm= -p $(pgrep -x ping-bulk)
+        ping-bulk
+        $ ps -o args= -p $(pgrep -x ping-bulk)
+        ping-bulk -f myhosts
+        $ ps -T -o tid,comm= -p $(pgrep -x ping-bulk)
+         173700 ping-bulk
+         173771 ping:10.0.0.1
+         173772 ping:23.254.161
+         173773 state-loop
+
+    Two different things are set.  The task name — ``ps -o comm``, ``ps -T``,
+    ``top``, ``htop``, ``pgrep -x`` — comes from ``prctl(PR_SET_NAME)``, and
+    the kernel caps it at 15 bytes, so a relayed host keeps the tail that
+    identifies it (``ping:23.254.161``) rather than the shared head.
+
+    The ``COMMAND`` column of ``ps aux`` is the argument vector the kernel
+    recorded at ``execve``, and a ``#!`` line puts the interpreter at the
+    front of it, so it read ``python3 /path/to/ping-bulk -f myhosts``.
+    ping-bulk rewrites it in place: the region is its own memory and the
+    kernel publishes the bounds as ``arg_start``/``arg_end`` in
+    ``/proc/self/stat``.  Only the display changes — ``sys.argv`` is
+    untouched, and so is which file is running.
+
+    Both are best-effort and silent: on a system without ``prctl`` or without
+    ``/proc``, ``ps`` keeps saying ``python3`` and nothing else differs.
+
+    ``pgrep -f`` still matches the full arguments, so a script that looks for
+    ``pgrep -f myhosts`` keeps working; one that looks for ``python3`` does
+    not, which is the point.
+
 
 BRACE EXPANSION
 ===============

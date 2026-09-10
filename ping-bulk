@@ -103,6 +103,55 @@ def _set_os_task_name(name):
         pass
 
 
+def _set_process_cmdline(argv):
+    """Rewrite the COMMAND column 'ps aux' shows, in place.
+
+    The kernel records the argument vector at execve and reports it from
+    /proc/<pid>/cmdline; a '#!' line puts the interpreter at the front, so the
+    column read 'python3 /path/to/ping-bulk -f myhosts'.  The region is our own
+    memory and its bounds are published as arg_start/arg_end in
+    /proc/self/stat, so it can be overwritten — which is what setproctitle
+    does.  Py_GetArgcArgv, the usual route, is a dead end on Python 3: it hands
+    back the wchar_t copy the interpreter made for itself, nowhere near this.
+
+    Three things keep it in bounds, since this writes to a raw address:
+      * exactly `arg_end - arg_start` bytes are written, and nothing past
+        arg_end — where the environment lives (arg_end *is* env_start);
+      * the last byte is always NUL.  Without a terminator the kernel's own
+        /proc/self/cmdline read runs past arg_end and returns part of the
+        environment: measured, a 58-byte region came back as 86 bytes ending
+        in an environment variable;
+      * a sanity check that the region still matches /proc/self/cmdline
+        (a weak check — the kernel derives that file from this very region —
+        but it does catch a mapped address that is not ours), and every
+        failure is silent, so anything without a Linux /proc is a no-op.
+
+    Only the *display* changes: sys.argv is untouched, and so is the kernel's
+    idea of the executable.
+    """
+    try:
+        with open('/proc/self/stat', 'rb') as f:
+            # comm sits in parentheses and may itself contain spaces and
+            # parens, so the fields are taken after the last ')'.
+            fields = f.read().rpartition(b')')[2].split()
+        arg_start, arg_end = int(fields[45]), int(fields[46])
+        room = arg_end - arg_start
+        with open('/proc/self/cmdline', 'rb') as f:
+            current = f.read()
+        if room <= 1 or not current or len(current) > room:
+            return
+        if ctypes.string_at(arg_start, len(current)) != current:
+            return          # not the layout this assumes; leave it alone
+        # room - 1, so there is always a terminating NUL: the kernel reads the
+        # region and, finding no terminator at arg_end, carries on into the
+        # environment that follows — a 5000-character title came back as 209
+        # bytes of title plus env for a 181-byte region.
+        raw = b'\0'.join(a.encode('utf-8', 'replace') for a in argv)[:room - 1]
+        ctypes.memmove(arg_start, raw + b'\0' * (room - len(raw)), room)
+    except Exception:
+        pass
+
+
 def _os_task_name(name):
     """Fit *name* into the kernel's 15 bytes, keeping what identifies it.
 
@@ -13927,9 +13976,11 @@ def _build_entries(args):
 
 
 def main(stdscr, args):
-    # So 'ps -o comm', 'top', 'htop' and 'pgrep ping-bulk' say what this is
-    # instead of 'python3'.  See _set_os_task_name for what it cannot fix.
+    # So 'ps', 'top', 'htop' and 'pgrep ping-bulk' all say what this is
+    # instead of 'python3' — the task name for 'ps -o comm' and friends, the
+    # argument vector for the COMMAND column of 'ps aux'.
     _set_os_task_name(_PROG_NAME)
+    _set_process_cmdline([_PROG_NAME] + sys.argv[1:])
     try:
         entries = _build_entries(args)
     except OSError as e:

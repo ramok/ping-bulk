@@ -12,6 +12,8 @@ display and the event log all carry on looking healthy.  Three parts:
     stopped on purpose (a fatal error) or because it was told to.
 """
 
+import os
+import sys
 import threading
 import time
 from unittest.mock import patch
@@ -152,10 +154,9 @@ class TestSpawnNamesBothWays:
         t.join(timeout=5)
         assert seen == ['ping:ses-wg-video→10.123.254.161']
 
-    @pytest.mark.skipif(not __import__('os').path.exists('/proc/self/comm'),
+    @pytest.mark.skipif(not os.path.exists('/proc/self/comm'),
                         reason='needs Linux /proc')
     def test_the_kernel_name_is_the_trimmed_one(self, pb):
-        import os
         seen = []
 
         def read_own_comm():
@@ -179,6 +180,112 @@ class TestSpawnNamesBothWays:
         t = pb._spawn(lambda: None, 'x:1')
         assert t.daemon
         t.join(timeout=5)
+
+
+class TestTheCommandColumn:
+    """What 'ps aux' shows: the argument vector the kernel recorded at execve.
+
+    A '#!' line puts the interpreter at the front of it, so the column read
+    'python3 /path/to/ping-bulk -f myhosts'.  The region is the process's own
+    memory and the kernel publishes its bounds in /proc/self/stat, so it can
+    be rewritten in place.
+
+    (Py_GetArgcArgv, the trick every recipe names, is a dead end on Python 3:
+    it returns the interpreter's own wchar_t copy, not this region.)
+    """
+
+    DRIVER = """# -*- coding: utf-8 -*-
+import importlib.machinery, importlib.util, subprocess, sys, os
+loader = importlib.machinery.SourceFileLoader('ping_bulk', sys.argv[1])
+spec = importlib.util.spec_from_loader('ping_bulk', loader)
+pb = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pb)
+pb._set_process_cmdline(['ping-bulk', '-f', 'myhosts'])
+print('CMDLINE:' + open('/proc/self/cmdline', 'rb').read().replace(b'\\0', b' ')
+      .decode().strip())
+print('PS:' + subprocess.run(['ps', '-o', 'args=', '-p', str(os.getpid())],
+                             capture_output=True, text=True).stdout.strip())
+print('ARGV:' + repr(sys.argv[2:]))
+"""
+
+    def _run(self, app_path, tmp_path, extra=()):
+        import subprocess
+        driver = tmp_path / 'driver.py'
+        driver.write_text(self.DRIVER, encoding='utf-8')
+        done = subprocess.run(
+            [sys.executable, str(driver), app_path, *extra],
+            capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        return dict(line.split(':', 1) for line in done.stdout.splitlines()
+                    if ':' in line)
+
+    @pytest.mark.skipif(not os.path.exists('/proc/self/stat'),
+                        reason='needs Linux /proc')
+    def test_the_kernel_reports_the_new_title(self, app_path, tmp_path):
+        out = self._run(app_path, tmp_path, ['pad'] * 20)
+        assert out['CMDLINE'] == 'ping-bulk -f myhosts', out
+
+    @pytest.mark.skipif(not os.path.exists('/proc/self/stat'),
+                        reason='needs Linux /proc')
+    def test_ps_itself_agrees(self, app_path, tmp_path):
+        """Reading /proc is not proof; ps is what the user looks at."""
+        out = self._run(app_path, tmp_path, ['pad'] * 20)
+        assert out['PS'] == 'ping-bulk -f myhosts', out
+
+    @pytest.mark.skipif(not os.path.exists('/proc/self/stat'),
+                        reason='needs Linux /proc')
+    def test_nothing_of_the_old_title_is_left_behind(self, app_path, tmp_path):
+        """The rest of the region has to be cleared, or ps shows the tail."""
+        out = self._run(app_path, tmp_path, ['xyzzy-marker'] * 10)
+        assert 'xyzzy-marker' not in out['CMDLINE'], out
+
+    @pytest.mark.skipif(not os.path.exists('/proc/self/stat'),
+                        reason='needs Linux /proc')
+    def test_sys_argv_is_untouched(self, app_path, tmp_path):
+        """Only the display changes — the program still knows its arguments."""
+        out = self._run(app_path, tmp_path, ['keep', 'these'])
+        assert out['ARGV'] == "['keep', 'these']", out
+
+    def test_a_long_title_stays_inside_the_region(self, app_path, tmp_path):
+        """The region is fixed size, and the environment lives just past it.
+
+        Overrunning arg_end is the classic way this trick corrupts a process,
+        so the assertion is the byte count against the kernel's own bounds —
+        not against the old title, which is shorter than the region it sits in.
+        """
+        import subprocess
+        driver = tmp_path / 'long.py'
+        driver.write_text("""
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader('ping_bulk', sys.argv[1])
+spec = importlib.util.spec_from_loader('ping_bulk', loader)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+fields = open('/proc/self/stat', 'rb').read().rpartition(b')')[2].split()
+room = int(fields[46]) - int(fields[45])
+m._set_process_cmdline(['x' * 5000])
+after = open('/proc/self/cmdline', 'rb').read()
+print(room, len(after), os.environ.get('PB_CANARY', 'GONE'))
+""", encoding='utf-8')
+        env = dict(os.environ, PB_CANARY='intact')
+        done = subprocess.run([sys.executable, str(driver), app_path],
+                              capture_output=True, text=True, env=env)
+        if done.returncode != 0:            # no /proc: nothing to assert
+            pytest.skip(done.stderr.strip()[:80])
+        room, after, canary = done.stdout.split()
+        assert int(after) <= int(room), 'the title must not grow past arg_end'
+        assert canary == 'intact', 'the environment sits just past arg_end'
+
+    def test_it_is_silent_without_proc(self, pb):
+        with patch('builtins.open', side_effect=FileNotFoundError('/proc')):
+            pb._set_process_cmdline(['ping-bulk'])      # must not raise
+
+    def test_it_leaves_an_unexpected_region_alone(self, pb):
+        """The guard: if the region does not hold our cmdline, do not write."""
+        with patch('ctypes.string_at', return_value=b'something else'), \
+             patch('ctypes.memmove') as memmove:
+            pb._set_process_cmdline(['ping-bulk'])
+        memmove.assert_not_called()
 
 
 class TestTheProcessNamesItself:

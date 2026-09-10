@@ -160,20 +160,49 @@ The repository is structured to keep the core application as a single deployable
     nothing; it is a run we did not finish reading, so `reader_failed` skips
     the classification while the backoff still grows.
 
-  **The process names itself, and `ps aux` still cannot be fixed.** Every
-  thread starts through `_spawn(target, name)`, which sets the Python thread
-  name (full, for a death report) *and* the kernel's `comm` via
-  `prctl(PR_SET_NAME)` (`_os_task_name`, 15 bytes, trimmed from the front of
-  the host so `ping:23.254.161` survives instead of `ping:ses-wg-vid`).
-  `main()` names the process `ping-bulk`, so `ps -o comm`, `ps -T`, `top`,
-  `htop` and a bare `pgrep -x ping-bulk` finally say what it is. **The
-  `COMMAND` column of `ps aux` cannot be changed from inside a Python 3
-  process** — measured: `Py_GetArgcArgv` returns the interpreter's own
-  `wchar_t` copy on the heap, nowhere near the stack region the kernel
-  records, so the classic argv-overwrite trick has nothing to write to. The
-  shebang puts `python3` in argv[0] before any of our code runs; only the
-  caller can change it (`exec -a ping-bulk python3 …`). Do not add a
-  `setproctitle`-style stack scan for this.
+  **The process names itself, in ps and in top.** Every thread starts through
+  `_spawn(target, name)`, which sets the Python thread name (full, for a death
+  report) *and* the kernel's `comm` via `prctl(PR_SET_NAME)` (`_os_task_name`,
+  15 bytes, trimmed from the front of the host so `ping:23.254.161` survives
+  instead of `ping:ses-wg-vid`). `main()` also rewrites the `COMMAND` column
+  of `ps aux` — `_set_process_cmdline` writes over the argument vector in
+  place, whose bounds the kernel publishes as `arg_start`/`arg_end` in
+  `/proc/self/stat`. It writes only if that region still holds exactly what
+  `/proc/self/cmdline` reports, never past `arg_end` (the environment lives
+  there — `arg_end` *is* `env_start`), always leaving the last byte NUL, and
+  fails silently. **The terminator is the subtle part**: without it the
+  kernel's own read of `/proc/self/cmdline` runs past `arg_end` and returns
+  environment variables as part of the title — measured, a 58-byte region came
+  back as 86 bytes ending in an `AGENT_SESSION_ID=…`.
+
+  Two dead ends, both measured, so nobody repeats them. `Py_GetArgcArgv` — the
+  trick every recipe names — returns the interpreter's own `wchar_t` copy on
+  the heap in Python 3, so there is nothing there to overwrite; use
+  `/proc/self/stat` instead. And **do not wrap the launcher in bash's
+  `exec -a`**: it does clean up the column, but Python finds its prefix by
+  resolving argv[0], so any argv[0] that is not the interpreter's own path
+  costs a venv interpreter its venv — `sys.prefix` silently becomes `/usr` and
+  it loads the system site-packages. Measured with the same interpreter and
+  only argv[0] changed. It also cannot honour the script's own `#!` line and
+  hardcodes an interpreter.
+  **A section title wider than the terminal killed the display.** The
+  hostname column is sized from content — the longest name, the longest
+  section title — and knew nothing about the screen, so `stat_col` landed past
+  the right edge and the column header wrote there with a bare `addstr`:
+  `_curses.error: addwstr() returned ERR`, the whole draw dead. Measured:
+  `examples/ping-bulk.advance` (65-character title) died at 60 and 80 columns
+  and drew at 90+. Two parts, and both are needed: `draw_hosts` clamps
+  `name_col_width` so the stats and `_MIN_HIST_COLS` of history always fit,
+  and every write whose start column is a computed layout offset now goes
+  through `_safe_addstr`. **ncurses returns ERR only when the *start* position
+  is off screen** — an overflowing string is clipped silently — which is why
+  the guard belongs on those and not on the padded strings. The clamp alone
+  would still crash (the badge field widens the per-row stat cell by up to 9
+  columns past what the header uses); the guards alone would draw a row with a
+  name and nothing else. `tests/test_wide_title_crash.py` drives `draw_hosts`
+  against a fake window that raises like ncurses, and each half is verified to
+  fail when the other is removed.
+
 - **Phase 16 (probes, SSH hygiene, expected-silence hosts)**:
   `:probe-source` + `:probe` read arbitrary per-host values over **one
   persistent SSH connection per host** (`ProbeReader` on the shared
