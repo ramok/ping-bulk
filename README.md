@@ -322,10 +322,10 @@ reference.
 | `Enter`             | Show detailed stats         |
 | `Space`             | Insert marker / Toggle fold |
 | `Esc`               | Clear host selection        |
-| `C`                 | Clear event log             |
+| `X`                 | Clear event log             |
 | `←` / `→`           | Scroll history (step)       |
 | `Ctrl+←` / `Ctrl+→` | Scroll history (page)       |
-| `PgUp` / `PgDn`     | Scroll event log            |
+| `PgUp` / `PgDn`     | Page selection / event log  |
 
 ## Remote clock monitoring
 
