@@ -141,49 +141,80 @@ class TestProbeReaderCommand:
 
 class TestProbeReaderParsing:
 
-    def _run(self, pb, lines, defs=None, retain=100):
+    def _run(self, pb, lines, defs=None, retain=100, expect=1, close=True):
+        """Drive one ProbeReader over a fake pipe until *expect* samples land.
+
+        The settle step used to be ``time.sleep(0.2)`` — inside a
+        ``patch('time.sleep')`` block, so it returned instantly and the reader
+        thread was simply raced.  Under a loaded full-suite run it lost about
+        one in three, and the guide says not to lean on a fixed sleep for a
+        state transition.  Waiting for the samples the case is about is both
+        faster and deterministic.
+
+Returns ``(monitor, reader, states)``, where *states* is each
+        series' ``state`` once its samples had landed.
+
+        ``close=False`` leaves the fake source running instead of closing the
+        pipe after its last line.  It matters for any case that asserts a
+        *healthy* state: with ``close=True`` the source exits straight after
+        its last reading, and a source that exits is a failure, so every
+        series reads ``err`` — deterministically, once the read is no longer
+        raced.  The old ``state == 'ok'`` assertion passed only by beating the
+        reader to it.
+        """
         m = pb.PingMonitor('10.0.0.1')
         defs = defs or {'temp': pb.ProbeDef('temp'), 'rpm': pb.ProbeDef('rpm')}
         r = pb.ProbeReader(m, 'pb-probe', 0.2, defs, retain=retain)
-        proc = FakeProc(stdout_lines=lines, close=True)
+        proc = FakeProc(stdout_lines=lines, close=close)
+
+        def _samples():
+            return max((len(s.values) for s in m.probes.values()), default=0)
+
+        # Captured before the patch: 'patch("time.sleep")' is there so the
+        # reader does not wait out its interval, but the poll below still
+        # needs a real yield — spinning holds the GIL and starves the very
+        # thread it is waiting for.
+        real_sleep = time.sleep
         with patch('subprocess.Popen', return_value=proc), patch('time.sleep'):
             t = threading.Thread(target=r.run, daemon=True)
             t.start()
-            deadline = time.time() + 5
-            while time.time() < deadline and not m.probes:
-                time.sleep(0.01)
-            time.sleep(0.2)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and _samples() < expect:
+                real_sleep(0.005)
+            states = {k: v.state for k, v in m.probes.items()}
             r.running = False
             t.join(5)
-        return m, r
+        return m, r, states
 
     def test_values_are_collected_as_a_series(self, pb):
-        m, _ = self._run(pb, ['temp=54.2\n', '---\n', 'temp=55.9\n', '---\n'])
+        m, _, states = self._run(
+            pb, ['temp=54.2\n', '---\n', 'temp=55.9\n', '---\n'],
+            expect=2, close=False)
         assert list(m.probes['temp'].values) == [54.2, 55.9]
-        assert m.probes['temp'].state == 'ok'
+        assert states['temp'] == 'ok', 'healthy while the readings arrived'
 
     def test_timestamps_are_recorded_alongside(self, pb):
         """The strip and the sparkline both need when, not just what."""
-        m, _ = self._run(pb, ['temp=54.2\n', '---\n'])
+        m, _, states = self._run(pb, ['temp=54.2\n', '---\n'])
         s = m.probes['temp']
         assert len(s.times) == len(s.values) == 1
 
     def test_undeclared_keys_are_ignored(self, pb):
         """One site-wide script may serve hosts that display different subsets."""
-        m, _ = self._run(pb, ['temp=1\n', 'humidity=40\n', '---\n'])
+        m, _, states = self._run(pb, ['temp=1\n', 'humidity=40\n', '---\n'])
         assert 'humidity' not in m.probes
 
     def test_unparsable_value_marks_err(self, pb):
-        m, _ = self._run(pb, ['temp=warm\n', '---\n'])
+        m, _, states = self._run(pb, ['temp=warm\n', '---\n'])
         assert m.probes['temp'].state == 'err'
 
     def test_retain_bounds_the_series(self, pb):
         lines = [f'temp={i}\n' for i in range(20)]
-        m, _ = self._run(pb, lines, retain=5)
+        m, _, states = self._run(pb, lines, retain=5, expect=5)
         assert len(m.probes['temp'].values) == 5
 
     def test_garbage_lines_do_not_raise(self, pb):
-        m, _ = self._run(pb, ['not a pair\n', '\n', '---\n', 'temp=1\n'])
+        m, _, states = self._run(pb, ['not a pair\n', '\n', '---\n', 'temp=1\n'])
         assert m.probes['temp'].values
 
 

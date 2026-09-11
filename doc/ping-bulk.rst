@@ -882,7 +882,7 @@ Key bindings
     blocklist as ``:remote-ping`` applies, since an option here reaches every
     monitoring connection.
 
-``:no-alarm [--remove|--toggle] <host|glob>``
+``:no-alarm [--remove|--mark|--unmark|--toggle] <host|glob>``
     Mark hosts where a lost reply is **expected** rather than a fault: a
     device that is normally switched off, or one that drops ICMP.  A red
     ``X`` every second and a permanently red section header is noise, not
@@ -912,6 +912,20 @@ Key bindings
     ``~`` combines with the optional marker ``?`` in either order, and works
     inside a ``:for`` body and a ``:with remote-ping`` block.  With no
     argument, lists the active rules; ``--remove`` drops one.
+
+    ``--toggle`` (bound to ``o``) records a decision about the **selected
+    host alone**, kept apart from the globs above.  So turning off a host
+    that a glob marked leaves that glob in force for every other host it
+    covers, and the press outlives an ``:edit`` reload — which resets the
+    rules the file declares, so that deleting a ``:no-alarm`` line takes
+    effect.  Where both apply, the key press wins: it is the more recent
+    decision.
+
+    ``--mark <host>…`` and ``--unmark <host>…`` set the same per-host
+    decision by name, and are what ``:save-config`` writes, so a toggled host
+    survives a restart.  ``--remove`` cannot serve here: it deletes a *glob*,
+    which would unmark every host that glob covers.  ``:no-alarm`` with no
+    argument lists the globs and these overrides separately.
 
     **Inside a ``:with`` block, use ``~`` rather than the command.**  Like
     ``:resolv`` and ``:prog-options``, a ``:no-alarm`` *command* is refused
@@ -1898,10 +1912,30 @@ pressing ``c`` directly.
       ping-bulk invocation (``os.execvp``), picking up both the updated
       hosts script and any newer version of the ping-bulk binary itself.
       Ping history is not preserved.
-    * ``[2] reload`` — in-process reload: stop monitoring threads, clear
-      the host list, re-source the file, then restart monitoring.  Ping
-      history and counters are preserved for hosts whose name is unchanged.
+    * ``[2] reload`` — in-process reload.  The file is re-read and **every
+      host whose definition did not change keeps running**: the same monitor
+      stays in place, with its ping or SSH connection, its history, its
+      pause and its ``:no-alarm`` mark untouched.  Only what the edit
+      actually changed is restarted, and a host that is no longer listed is
+      stopped.  A host whose definition changed but whose name did not — an
+      edited SSH line, say — is a new connection to the same host, and
+      inherits the history measured through the old one.  The event log says
+      how many were kept and how many restarted.
     * ``[3] / Esc / any other key`` — ignore; continue with the current session.
+
+    What counts as a change is everything that shapes the probe, plus the
+    displayed name: the target, a ``:resolv`` override, a TCP port, a ``##``
+    label, the SSH jump chain and relay login, and the relay's declared OS.
+    Re-pointing ``:with remote-ping`` at a different proxy therefore rebuilds
+    the hosts behind it — which is the point, since the new relay may run a
+    different operating system — while the hosts that do not go through it
+    are left alone.  Reordering hosts, renaming a section or moving a host
+    between sections restarts nothing.
+
+    A reload also **resets the rules the file declares** — ``:no-alarm``
+    patterns and ``:relay-os`` rules — before re-reading it, so deleting a
+    line takes effect.  A ``:no-alarm`` mark set at runtime with ``o`` is a
+    live decision rather than something the file said, and is kept.
 
     If the file was not modified (or is read-only), no prompt is shown.
 

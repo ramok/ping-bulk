@@ -211,17 +211,21 @@ class TestEditReloadInplace:
 
         assert len(app.monitors) == 0  # cleared before source (source was mocked)
 
-    def test_history_restored_for_matching_host(self, app, pb, tmp_path):
-        """Hosts present before and after reload get their history back."""
+    def test_an_unchanged_host_is_kept_rather_than_rebuilt(self, app, pb,
+                                                            tmp_path):
+        """The running monitor goes back in place and the fresh one is dropped.
+
+        This used to restore the history *into* the replacement, which meant
+        the host still lost its child process and its ssh connection.  Keeping
+        the object keeps all three, and the history needs no copying.
+        """
         hosts = _write_hosts(tmp_path / 'hosts', '127.0.0.1\n')
         app.hosts_file = hosts
 
-        # Seed the existing monitor with history
         m_old = app.monitors[0]
         m_old.history.extend([10.0, 20.0])
         m_old.rx_count = 2
 
-        # After source, a new monitor for the same host is created
         m_new = pb.PingMonitor('127.0.0.1')
 
         def fake_source(path):
@@ -232,8 +236,43 @@ class TestEditReloadInplace:
              patch('threading.Thread'):
             app._edit_reload_inplace(hosts)
 
+        assert app.monitors == [m_old], 'the running monitor must be kept'
+        assert m_old.running, 'and must not have been stopped'
+        assert list(m_old.history) == [10.0, 20.0]
+        assert m_old.rx_count == 2
+        assert list(m_new.history) == [], 'the replacement is discarded'
+
+    def test_a_changed_host_inherits_the_history_of_its_old_self(self, app, pb,
+                                                                 tmp_path):
+        """Same name, different definition: a new connection, the same host.
+
+        Adoption cannot apply — the identity differs — so this is the path
+        where _restore_monitor still earns its keep.
+        """
+        hosts = _write_hosts(tmp_path / 'hosts', '127.0.0.1\n')
+        app.hosts_file = hosts
+
+        m_old = app.monitors[0]
+        m_old.history.extend([10.0, 20.0])
+        m_old.rx_count = 2
+
+        # A relayed monitor displaying the same name is a different identity.
+        m_new = pb.PingMonitor('127.0.0.1')
+        m_new.resolv_static = True
+        m_new.resolved_ip = '10.9.9.9'
+
+        def fake_source(path):
+            app.monitors.append(m_new)
+            app.entries.append(m_new)
+
+        with patch.object(app, '_cmd_source', side_effect=fake_source), \
+             patch('threading.Thread'):
+            app._edit_reload_inplace(hosts)
+
+        assert app.monitors == [m_new]
         assert list(m_new.history) == [10.0, 20.0]
         assert m_new.rx_count == 2
+        assert not m_old.running, 'the replaced monitor must be stopped'
 
     def test_new_host_starts_fresh(self, app, pb, tmp_path):
         """A host that didn't exist before the reload starts with empty history."""

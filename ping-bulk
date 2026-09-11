@@ -1060,6 +1060,8 @@ _HELP_CMDS_HOSTSFILE = [
     "                            counted apart in a section badge, events at info level",
     "                            and no longer holds its section open under autofold",
     "                            ('~host' on a host line marks that host; :with no-alarm too)",
+    "  :no-alarm --mark|--unmark <host>  one host only, whatever the globs say",
+    "                            (what [o] records, and what :save-config writes)",
     "  :prog-options <prog> <glob> <opts|--disable>  per-program options for :mux",
     "                            an exact host name beats any glob, whatever the order;",
     "                            among rules of the same kind the last match wins",
@@ -2529,6 +2531,26 @@ class Monitor(ABC):
         """
         return self.host
 
+    def identity(self):
+        """A key saying whether two monitors probe the same thing the same way.
+
+        Equal identities mean the objects are interchangeable, so an ':edit'
+        reload can keep the one that is already running — with its child
+        process, its history and its pause — instead of killing it and
+        opening a fresh connection.
+
+        Everything that feeds the child's command line belongs here, plus the
+        display name: a renamed row is a different row, and the name is what
+        the history snapshot is keyed on anyway.  Subclasses extend it; the
+        bias is deliberately towards *too many* fields, because an extra
+        restart costs a few seconds of history while a wrong reuse leaves a
+        host probing the wrong target for the rest of the run.
+        """
+        return (type(self).__name__, self.host,
+                getattr(self, '_ping_host', self.host),
+                self.resolv_static,
+                self.resolved_ip if self.resolv_static else None)
+
     def resolve_dns(self, on_resolved=None):
         """Resolve the host to both its IP address and its hostname.
 
@@ -3564,6 +3586,9 @@ class PortMonitor(Monitor):
         # Try to resolve port name/number immediately
         self._resolve_port()
 
+    def identity(self):
+        return super().identity() + (str(self.port),)
+
     def _resolve_port(self):
         try:
             self.port_num = int(self.port)
@@ -4078,6 +4103,26 @@ class SshPingMonitor(SubprocessMonitor):
         if mapped and mapped[0]:
             host = mapped[0].lower()
         return (host, port)
+
+    def identity(self):
+        """Adds everything that shapes the remote command.
+
+        The jump chain is in here because the user asked for it directly:
+        re-pointing ':with remote-ping' at a different proxy must build a new
+        monitor, not keep one talking through the old hop.  Both arg lists
+        count — the resolved one builds the command, the original one is what
+        the row is labelled with.
+
+        ``_relay_os_declared`` matters as much as the args: the same host
+        through the same relay is a *different* monitor once the relay is
+        declared FreeBSD, because the argv, the parser and the loss model all
+        change.  It is read here rather than at construction time, which is
+        why reconciliation happens after the file has been re-read — a
+        ':relay-os' rule is applied to the monitor afterwards.
+        """
+        return super().identity() + (
+            tuple(self._ssh_args), tuple(self._original_ssh_args),
+            tuple(self._ssh_hops), self._ssh_dest, self._relay_os_declared)
 
     def connect_chain(self):
         """Return ``(hops, destination)`` for reaching the monitored host.
@@ -5772,9 +5817,9 @@ CMD_REGISTRY = [
            '<action> [--if-hosts]', 'fold action (toggle, open, close, open-all, …)',
            flags=['--if-hosts']),
     CmdDef(['no-alarm'],         '_cmd_no_alarm',   None,
-           '[--remove|--toggle] <host|glob>',
+           '[--remove|--mark|--unmark|--toggle] <host|glob>',
            'a lost reply is expected on these hosts (grey o, no alarm)',
-           flags=['--remove', '--toggle']),
+           flags=['--remove', '--mark', '--unmark', '--toggle']),
     CmdDef(['relay-os'],         '_cmd_relay_os',   None,
            '[--remove] <host|glob> <auto|linux|freebsd|mikrotik>',
            'declare the OS a :remote-ping relay runs (default: auto-detect)',
@@ -6581,7 +6626,14 @@ class Application:
             or (k == 'cmd' and rest and rest[0].startswith(':remote-ping ')))
         self.variables: dict[str, str] = {}  # :let variable store (name → value)
         self.prog_options: dict = {}   # prog_name → [(glob_pattern, opts_str | None), ...]
-        self.no_alarm_patterns: list = []  # globs from ':no-alarm'
+        self.no_alarm_patterns: list = []  # globs from ':no-alarm' (file)
+        # Per-host decisions made at runtime with 'o'.  Held apart from the
+        # patterns because an ':edit' reload resets what the file declared —
+        # otherwise deleting a ':no-alarm' line has no effect — and a key the
+        # user pressed a moment ago must not be reset with it.  A manual entry
+        # wins over any pattern: it is the more recent decision, and it is
+        # also the only way to turn *off* a host a glob marked.
+        self.no_alarm_manual: dict = {}   # display name → bool
         self.relay_os_rules: list = []     # (pattern, os) from ':relay-os'
         self.probe_defs: dict = {}     # probe name → ProbeDef (':probe')
         self.probe_readers: list = []  # one ProbeReader per host, while running
@@ -6962,6 +7014,13 @@ class Application:
                     f.write(f":set late-grace {self.late_grace:g}\n")
                 for pattern in self.no_alarm_patterns:
                     f.write(f":no-alarm {pattern}\n")
+                # Per-host decisions from 'o', written as the flags that
+                # reconstruct them.  '--remove' would not do: it deletes a
+                # glob for every host it covers, and cannot say "off for this
+                # one" at all.
+                for name, want in self.no_alarm_manual.items():
+                    flag = '--mark' if want else '--unmark'
+                    f.write(f":no-alarm {flag} {name}\n")
                 for pattern, os_name in self.relay_os_rules:
                     f.write(f":relay-os {pattern} {os_name}\n")
                 if _ssh_connect_rate != _SSH_CONNECT_RATE_DEFAULT:
@@ -12101,7 +12160,7 @@ class Application:
         return entry if isinstance(entry, Monitor) else None
 
     def _cmd_no_alarm(self, args=''):
-        """:no-alarm [--remove] <glob> — a lost reply is expected on these hosts.
+        """:no-alarm [--remove|--mark|--unmark|--toggle] <glob> — silence is expected.
 
         For a device that is normally switched off, or one that drops ICMP: the
         history shows a grey 'o' instead of a red 'X', the host is counted
@@ -12117,11 +12176,24 @@ class Application:
         lists the current rules.
         """
         if not args:
-            if not self.no_alarm_patterns:
-                self.add_event("config", "no-alarm: no patterns")
-            else:
+            if self.no_alarm_patterns:
                 self.add_event("config",
                     "no-alarm: " + ' '.join(self.no_alarm_patterns))
+            elif not self.no_alarm_manual:
+                self.add_event("config", "no-alarm: no patterns")
+            # The per-host overrides are listed separately and named as the
+            # flags that set them: this command is how "why is this host
+            # marked?" gets answered, and a decision it cannot see is worse
+            # than no answer.
+            if self.no_alarm_manual:
+                marked = [n for n, v in self.no_alarm_manual.items() if v]
+                cleared = [n for n, v in self.no_alarm_manual.items() if not v]
+                if marked:
+                    self.add_event("config",
+                        "no-alarm: --mark " + ' '.join(marked))
+                if cleared:
+                    self.add_event("config",
+                        "no-alarm: --unmark " + ' '.join(cleared))
             return
         rest = args.strip()
         if rest in ('--toggle', '-t'):
@@ -12133,21 +12205,36 @@ class Application:
             # Persist the alias when there is one: it is the name shown, and it
             # survives a DNS change or a renumbering that the address does not.
             pattern = alias or name
-            if monitor.no_alarm:
-                # Drop every rule that matches this host, not just an exact
-                # pattern: toggling off must actually turn it off, even when the
-                # host was marked by a glob.
-                self.no_alarm_patterns = [
-                    pat for pat in self.no_alarm_patterns
-                    if not (fnmatch.fnmatch(name, pat)
-                            or (alias and fnmatch.fnmatch(alias, pat)))]
-                verb = 'cleared'
-            else:
-                self.no_alarm_patterns.append(pattern)
-                verb = 'set'
+            # Recorded as a decision about this one host rather than as a glob.
+            # Editing the pattern list could not express "off for this host,
+            # which a glob marks" without deleting that glob for everyone, and
+            # the entry was reset by the next reload along with the file's own
+            # rules.
+            want = not monitor.no_alarm
+            self.no_alarm_manual[pattern] = want
+            verb = 'set' if want else 'cleared'
             self._apply_no_alarm()
             self.add_event("config", f"no-alarm: {verb} for {pattern}")
             return
+        # '--mark'/'--unmark' name one host and record the same per-host
+        # decision the 'o' key makes.  '--remove' cannot express it: it
+        # deletes a glob, which would unmark every host that glob covers, and
+        # a name that is not itself a pattern is not in the list to delete.
+        # ':save-config' writes these, so a toggled host survives a restart.
+        for flag, want in (('--mark', True), ('--unmark', False)):
+            if rest == flag or rest.startswith(flag + ' '):
+                names = rest[len(flag):].split()
+                if not names:
+                    self.add_event("cmd", f"no-alarm: {flag} needs a host")
+                    return
+                for name in names:
+                    self.no_alarm_manual[name] = want
+                self._apply_no_alarm()
+                if self._monitoring_started:
+                    verb = 'set' if want else 'cleared'
+                    self.add_event("config",
+                        f"no-alarm: {verb} for {' '.join(names)}")
+                return
         remove = False
         for flag in ('--remove', '-r'):
             if rest == flag or rest.startswith(flag + ' '):
@@ -12179,13 +12266,22 @@ class Application:
         Cached on the monitor rather than matched while drawing: the history
         strip is redrawn every frame for every host, and an fnmatch per cell
         would be paid forever for a rule set that changes almost never.
+
+        A runtime 'o' press is recorded per host in ``no_alarm_manual`` and
+        beats the globs, so it survives the reload that resets them.
         """
         for monitor in self.monitors:
             name, alias = self._prog_match_names(monitor)
-            monitor.no_alarm = any(
-                fnmatch.fnmatch(name, pattern)
-                or (alias and fnmatch.fnmatch(alias, pattern))
-                for pattern in self.no_alarm_patterns)
+            manual = self.no_alarm_manual
+            if name in manual:
+                monitor.no_alarm = manual[name]
+            elif alias and alias in manual:
+                monitor.no_alarm = manual[alias]
+            else:
+                monitor.no_alarm = any(
+                    fnmatch.fnmatch(name, pattern)
+                    or (alias and fnmatch.fnmatch(alias, pattern))
+                    for pattern in self.no_alarm_patterns)
 
     def _cmd_relay_os(self, args=''):
         """:relay-os [--remove] <host|glob> [<os>] — the OS a relay runs.
@@ -12611,14 +12707,109 @@ class Application:
             # seqs mean nothing to the new one, so start with none pending.
             m._pending.clear()
 
-    def _edit_reload_inplace(self, hosts_file):
-        """In-process reload: snapshot history, clear monitors, re-source, restore."""
-        snapshot = {m.host: self._snapshot_monitor(m) for m in self.monitors}
+    def _adopt_monitors(self, pool):
+        """Put running monitors back in place of identical fresh ones.
 
-        for m in self.monitors:
-            m.stop()
-        for t in self.threads:
-            t.join(timeout=0)
+        *pool* maps identity() → list of the monitors that were running before
+        the file was re-read.  Every fresh monitor whose identity is in there
+        is replaced, in ``entries`` and ``monitors``, by the running object —
+        which keeps its child process, its ssh connection, its history, its
+        pause and its 'a lost reply is expected here' mark.
+
+        A list per key, not a single object, because the same host may be
+        listed twice; the second copy gets a fresh monitor rather than a
+        second reference to one object.
+
+        Returns the fresh monitors that were *not* adopted.  Whatever is left
+        in *pool* afterwards is gone from the file, or changed, and is the
+        caller's to stop.
+        """
+        fresh = []
+        for i, entry in enumerate(self.entries):
+            if not isinstance(entry, Monitor):
+                continue
+            waiting = pool.get(entry.identity())
+            if waiting:
+                self.entries[i] = waiting.pop(0)
+            else:
+                fresh.append(entry)
+        # Rebuilt from entries so the two stay in the same order.  Mutated in
+        # place: other objects hold this list.
+        self.monitors[:] = [e for e in self.entries if isinstance(e, Monitor)]
+        return fresh
+
+    def _resync_probe_readers(self):
+        """Point the probe connections at the monitors that are on screen now.
+
+        A reader holds its monitor, so after a reload the ones whose monitor
+        was replaced were writing readings into an object nothing displays,
+        while the replacements had no reader at all.  Adopted monitors keep
+        the reader they already had — the object did not change, so neither
+        did its connection.
+        """
+        if not self.probe_source or not self.probe_defs:
+            self._stop_probe_readers()
+            return
+        live = {id(m) for m in self.monitors}
+        keep, drop = [], []
+        for reader in self.probe_readers:
+            (keep if id(reader.monitor) in live else drop).append(reader)
+        for reader in drop:
+            reader.stop()
+        self.probe_readers = keep
+        covered = {id(r.monitor) for r in keep}
+        for monitor in self.monitors:
+            if id(monitor) in covered or isinstance(monitor, PortMonitor):
+                continue
+            reader = ProbeReader(monitor, self.probe_source, self.probe_interval,
+                                 self.probe_defs, self.probe_retain,
+                                 kiosk_mode=self.kiosk_mode)
+            self.probe_readers.append(reader)
+            self.threads.append(_spawn(reader.run, f'probe:{monitor.host}'))
+
+    def _edit_reload_inplace(self, hosts_file):
+        """Re-read the hosts file, keeping every host it did not change.
+
+        Nothing is stopped before the file has been read, so the children go
+        on pinging throughout, and a monitor whose :meth:`Monitor.identity`
+        still matches is adopted rather than rebuilt.
+
+        Rebuilding all of them was visible on screen.  Every host lost its
+        child, and because reconnections are paced by ':set ssh-connect-rate'
+        the resulting gap staircased down the list — a cell or two at the top,
+        eight or nine by the last host behind a 50-host relay — while that
+        relay paid fifty handshakes at once, which is what tripped
+        'MaxStartups' the last time this went wrong.
+
+        Two orderings matter:
+
+        * Reconciliation runs **after** the file is read, because ':resolv'
+          and ':relay-os' are applied to a monitor after it is built.  An
+          identity taken at construction time cannot see a changed static
+          mapping or a relay newly declared FreeBSD, and would adopt a
+          monitor still aimed the old way.
+        * The rules the file declares are **reset first**, so deleting a
+          ':no-alarm' or ':relay-os' line takes effect.  They used to
+          accumulate, which made removing a line a no-op and left a stale
+          relay OS in the identity of every host behind it.
+        """
+        old = list(self.monitors)
+        pool = {}
+        for m in old:
+            pool.setdefault(m.identity(), []).append(m)
+        # Keyed on the display name, and only ever applied to a monitor that
+        # was *not* adopted: an adopted one already holds this history, and
+        # extending its deque with a copy of itself would double every row.
+        snapshot = {m.host: self._snapshot_monitor(m) for m in old}
+        # What was selected, by name: the index cannot survive a file that
+        # added or removed a line above it.  Clearing the selection outright
+        # used to be forced — every monitor was a new object — and now is not.
+        selected = None
+        if (self.highlighted_index is not None
+                and 0 <= self.highlighted_index < len(self.entries)):
+            entry = self.entries[self.highlighted_index]
+            selected = (entry.host if isinstance(entry, Monitor)
+                        else getattr(entry, 'title', None))
 
         self.highlighted_index = None
         self.host_scroll = 0
@@ -12626,8 +12817,12 @@ class Application:
         self.entries.clear()
         self._name_col_dirty = True
         self._name_col_cache.clear()
-        self.threads.clear()
         self.hosts_map.clear()
+        # File-declared rule sets: the file is the authority on these, so what
+        # it no longer says must stop applying.  Runtime 'o' decisions live in
+        # no_alarm_manual and are deliberately kept.
+        self.no_alarm_patterns = []
+        self.relay_os_rules = []
 
         # Source the file with _monitoring_started temporarily False so that
         # _apply_hosts_entry does not log spurious "no monitor matched" warnings
@@ -12639,14 +12834,38 @@ class Application:
         finally:
             self._monitoring_started = True
 
-        for m in self.monitors:
+        fresh = self._adopt_monitors(pool)
+        for leftover in pool.values():
+            for m in leftover:
+                m.stop()
+        self.threads[:] = [t for t in self.threads if t.is_alive()]
+
+        for m in fresh:
             self._start_monitor_thread(m)
+            snap = snapshot.get(m.host)
+            if snap is not None:
+                # Same name, changed definition — an edited ssh line, say.
+                # It is a new connection but the same host, so it inherits
+                # what was measured through the old one.
+                self._restore_monitor(m, snap)
 
-        for m in self.monitors:
-            if m.host in snapshot:
-                self._restore_monitor(m, snapshot[m.host])
+        # Adopted monitors are in the list now, so the file's rules reach them.
+        self._apply_no_alarm()
+        self._apply_relay_os()
+        self._resync_probe_readers()
 
-        self.add_event("cmd", f"edit: reloaded {hosts_file}")
+        if selected is not None:
+            for i, entry in enumerate(self.entries):
+                name = (entry.host if isinstance(entry, Monitor)
+                        else getattr(entry, 'title', None))
+                if name == selected:
+                    self.highlighted_index = i
+                    break
+
+        kept = len(self.monitors) - len(fresh)
+        self.add_event("cmd",
+            f"edit: reloaded {hosts_file} — {kept} host(s) kept running, "
+            f"{len(fresh)} restarted")
 
     def _kiosk_audit(self, action: str, detail: str = '') -> None:
         """Write one audit record to syslog when kiosk mode is active.
