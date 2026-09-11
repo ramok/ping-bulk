@@ -473,13 +473,15 @@ class TestLogSize:
         assert len(event_list) == 5
         assert 'event 0' in event_list
 
-    def test_no_args_opens_settings_overlay(self, pb, tmp_path):
-        """:set log-size with no argument opens settings overlay focused on 'log-size'."""
+    def test_no_args_reports_the_size(self, pb, tmp_path):
+        """':set log-size' answers with the value and changes nothing."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
+        before = app.log_size
         app._dispatch_cmd(':set log-size')
-        assert app.help_open and app.help_show_settings
-        assert app.help_search == 'log-size'
+        assert app.log_size == before
+        assert app._status_msg['text'] == f'log-size {before}'
+        assert not app.help_open
 
     def test_invalid_non_integer_rejected(self, pb, tmp_path):
         """A non-integer value must be rejected and log_size must stay unchanged."""
@@ -597,16 +599,22 @@ class TestSetCommand:
             f"Expected unknown-setting error in events; got: {events}"
         )
 
-    def test_set_dns_no_value_opens_settings_overlay(self, pb, tmp_path):
-        """:set dns with no value opens settings overlay focused on 'dns'."""
+    def test_set_dns_no_value_reports_it(self, pb, tmp_path):
+        """':set dns' answers with the value, in the words that would set it.
+
+        It used to open the settings overlay focused on the parameter.  The
+        report is a plain answer to a plain question, and it reads back as
+        the command that would set it — 'dns off' is what ':set dns off'
+        takes.
+        """
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
         initial = app.dns_mode
         app._dispatch_cmd(':set dns')
-        assert app.help_open, "help overlay should be open"
-        assert app.help_show_settings, "settings tab should be active"
-        assert app.dns_mode == initial, "dns_mode must not change when no value given"
-        assert app.help_search == 'dns', "search should be pre-populated with param name"
+        assert app.dns_mode == initial, "a query must not change the value"
+        assert not app.help_open, "no overlay for a query"
+        assert app._status_msg['text'] == 'dns off'
+        assert any('dns off' in e.text for e in app.events)
 
 
 class TestLogFileCliOverride:
@@ -668,13 +676,15 @@ class TestHistorySize:
         app._dispatch_cmd(':set history-size 10000')
         assert list(m.history) == [1.0, 2.0, 3.0]
 
-    def test_no_args_opens_settings_overlay(self, pb, tmp_path):
-        """:set history-size with no argument opens settings overlay focused on 'history-size'."""
+    def test_no_args_reports_the_size(self, pb, tmp_path):
+        """':set history-size' answers with the value and changes nothing."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
+        before = app.history_size
         app._dispatch_cmd(':set history-size')
-        assert app.help_open and app.help_show_settings
-        assert app.help_search == 'history-size'
+        assert app.history_size == before
+        assert app._status_msg['text'] == f'history-size {before}'
+        assert not app.help_open
 
     def test_invalid_non_integer_rejected(self, pb, tmp_path):
         """A non-integer value must be rejected and history_size must stay unchanged."""
@@ -814,12 +824,11 @@ class TestSettingsOverlay:
         assert app.help_search == ''
 
     def test_open_settings_overlay_with_param(self, pb, tmp_path):
-        """:set <param> opens overlay with search pre-populated and cursor on param."""
+        """The focused overlay is still reachable, just not from ':set sort'."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         app = make_app(pb, cfg, '')
-        # Use 'sort' (index 2 in SET_PARAMS)
         sort_idx = next(i for i, p in enumerate(pb.SET_PARAMS) if p.name == 'sort')
-        app._dispatch_cmd(':set sort')
+        app._open_settings_overlay(param_name='sort')
         assert app.help_open
         assert app.help_show_settings
         assert app.help_search == 'sort'

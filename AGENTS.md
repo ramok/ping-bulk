@@ -654,6 +654,49 @@ no hosts.
 - **Trailing dash = reverse/backward**: `half-` scrolls left/back; `half` scrolls right/forward.
 - Standard set: `half`, `half-`, `full`, `full-`, `page`, `page-`.
 
+### One rule for every settable parameter
+
+`:set <param>` with no value **reports**; `cycle` / `cycle-` step forward and
+back; anything else is a value. `_handle_param_verb` is the only
+implementation, called from `_cmd_set` and from the head of each parameter's
+own command, so `:set dns cycle` and `:dns cycle` cannot drift apart.
+
+A bare invocation used to change things — `:dns` cycled, `:sync-history` and
+`:pause` toggled. That made a hosts file non-idempotent, and the bug it caused
+was reported from production: a config holding `:set sync-history off` plus a
+hosts file holding a bare `:sync-history` came up **on** (the file flipped the
+config) and went **off** after the first `:edit` reload (the file flipped it
+again). Startup state depended on what `:save-config` last wrote.
+
+Consequences worth knowing:
+
+- **The default keys name the verb** (`D` → `:dns cycle`, `S` →
+  `:sync-history cycle`, `P` → `:pause cycle`, …). A user's own
+  `:bind-key <C-p> :pause` now reports instead of pausing; the shipped example
+  and the rst were both corrected, and `tests/test_param_verbs.py` asserts no
+  default is bound to a bare parameter name.
+- **`--toggle` is a flag, not the positional verb**, and keeps its distinct
+  meaning: `:layout --toggle log` remembers where it came from, which stepping
+  through a value list cannot do. Same for `:no-alarm --toggle`.
+- **`reverse` survives as an alias for `:sort cycle-`** (§11: keep old names as
+  aliases), and `cycle-` is what `_save_config` and the docs use.
+- **An unrecognised value is rejected, not toggled.** `:pause yes` used to
+  unpause a paused fleet, and `:sync-history yes` did the opposite of what it
+  said, because both fell through to a toggle.
+- **A free-form value cannot be cycled from a list.** `SetParam.values` holds a
+  *string* for those — `'_complete_stats_arg'` names a completer,
+  `'<flags>|default|none'` is a usage synopsis — and walking either stepped
+  through its characters: `:set ssh-options cycle` set the options to `<`.
+  `next_value` now returns None for any non-list, `stats` supplies a `cycler`,
+  and `ssh-options` says it cannot be cycled.
+- **A report goes to `_status_msg`, not only the log.** Category `cmd` is
+  `LEVEL_INFO`, so an event-only answer is invisible at the default log level.
+  A cycle skips the event copy (`to_log=False`) because several handlers
+  already log the change in their own, better words.
+- Found while adding this: `SetParam('terminal')`'s getter read `app.terminal`,
+  but the attribute is `app.terminal_emulator`, so that row had always shown
+  `?` in the Settings tab. A test now asserts no parameter reports `?`.
+
 ### Confirmation UX
 - Destructive commands support `--confirm`.
 - Pattern: first press sets a 2-second deadline and shows a transient `_status_msg`; second press within deadline executes.

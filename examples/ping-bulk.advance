@@ -404,7 +404,8 @@ ${gw3}$domain   # ${gw3} same as $gw3; braces just for clarity
 
 :bind-key --desc "MTR trace" --hint "[t]race" t :mux mtr %i
 :bind-key x :set stats down \; :set dns hostname
-:bind-key <C-p> :pause
+:bind-key <C-p> :pause cycle
+# A bare ":pause" would only report the value -- say "cycle" to change it.
 
 # -- Conditional bindings --------------------------------------------------
 # --if-cmd PRG  -- only bind if PRG is found in PATH (checked once at load time).

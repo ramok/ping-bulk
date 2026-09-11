@@ -4,11 +4,14 @@ Tests cover:
 - Monitor.pause() / unpause(): paused flag, _pause_event state, subprocess termination
 - Application._get_pause_targets(): correct targets for host/section/no selection
 - Application._apply_pause_toggle(): toggle semantics (pause if any active, unpause if all paused)
-- _cmd_pause() with on/off/empty args
+- _cmd_pause() with on/off/cycle/no args
 - _section_summary(): paused monitors excluded from ↑/↓/- counts; N⏸ segment added
 """
 
+import os
 import threading
+from unittest.mock import patch
+
 import pytest
 
 
@@ -150,32 +153,56 @@ class TestApplyPauseToggle:
 # ---------------------------------------------------------------------------
 
 class TestCmdPause:
-    def _make_app(self, pb):
-        app = pb.Application.__new__(pb.Application)
-        app.monitors = [pb.PingMonitor(f"10.0.0.{i}") for i in range(2)]
-        app.entries  = list(app.monitors)
-        app.highlighted_index = None
-        app.sort_by = 'none'
+    def _make_app(self, pb, tmp_path):
+        """A real Application: ':pause' now reports, which needs the event log.
+
+        The __new__ stub this used to be had no events deque and no status
+        message, so the report crashed on attributes __init__ sets.
+        """
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        open(cfg, 'w').close()
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app = pb.Application([('host', '10.0.0.0'), ('host', '10.0.0.1')])
         app._monitoring_started = False
         return app
 
-    def test_cmd_pause_on(self, pb):
-        app = self._make_app(pb)
+    def test_cmd_pause_on(self, pb, tmp_path):
+        app = self._make_app(pb, tmp_path)
         app._cmd_pause('on')
         assert all(m.paused for m in app.monitors)
 
-    def test_cmd_pause_off(self, pb):
-        app = self._make_app(pb)
+    def test_cmd_pause_off(self, pb, tmp_path):
+        app = self._make_app(pb, tmp_path)
         app._cmd_pause('on')
         app._cmd_pause('off')
         assert all(not m.paused for m in app.monitors)
 
-    def test_cmd_pause_toggle(self, pb):
-        app = self._make_app(pb)
-        app._cmd_pause('')
+    def test_cmd_pause_cycle(self, pb, tmp_path):
+        """'cycle' is the word for it now; a bare ':pause' only reports."""
+        app = self._make_app(pb, tmp_path)
+        app._cmd_pause('cycle')
         assert all(m.paused for m in app.monitors)
+        app._cmd_pause('cycle')
+        assert all(not m.paused for m in app.monitors)
+
+    def test_cmd_pause_no_arg_reports_and_changes_nothing(self, pb, tmp_path):
+        app = self._make_app(pb, tmp_path)
         app._cmd_pause('')
         assert all(not m.paused for m in app.monitors)
+        assert app._status_msg['text'] == 'pause off'
+
+    def test_cmd_pause_rejects_a_typo_instead_of_toggling(self, pb, tmp_path):
+        """An unrecognised value used to fall through to a toggle.
+
+        That is the one answer that can be wrong in both directions: ':pause
+        yes' unpaused a paused fleet.
+        """
+        app = self._make_app(pb, tmp_path)
+        app._cmd_pause('on')
+        app._cmd_pause('yes')
+        assert all(m.paused for m in app.monitors)
+        assert any("unknown value 'yes'" in e.text for e in app.events)
 
 
 # ---------------------------------------------------------------------------
