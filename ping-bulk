@@ -6199,6 +6199,15 @@ def _detect_relay_os(ssh_args, ssh_dest, note_cb=None):
     will fail the same way and re-enter backoff, and the next round probes
     again.  *note_cb* (a monitor's _note_stderr) reports the verdict once per
     distinct text through the usual event-log machinery.
+
+    **The retry pause is stamped only when a probe has failed**, never before
+    one runs.  Stamping it up front made the pre-lock fast path fire while
+    the first probe was still in flight, so every other monitor behind that
+    relay skipped the lock it was supposed to wait on and took the 'linux'
+    fallback for the whole pause — 60 seconds of ``ping -O -D`` against a
+    FreeBSD relay, which answers ``ping: illegal option -- O``.  Measured
+    with six threads and one slow probe: five wrong answers, one right one.
+    Latecomers now block on the per-key lock and read the cached verdict.
     """
     key = tuple(ssh_args)
     cached = _relay_os_cache.get(key)
@@ -6214,7 +6223,6 @@ def _detect_relay_os(ssh_args, ssh_dest, note_cb=None):
             return cached
         if time.monotonic() < _relay_os_retry_after.get(key, 0.0):
             return 'linux'      # another thread probed while we waited
-        _relay_os_retry_after[key] = time.monotonic() + _RELAY_OS_RETRY_PAUSE
         # One more connection to the same sshd: it pays the same toll as any
         # monitor connection.
         _ssh_spawn_gate(_ssh_first_hop(list(ssh_args), ssh_dest))
@@ -6229,6 +6237,8 @@ def _detect_relay_os(ssh_args, ssh_dest, note_cb=None):
             proc = subprocess.run(cmd, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=20)
         except (OSError, subprocess.SubprocessError) as exc:
+            _relay_os_retry_after[key] = (time.monotonic()
+                                          + _RELAY_OS_RETRY_PAUSE)
             if note_cb:
                 note_cb(f'{_PROG_NAME}: relay OS detection failed '
                         f'({type(exc).__name__}) — assuming linux')
@@ -6243,6 +6253,8 @@ def _detect_relay_os(ssh_args, ssh_dest, note_cb=None):
         elif any(mark in combined for mark in _ROUTEROS_ERROR_MARKS):
             name = 'mikrotik'
         else:
+            _relay_os_retry_after[key] = (time.monotonic()
+                                          + _RELAY_OS_RETRY_PAUSE)
             if note_cb:
                 note_cb(f'{_PROG_NAME}: relay OS detection got no answer '
                         f'— assuming linux until the relay responds')
@@ -12174,11 +12186,17 @@ class Application:
         if os_name == 'auto':
             # 'auto' is a request to re-detect, not just a default: forget the
             # cached answer for every relay the pattern matches, or the next
-            # spawn would simply read the old value back.
+            # spawn would simply read the old value back.  The retry pause has
+            # to go with it — a probe that failed stamps 60 seconds during
+            # which every host behind that relay reads 'linux' from the
+            # pre-lock fast path, so leaving it would make this escape hatch
+            # inert for a minute after the failure that prompted it.
             for monitor in self.monitors:
                 if (isinstance(monitor, SshPingMonitor)
                         and self._match_relay_os(monitor) == 'auto'):
-                    _relay_os_cache.pop(tuple(monitor._ssh_args), None)
+                    key = tuple(monitor._ssh_args)
+                    _relay_os_cache.pop(key, None)
+                    _relay_os_retry_after.pop(key, None)
         self._apply_relay_os()
         if self._monitoring_started:
             self.add_event("config", f"relay-os: {pattern} {os_name}")

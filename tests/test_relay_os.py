@@ -436,6 +436,52 @@ class TestDetection:
                 assert pb._detect_relay_os(['user@r9'], 'user@r9') == 'linux'
         assert run.call_count == 1, "one probe per relay per pause"
 
+    def test_latecomers_wait_for_the_probe_instead_of_guessing(
+            self, pb, fresh_detection, monkeypatch):
+        """Every host behind one relay must get the relay's real OS.
+
+        The retry pause used to be stamped *before* the probe ran, and the
+        pre-lock fast path reads it — so while the first thread's probe was
+        in flight (up to 20 s), every other monitor behind that relay
+        skipped the lock and took the 'linux' fallback for the whole
+        60-second pause.  Against a FreeBSD relay that is
+        ``ping: illegal option -- O``, once per host, until each one's
+        backoff brought it round again.  Measured on the unfixed code: five
+        of six threads answered 'linux'.
+        """
+        monkeypatch.setattr(pb, '_relay_os_retry_after', {})
+        args = ['-J', 'proxy', 'root@tent-router']
+        calls, verdicts = [], []
+
+        def slow_probe(cmd, **kwargs):
+            calls.append(cmd)
+            time.sleep(0.4)          # a handshake through a loaded relay
+            return _uname_result('FreeBSD\n')
+
+        with patch.object(pb, '_ssh_spawn_gate', lambda ep: None), \
+             patch('subprocess.run', side_effect=slow_probe):
+            threads = [threading.Thread(
+                target=lambda: verdicts.append(
+                    pb._detect_relay_os(args, 'root@tent-router')))
+                for _ in range(6)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+        assert verdicts == ['freebsd'] * 6, verdicts
+        assert len(calls) == 1, 'still exactly one probe per relay'
+
+    def test_a_failure_still_pauses_the_next_probe(self, pb, fresh_detection,
+                                                   monkeypatch):
+        """Moving the stamp must not lose the pause it was there for."""
+        monkeypatch.setattr(pb, '_relay_os_retry_after', {})
+        with patch('subprocess.run', side_effect=OSError('no ssh')) as run:
+            assert pb._detect_relay_os(['user@r11'], 'user@r11') == 'linux'
+            assert pb._detect_relay_os(['user@r11'], 'user@r11') == 'linux'
+        assert run.call_count == 1
+        assert pb._relay_os_retry_after[('user@r11',)] > 0
+
     def test_probe_bounds_its_own_connect(self, pb, fresh_detection,
                                           monkeypatch):
         monkeypatch.setattr(pb, '_relay_os_retry_after', {})
