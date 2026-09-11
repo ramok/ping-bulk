@@ -398,6 +398,74 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
 - `_proc`: Subprocess handle (if applicable).
 - `resolv_static`: Flag for static DNS mappings.
 
+## 9b. `:edit` reload keeps what it did not change
+
+`_edit_reload_inplace` used to stop every monitor, clear the lists, rebuild all
+of them and copy the history across. A host whose line was byte-identical still
+lost its child and re-authenticated. **Measured on a 50-host production
+screen**: the `_` cells ("no ping process this second") staircased down the
+list — one or two at the top, eight or nine by the last host behind one relay —
+because reconnections are paced by `_ssh_spawn_gate` at `ssh-connect-rate` 5/s,
+and that relay paid fifty handshakes at once.
+
+Now nothing is stopped before the file is read, and a monitor whose
+`Monitor.identity()` still matches is **adopted**: the same object goes back
+into `entries`/`monitors`, keeping its child process, SSH connection, history,
+`paused` and `no_alarm`.
+
+Three orderings are load-bearing:
+
+1. **Reconcile after `_cmd_source`, not during it.** `:resolv` and `:relay-os`
+   are applied to a monitor *after* it is built, so an identity taken at
+   construction time cannot see a changed static mapping or a relay newly
+   declared FreeBSD — it would adopt a monitor still aimed the old way.
+2. **Reset the file-declared rule stores before re-sourcing.**
+   `no_alarm_patterns` and `relay_os_rules` used to accumulate, so **deleting a
+   `:no-alarm` or `:relay-os` line was a no-op** and a stale relay OS stayed in
+   the identity of every host behind it. Verified before the fix: after
+   removing both lines, the patterns and rules were still there and the host
+   still drew `o`.
+3. **`_restore_monitor` is for the *unadopted* only.** An adopted monitor
+   already owns its history; extending its deque with a snapshot of itself
+   doubles every row. The snapshot is still keyed on the display name, so a
+   changed-but-same-name host (an edited SSH line) inherits what was measured
+   through the old connection.
+
+`identity()` is deliberately generous — an extra restart costs seconds of
+history, a wrong reuse leaves a host probing the wrong target for the run. Base:
+class name, `host` (the display name, which is where a `##` label ends up),
+`_ping_host`, `resolv_static` and the static IP. `PortMonitor` adds the port.
+`SshPingMonitor` adds `_ssh_args`, `_original_ssh_args`, `_ssh_hops`,
+`_ssh_dest` and `_relay_os_declared` — **the jump chain is in there because the
+user asked for it**: re-pointing `:with remote-ping` at another proxy must build
+a new monitor, since the new relay may run a different OS.
+
+**Probe readers hold their monitor**, and the reload never touched them, so
+after one the readers were writing into objects nothing displayed while the
+replacements had none. `_resync_probe_readers` stops the orphans and opens
+readers for the uncovered; an adopted monitor keeps the reader it had, because
+the object did not change.
+
+**A runtime `o` press is not a file rule.** It used to be appended to
+`no_alarm_patterns`, which resetting that list would have thrown away — and
+turning *off* a glob-marked host meant deleting the glob for everyone it
+covered. `no_alarm_manual` is a per-host `{name: bool}` that beats the globs
+(the more recent decision) and survives the reload.
+
+**It has to round-trip through `:save-config`, and `--remove` cannot express
+it** — that flag deletes a glob, so a False entry written as
+`:no-alarm --remove <name>` matched nothing in the pattern list and the line
+did nothing. Caught by saving and re-reading: a host toggled off under
+`:no-alarm 10.0.0.*` came back marked. `--mark <host>…` / `--unmark <host>…`
+write the store by name and are what `_save_config` emits. `:no-alarm` with no
+argument lists the globs and the overrides separately — it is the command that
+answers "why is this host marked?", and a decision it cannot show is worse than
+no answer.
+
+Still open: `prog_options` and `probe_defs` accumulate across a reload the way
+the other two did, so removing a `:prog-options` or `:probe` line has no effect
+until restart. Neither feeds `identity()`, so adoption is unaffected.
+
 ## 9a. SSH connection pacing and sharing
 
 Many hosts commonly sit behind one relay (`:with remote-ping <relay>` over a

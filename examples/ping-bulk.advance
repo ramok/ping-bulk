@@ -27,6 +27,12 @@
 # '~' combines with '?' in either order ('~?host', '?~host') and works inside
 # a :for body and a :with remote-ping block.
 #
+# One host at a time, whatever the globs say -- this is what pressing 'o'
+# records, and what :save-config writes back, so it survives a restart and an
+# ':edit' reload (which resets the globs above, so deleting one takes effect):
+#   :no-alarm --mark   10.0.3.99   mark this host even if no glob covers it
+#   :no-alarm --unmark sh1-cam1    leave this one alone, glob or no glob
+#
 # Inside a :with block use '~', not the command: like :resolv and
 # :prog-options, a ':no-alarm' command there is an error, because a command
 # inside a block usually means a missing ':end' -- and carrying on would

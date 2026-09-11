@@ -339,7 +339,32 @@ class TestInteractiveToggle:
         a = _app(pb, tmp_path, [('cmd', ':resolv 10.0.0.2 sw1'), ('host', 'sw1')])
         a.highlighted_index = a.entries.index(a.monitors[0])
         a._cmd_no_alarm('--toggle')
-        assert a.no_alarm_patterns == ['sw1']
+        assert a.no_alarm_manual == {'sw1': True}
+
+    def test_a_press_is_recorded_apart_from_the_file_rules(self, pb, tmp_path):
+        """':edit' resets what the file declared; a key press must outlive it.
+
+        Both used to live in no_alarm_patterns, so a reload that reset them
+        threw away the press too — and turning a glob-marked host *off* meant
+        deleting that glob for every host it covered.
+        """
+        a = _app(pb, tmp_path, [('cmd', ':no-alarm 10.0.0.*'),
+                                ('host', '10.0.0.1'), ('host', '10.0.0.2')])
+        assert [m.no_alarm for m in a.monitors] == [True, True]
+        a.highlighted_index = a.entries.index(a.monitors[0])
+        a._cmd_no_alarm('--toggle')           # turn this one off
+        assert a.no_alarm_patterns == ['10.0.0.*'], 'the glob must stay'
+        assert a.no_alarm_manual == {'10.0.0.1': False}
+        assert [m.no_alarm for m in a.monitors] == [False, True]
+
+    def test_a_manual_decision_beats_a_glob(self, pb, tmp_path):
+        a = _app(pb, tmp_path, [('host', '10.0.0.1')])
+        a.highlighted_index = a.entries.index(a.monitors[0])
+        a._cmd_no_alarm('--toggle')
+        a._cmd_no_alarm('10.0.0.*')           # a glob arrives afterwards
+        assert a.monitors[0].no_alarm is True
+        a._cmd_no_alarm('--toggle')           # and is overruled by the key
+        assert a.monitors[0].no_alarm is False
 
 
 # ---------------------------------------------------------------------------
@@ -523,3 +548,105 @@ class TestFoldedSectionStrip:
         monitor.history.extend([None] * 5)
         _, history, _ = app._section_summary([monitor], length=5, offset=0)
         assert set(history.strip()) == {'o'}, history
+
+
+# ---------------------------------------------------------------------------
+# --mark / --unmark, and the round trip through :save-config
+# ---------------------------------------------------------------------------
+
+class TestPerHostOverridesPersist:
+    """The 'o' key records a per-host decision; a restart must not lose it.
+
+    It used to be saved as ':no-alarm --remove <name>', which cannot express
+    it: '--remove' deletes a *glob*, so the name was not in the list to
+    delete and the line did nothing.  Measured before the fix: a host toggled
+    off under ':no-alarm 10.0.0.*' came back marked.
+    """
+
+    def _cfg(self, tmp_path, text=''):
+        import os
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        os.makedirs(os.path.dirname(cfg), exist_ok=True)
+        with open(cfg, 'w') as f:
+            f.write(text)
+        return cfg
+
+    def _app(self, pb, cfg, entries):
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app = pb.Application(entries)
+        app._monitoring_started = True
+        return app
+
+    HOSTS = [('host', '10.0.0.1'), ('host', '10.0.0.2')]
+
+    def test_a_toggled_off_host_comes_back_off(self, pb, tmp_path):
+        cfg = self._cfg(tmp_path, ':no-alarm 10.0.0.*\n')
+        a = self._app(pb, cfg, self.HOSTS)
+        assert [m.no_alarm for m in a.monitors] == [True, True]
+        a.highlighted_index = a.entries.index(a.monitors[0])
+        a._cmd_no_alarm('--toggle')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            a._dispatch_cmd(':save-config')
+
+        b = self._app(pb, cfg, self.HOSTS)
+        assert b.no_alarm_manual == {'10.0.0.1': False}
+        assert b.no_alarm_patterns == ['10.0.0.*'], 'the glob must survive'
+        assert [m.no_alarm for m in b.monitors] == [False, True], \
+            'the sibling the glob covers stays marked'
+
+    def test_a_toggled_on_host_comes_back_on(self, pb, tmp_path):
+        cfg = self._cfg(tmp_path)
+        a = self._app(pb, cfg, self.HOSTS)
+        a.highlighted_index = a.entries.index(a.monitors[1])
+        a._cmd_no_alarm('--toggle')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            a._dispatch_cmd(':save-config')
+
+        b = self._app(pb, cfg, self.HOSTS)
+        assert b.no_alarm_manual == {'10.0.0.2': True}
+        assert [m.no_alarm for m in b.monitors] == [False, True]
+
+    def test_the_saved_lines_name_the_flags(self, pb, tmp_path):
+        cfg = self._cfg(tmp_path, ':no-alarm 10.0.0.*\n')
+        a = self._app(pb, cfg, self.HOSTS)
+        a.highlighted_index = a.entries.index(a.monitors[0])
+        a._cmd_no_alarm('--toggle')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            a._dispatch_cmd(':save-config')
+        lines = [l.strip() for l in open(cfg) if 'no-alarm' in l]
+        assert ':no-alarm 10.0.0.*' in lines
+        assert ':no-alarm --unmark 10.0.0.1' in lines
+
+    def test_mark_and_unmark_are_usable_directly(self, pb, tmp_path):
+        cfg = self._cfg(tmp_path)
+        a = self._app(pb, cfg, self.HOSTS)
+        a._cmd_no_alarm('--mark 10.0.0.1')
+        assert a.monitors[0].no_alarm is True
+        a._cmd_no_alarm('--unmark 10.0.0.1')
+        assert a.monitors[0].no_alarm is False
+        assert a.no_alarm_manual == {'10.0.0.1': False}
+
+    def test_they_take_several_names(self, pb, tmp_path):
+        cfg = self._cfg(tmp_path)
+        a = self._app(pb, cfg, self.HOSTS)
+        a._cmd_no_alarm('--mark 10.0.0.1 10.0.0.2')
+        assert [m.no_alarm for m in a.monitors] == [True, True]
+
+    def test_a_missing_name_is_reported(self, pb, tmp_path):
+        cfg = self._cfg(tmp_path)
+        a = self._app(pb, cfg, self.HOSTS)
+        a._cmd_no_alarm('--mark')
+        assert any('needs a host' in e.text for e in a.events)
+
+    def test_the_listing_shows_the_overrides(self, pb, tmp_path):
+        """':no-alarm' answers "why is this host marked?" — including these."""
+        cfg = self._cfg(tmp_path, ':no-alarm 10.0.0.*\n')
+        a = self._app(pb, cfg, self.HOSTS)
+        a._cmd_no_alarm('--unmark 10.0.0.1')
+        a._cmd_no_alarm('--mark 10.9.9.9')
+        n = len(a.events)
+        a._cmd_no_alarm('')
+        text = ' | '.join(e.text for e in list(a.events)[n:])
+        assert '10.0.0.*' in text
+        assert '--unmark 10.0.0.1' in text
+        assert '--mark 10.9.9.9' in text
