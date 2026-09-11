@@ -161,11 +161,15 @@ class TestGetCompletions:
     # ── Second token: argument value completion ───────────────────────────
 
     def test_dns_with_trailing_space_returns_all_dns_modes(self, app, pb):
-        """'dns ' must return the full list of DNS mode names."""
+        """'dns ' offers the two verbs, then every DNS mode name.
+
+        The verbs come first because a bare ':dns' reports rather than
+        cycles, so stepping the value is something you now have to say.
+        """
         result = app._get_completions('dns ')
-        expected = [m.lower() for m in pb.DNS_MODES]
+        expected = ['cycle', 'cycle-'] + [m.lower() for m in pb.DNS_MODES]
         assert result == expected, (
-            f"Expected dns modes {expected}, got {result}"
+            f"Expected {expected}, got {result}"
         )
 
     def test_dns_partial_arg_h_returns_hostname(self, app):
@@ -179,27 +183,36 @@ class TestGetCompletions:
         assert result == [], f"Expected [], got {result}"
 
     def test_stats_with_trailing_space_returns_all_stats_modes(self, app, pb):
-        """'stats ' must return all STATS_MODES plus extra stat aliases (lowercased)."""
+        """'stats ' must offer the verbs, then STATS_MODES and stat aliases."""
         result = app._get_completions('stats ')
-        expected = sorted(set(m.lower() for m in pb.STATS_MODES) | set(pb.STAT_NAMES.keys()))
+        expected = ['cycle', 'cycle-'] + sorted(
+            set(m.lower() for m in pb.STATS_MODES) | set(pb.STAT_NAMES.keys()))
         assert result == expected, (
             f"Expected stats modes {expected}, got {result}"
         )
 
     def test_sort_with_trailing_space_returns_all_sort_modes(self, app):
-        """'sort ' must return all four sort mode names."""
+        """'sort ' must return the verbs and all four sort mode names."""
         result = app._get_completions('sort ')
-        assert set(result) == {'none', 'name', 'status', 'latency'}, (
+        assert set(result) == {'cycle', 'cycle-',
+                               'none', 'name', 'status', 'latency'}, (
             f"Unexpected sort completions: {result}"
         )
 
     def test_history_with_trailing_space_returns_all_history_modes(self, app, pb):
-        """'history ' must return the full list of HISTORY_MODES (lowercased)."""
+        """'history ' must return the verbs and every HISTORY_MODE."""
         result = app._get_completions('history ')
-        expected = [m.lower() for m in pb.HISTORY_MODES]
+        expected = ['cycle', 'cycle-'] + [m.lower() for m in pb.HISTORY_MODES]
         assert result == expected, (
             f"Expected history modes {expected}, got {result}"
         )
+
+    def test_every_cyclable_command_offers_the_verbs(self, app):
+        """One rule, so no parameter is left without a way to step it."""
+        for cmd in ('dns', 'stats', 'sort', 'ping-view', 'layout',
+                    'sync-history', 'autofold', 'pause'):
+            result = app._get_completions(cmd + ' ')
+            assert 'cycle' in result and 'cycle-' in result, (cmd, result)
 
     def test_log_with_trailing_space_includes_off(self, app):
         """'log ' must include the static keyword 'off' among its completions."""
@@ -687,10 +700,12 @@ class TestTabHandling:
     # ── :set <param> <value> completions ─────────────────────────────────
 
     def test_set_param_value_all_completions(self, app, pb):
-        """':set stats ' + Tab → popup lists all stats modes and stat name aliases."""
+        """':set stats ' + Tab → the verbs, all stats modes and stat aliases."""
         _set_text(app, 'set stats ')
         app._handle_cmd_key(self.TAB)
-        expected = set(m.lower() for m in pb.STATS_MODES) | set(pb.STAT_NAMES.keys())
+        expected = ({'cycle', 'cycle-'}
+                    | set(m.lower() for m in pb.STATS_MODES)
+                    | set(pb.STAT_NAMES.keys()))
         assert set(app.cmd['completions']) == expected, (
             f"Expected all stats modes {expected}, got {app.cmd['completions']}"
         )

@@ -280,7 +280,8 @@ Display
     Modes: ``success`` → ``rtt`` → ``scaled``.
 
 ``S``
-    Toggle sync-history mode (wall-clock-aligned history bars).
+    Cycle sync-history mode on or off (wall-clock-aligned history bars);
+    bound to ``:sync-history cycle``.
     In sync mode all hosts share the same time axis; a host that started
     late shows a leading gap instead of appearing shifted.
 
@@ -401,13 +402,43 @@ Quitting
 Display
 -------
 
-``:set dns [off|hostname|ip]``
-    With no argument, cycle the DNS display mode forward.
-    With an argument, set the mode directly.
+Every parameter here follows one rule, and each is both a ``:set`` parameter
+and a command of its own — ``:set dns cycle`` and ``:dns cycle`` are the same
+command:
 
-``:set stats [mode|col,col,…]``
-    With no argument, cycle the stats column forward.
-    With a single argument, set the column directly.
++----------------------------+----------------------------------------------+
+| Form                       | Effect                                       |
++============================+==============================================+
+| ``:set <param>``           | Report the value; change nothing             |
++----------------------------+----------------------------------------------+
+| ``:set <param> cycle``     | Step to the next value                       |
++----------------------------+----------------------------------------------+
+| ``:set <param> cycle-``    | Step to the previous value                   |
++----------------------------+----------------------------------------------+
+| ``:set <param> <value>``   | Set it                                       |
++----------------------------+----------------------------------------------+
+
+The report is worded as the command that would set it — ``dns name+ip`` is
+exactly what ``:set dns`` takes — so it can be pasted straight back.  It
+appears in the status bar, which is visible at any log level, and is filed in
+the event log at ``info``.
+
+A parameter with a free-form value (``stats`` as a column list,
+``ssh-options``) cannot be cycled from a list; ``stats`` has its own cycle
+through the single-column modes, and ``ssh-options`` says so and stays as it
+was.
+
+**Nothing changes state without being asked.**  A bare ``:dns`` used to cycle
+and a bare ``:sync-history`` used to toggle, which made a hosts file
+order-dependent: a plain ``:sync-history`` line flipped whatever the saved
+config held, so the result depended on which file was read first and every
+``:edit`` reload flipped it back.  Write the value, or write ``cycle``.
+
+``:set dns [cycle|cycle-|off|hostname|ip|name+ip|ip+name]``
+    Report, cycle, or set the DNS display mode.
+
+``:set stats [cycle|cycle-|mode|col,col,…]``
+    Report, cycle, or set the stats column.
     Valid single modes: ``off``, ``Down``, ``Loss%``, ``Avg``, ``Min``, ``Max``,
     ``StDev``, ``RX``, ``TX``, ``XX``, ``All``.
 
@@ -423,32 +454,32 @@ Display
         :set stats down,loss%
         :set stats ,
 
-``:set sort [mode]``
-    With no argument, cycle the sort order forward.
-    With an argument, set the order directly.
+``:set sort [cycle|cycle-|mode]``
+    Report, cycle, or set the sort order.
     Valid modes: ``none``, ``name``, ``status``, ``latency``.
+    ``reverse`` is kept as an alias for ``cycle-``.
 
-``:set ping-view [mode]``
-    With no argument, cycle the ping-history display mode forward.
-    With an argument, set the mode directly.
-    Valid modes: ``success``, ``rtt``, ``scaled``.
+``:set ping-view [cycle|cycle-|mode]``
+    Report, cycle, or set the ping-history display mode.
+    Valid modes: ``success``, ``rtt``, ``scaled``, or the name of a
+    ``:probe`` to show that series instead.
 
-``:set <setting> [value]``
-    Generic form that accepts any display mode or parameter name.
-    With no *value*, numeric settings show their current value and
-    other settings are cycled forward.
-
-    Valid settings: ``dns``, ``stats``, ``sort``, ``ping-view``,
-    ``log-size``, ``history-size``.
+``:set <setting> [cycle|cycle-|value]``
+    Generic form that accepts any parameter name.  With no *value*, reports
+    what the setting is.  With no *setting* either, opens the **Settings**
+    tab of the help overlay.
 
     Examples::
 
+        :set stats               # → stats last,avg
         :set stats Loss%
-        :set dns hostname
+        :set dns cycle
         :set log-size 50000
 
-``:pause``
-    Toggle pause on/off.
+``:pause [cycle|on|off]``
+    Report, cycle, or set the global pause.  An unrecognised value is
+    rejected rather than treated as a toggle — ``:pause yes`` used to
+    unpause a paused fleet.
 
 Event log
 ---------
@@ -459,9 +490,11 @@ Event log
 ``:clear``
     Clear the event log (with confirmation prompt).
 
-``:layout [--toggle] [all|ping|log]``
+``:layout [--toggle] [cycle|cycle-|all|ping|log]``
     Choose how the host list and the event log share the window.  With no
-    argument, cycle to the next mode (same as ``Ctrl-L``).
+    argument, report the current mode; ``cycle`` steps to the next one (same
+    as ``Ctrl-L``).  ``--toggle`` stays a flag with its own meaning — it
+    remembers where it came from, which stepping through a list cannot do.
 
     +------------+--------------------------------------------------------+
     | Mode       | Effect                                                 |
@@ -1064,7 +1097,7 @@ Examples::
     :bind-key t :mux mtr %i
     :bind-key x :set stats down \; :set dns hostname
     :bind-key gt :select first
-    :bind-key <C-p> :pause
+    :bind-key <C-p> :pause cycle
 
 Hosts and DNS
 -------------
@@ -1326,7 +1359,7 @@ Folding
     Fold / unfold all sections at once (shorthand for ``:fold close-all``
     and ``:fold open-all``).
 
-``:set autofold on|off`` (also ``:autofold``)
+``:set autofold [cycle|on|off]`` (also ``:autofold``)
     Fold sections that are healthy and unfold them the moment something in
     them goes down (same as ``A``).  Off by default.  Written for a console
     whose window is shorter than the unfolded list: healthy groups collapse
@@ -2251,6 +2284,11 @@ Recognised settings
 
 ``:log /path/to/file``
     Path to stream the event log; omit to disable.
+
+Write a value, not a bare parameter name.  A bare ``:set dns`` (or ``:dns``)
+is a *query* — it reports the value and changes nothing — so a saved config
+or hosts file that omits the value sets nothing.  ``cycle`` is accepted where
+stepping is really what is wanted.
 
 ``:set multikey-timeout <ms>``
     Multi-key sequence timeout in milliseconds (0–2000).  Default: ``0``.

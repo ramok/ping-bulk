@@ -367,15 +367,22 @@ class SetParam:
     help   — short description shown in the help overlay
     getter — callable(app) -> str returning the current value; used by the
              settings overlay to display live values without side-effects
+    cycler — callable(app, direction) advancing the value, for parameters
+             whose value space is not a plain list (``stats``) or that have
+             their own cycling rule worth keeping (``dns`` re-resolves names,
+             ``ping-view`` walks probe columns).  Where it is None the
+             generic ``next_value`` walk over *values* is used instead.
     """
-    __slots__ = ('name', 'action', 'values', 'help', 'getter')
+    __slots__ = ('name', 'action', 'values', 'help', 'getter', 'cycler')
 
-    def __init__(self, name, action, values, help='', getter=None):
+    def __init__(self, name, action, values, help='', getter=None,
+                 cycler=None):
         self.name   = name
         self.action = action
         self.values = values
         self.help   = help
         self.getter = getter
+        self.cycler = cycler
 
     def get_values(self):
         """Return the list of valid values, evaluating a callable if necessary."""
@@ -393,8 +400,11 @@ class SetParam:
     def next_value(self, app, direction=1):
         """Return the next (direction=+1) or previous (direction=-1) value, or None if free-form."""
         vals = self.get_values()
-        # String sentinel '_complete_stats_arg' means free-form (stats column)
-        if not vals or self.values == '_complete_stats_arg':
+        # A free-form parameter carries a string here, not a list of values:
+        # '_complete_stats_arg' names a completer, '<flags>|default|none' is a
+        # usage synopsis.  Walking either one steps through its *characters* —
+        # ':set ssh-options cycle' set the options to '<'.
+        if not vals or not isinstance(vals, (list, tuple)):
             return None
         cur = self.get_current(app).lower()
         vals_lower = [v.lower() for v in vals]
@@ -415,17 +425,25 @@ _XTERM_CANDIDATES = [
 SET_PARAMS = [
     SetParam('dns',       '_cmd_dns',      lambda: [m.lower() for m in DNS_MODES],
              'DNS display mode',
-             getter=lambda app: DNS_MODES[app.dns_mode].lower()),
+             getter=lambda app: DNS_MODES[app.dns_mode].lower(),
+             cycler=lambda app, d: app.cycle_dns(d)),
     SetParam('stats',     '_cmd_stats',    '_complete_stats_arg',
              'stats column mode (single name or comma-separated list e.g. last,avg,stdev)',
              getter=lambda app: (','.join(h.lower() for h in app.stats_custom)
-                                 if app.stats_custom else STATS_MODES[app.stats_mode].lower())),
+                                 if app.stats_custom else STATS_MODES[app.stats_mode].lower()),
+             cycler=lambda app, d: app.cycle_stats(d)),
     SetParam('sort',      '_cmd_sort',     ['none', 'name', 'status', 'latency'],
              'sort order',
-             getter=lambda app: app.sort_by),
+             getter=lambda app: app.sort_by,
+             cycler=lambda app, d: app.cycle_sort(d)),
     SetParam('ping-view', '_cmd_history',  lambda: [m.lower() for m in HISTORY_MODES],
              'ping history display mode',
-             getter=lambda app: HISTORY_MODES[app.history_mode].lower()),
+             getter=lambda app: HISTORY_MODES[app.history_mode].lower(),
+             cycler=lambda app, d: app.cycle_history_mode(d)),
+    SetParam('layout',    '_cmd_layout',   lambda: list(LAYOUTS),
+             'screen layout (all = hosts and log, ping = hosts only, '
+             'log = log only)',
+             getter=lambda app: app.layout),
     SetParam('log-size',  '_cmd_log_size', ['1000', '5000', '10000', '50000', '100000'],
              'event log max lines (default 10000)',
              getter=lambda app: str(app.log_size)),
@@ -437,14 +455,19 @@ SET_PARAMS = [
              getter=lambda app: 'on' if app.sync_history else 'off'),
     SetParam('pause', '_cmd_pause', ['on', 'off'],
              'pause all monitors (stop sending pings)',
-             getter=lambda app: 'on' if all(m.paused for m in app.monitors) else 'off'),
+             getter=lambda app: ('on' if app.monitors
+                                 and all(m.paused for m in app.monitors)
+                                 else 'off')),
     SetParam('mux-split', '_cmd_mux_split', ['v', 'h', 'window'],
              'default pane split direction for :mux (v=below h=right window=new)',
              getter=lambda app: app.mux_split),
     SetParam('terminal', '_cmd_set_terminal',
              lambda: ['auto'] + [b for b, _ in _XTERM_CANDIDATES],
              'X/Wayland terminal emulator for :term (auto = x-terminal-emulator, fallback xterm)',
-             getter=lambda app: app.terminal),
+             # 'terminal_emulator', not 'terminal': the latter belongs to the
+             # mux helper, so this getter raised AttributeError and the
+             # settings tab showed '?' for this row from the day it was added.
+             getter=lambda app: app.terminal_emulator),
     SetParam('multikey-timeout', '_cmd_multikey_timeout',
              ['0', '200', '500', '1000'],
              'ms to wait for follow-up key in multi-key binding (0 = wait forever)',
@@ -482,6 +505,21 @@ SET_PARAMS = [
 
 # Flat name → SetParam lookup used by _cmd_set and _get_completions.
 _SET_PARAM_MAP: dict = {p.name: p for p in SET_PARAMS}
+
+
+def _param_arg_choices(name):
+    """Tab-completions for a parameter: the two verbs, then its values.
+
+    The verbs come first because they are what a key binding wants and what
+    a bare invocation no longer does.  A free-form parameter (``stats``,
+    ``ssh-options``) contributes no values, only the verbs it accepts.
+    """
+    param = _SET_PARAM_MAP.get(name)
+    verbs = ['cycle', 'cycle-']
+    if param is None:
+        return verbs
+    vals = param.get_values()
+    return verbs + (list(vals) if isinstance(vals, list) else [])
 
 # ── Key binding infrastructure ───────────────────────────────────────────────
 
@@ -868,20 +906,21 @@ _HELP_LEGEND = [
 _HELP_HOTKEYS = [
     "  Hotkeys",
     "  [q]/[Q]               (:quit)                            quit",
-    "  [D]                   (:dns)                             cycle DNS display mode",
-    "  [s]                   (:stats)                           cycle stats column",
-    "  [o]/[O]               (:sort / :sort reverse)            cycle sort order forward / backward",
-    "  [H]                   (:ping-view)                       cycle ping-history display mode",
-    "  [S]                   (:sync-history)                    toggle sync-history (wall-clock alignment)",
+    "  [D]                   (:dns cycle)                       cycle DNS display mode",
+    "  [s]                   (:stats cycle)                     cycle stats column",
+    "  [o]/[O]               (:sort cycle / cycle-)             cycle sort order forward / backward",
+    "  [H]                   (:ping-view cycle)                 cycle ping-history display mode",
+    "  [S]                   (:sync-history cycle)              toggle sync-history (wall-clock alignment)",
     "  [p]                   (:pause-selected)                  pause/unpause selected host or section",
-    "  [P]                   (:pause)                           toggle global pause (all monitors)",
+    "  [P]                   (:pause cycle)                     toggle global pause (all monitors)",
+    "  (a bare :dns / :pause / :sync-history reports the value; 'cycle' changes it)",
     "  [↑]/[↓] ([k]/[j])     (:select up/down)                  navigate host list",
     "  [g][g]                (:select first)                    jump to first host",
     "  [G]                   (:select last)                     jump to last host",
     "  [Enter]               (:details)                         show detailed stats for highlighted host",
     "  [Space]               (:seen)                            insert 'seen' marker (fold subtree when on a section)",
     "  [l]                   (:layout --toggle log)             full-screen event log, press again to go back",
-    "  [Ctrl+L]              (:layout)                          cycle layout: all / ping only / log only",
+    "  [Ctrl+L]              (:layout cycle)                    cycle layout: all / ping only / log only",
     "  [W]                   (:save)                            write event log to a file",
     "  [X]                   (:clear)                           clear event log",
     "  [o]                   (:no-alarm --toggle)               mark selected host: a lost reply is expected",
@@ -935,8 +974,11 @@ def _build_set_param_help_lines():
     The data is read directly from SET_PARAMS so there is no duplication.
     """
     result = [
-        '  :set <param> \\[value]',
-        '      Omit value to cycle to the next option or display the current value.',
+        '  :set <param> \\[cycle|cycle-|value]',
+        '      With no value: report what it is set to, and change nothing.',
+        '      cycle / cycle-: step to the next / previous value.',
+        '      Every parameter below is also a command of its own, taking the',
+        '      same arguments — :set dns cycle and :dns cycle are the same.',
     ]
     for p in SET_PARAMS:
         if p.values == '_complete_stats_arg':
@@ -973,11 +1015,11 @@ _HELP_CMDS_INTERACTIVE = [
     "  Interactive commands",
     *_HELP_SET_PARAMS,
     '-DIVIDER-',
-    "  :pause \\[on|off]            toggle/set global pause (stop all pings)",
+    "  :pause \\[cycle|on|off]      report, cycle, or set global pause (stop all pings)",
     "  :seen                     insert 'seen' marker in event log",
     "  :clear                    clear event log",
     "  :layout --toggle \\[mode]  jump to mode (default log) and back again  (l)",
-    "  :layout \\[all|ping|log]   screen layout; no arg cycles  (Ctrl+L)",
+    "  :layout \\[cycle|all|ping|log] screen layout; no arg reports it  (Ctrl+L cycles)",
     "  :save \\[--follow] \\[file]   write event log to a file; --follow also streams there (W)",
     "                            the 'Write log to:' prompt completes paths with \\[Tab]",
     "  :log \\[file|off]           set/disable the streaming log file (future events only);",
@@ -996,8 +1038,8 @@ _HELP_CMDS_INTERACTIVE = [
     "  :filter --clear           remove active filter",
     "  :search                   open host search  (same as [/])",
     "  :search-next \\[prev]       jump to next / previous search match",
-    "  :autofold \\[on|off]        toggle autofold mode",
-    "  :ping-view \\[mode]         cycle or set ping-history display mode  (also [H])",
+    "  :autofold \\[cycle|on|off]  report, cycle, or set autofold mode",
+    "  :ping-view \\[cycle|mode]   report, cycle, or set ping-history display mode  ([H] cycles)",
 ]
 
 _HELP_CMDS_HOSTSFILE = [
@@ -5577,34 +5619,42 @@ CMD_REGISTRY = [
     CmdDef(['q', 'quit'],        '_cmd_quit',      None,
            '[--confirm]',         'quit; --confirm uses re-press Ctrl-C pattern',
            flags=['--confirm']),
-    CmdDef(['dns'],              '_cmd_dns',        lambda: [m.lower() for m in DNS_MODES],
-           '[off|hostname|ip]',   'cycle or set DNS display mode',
+    CmdDef(['dns'],              '_cmd_dns',
+           lambda: _param_arg_choices('dns'),
+           '[cycle|cycle-|<mode>]', 'report, cycle, or set DNS display mode',
            cli_flags=('--dns',),
            cli_kwargs={'metavar': 'MODE', 'choices': [m.lower() for m in DNS_MODES], 'help': f"DNS display mode at startup: {' | '.join(m.lower() for m in DNS_MODES)}"}),
     CmdDef(['stats'],            '_cmd_stats',      None,
-           '[mode|col,col,…]',   'cycle or set stats column (single name or comma list e.g. last,avg,stdev)',
+           '[cycle|cycle-|<mode>|col,col,…]',
+           'report, cycle, or set stats column (single name or comma list e.g. last,avg,stdev)',
            arg_completer='_complete_stats_arg',
            cli_flags=('--stats',),
            cli_kwargs={'metavar': 'MODE', 'choices': [m.lower() for m in STATS_MODES], 'help': f"stats column at startup: {' | '.join(m.lower() for m in STATS_MODES)}".replace('%', '%%')}),
-    CmdDef(['sort'],             '_cmd_sort',       ['none', 'name', 'status', 'latency'],
-           '[mode]',              'cycle or set sort order',
+    CmdDef(['sort'],             '_cmd_sort',
+           lambda: _param_arg_choices('sort'),
+           '[cycle|cycle-|<mode>]', 'report, cycle, or set sort order',
            cli_flags=('--sort',),
            cli_kwargs={'metavar': 'MODE', 'choices': ['none', 'name', 'status', 'latency'], 'help': 'sort order at startup: none | name | status | latency'}),
-    CmdDef(['layout'],           '_cmd_layout',     lambda: list(LAYOUTS),
-           '[--toggle] [mode]',   'cycle, set, or toggle screen layout (all/ping/log)',
+    CmdDef(['layout'],           '_cmd_layout',
+           lambda: _param_arg_choices('layout'),
+           '[--toggle] [cycle|cycle-|<mode>]',
+           'report, cycle, set, or toggle screen layout (all/ping/log)',
            flags=['--toggle'],
            cli_flags=('--layout',),
            cli_kwargs={'metavar': 'MODE', 'choices': list(LAYOUTS),
                        'help': f"screen layout at startup: {' | '.join(LAYOUTS)}"}),
-    CmdDef(['ping-view', 'history', 'hist'], '_cmd_history', lambda: [m.lower() for m in HISTORY_MODES],
-           '[mode]',              'cycle or set history display mode',
+    CmdDef(['ping-view', 'history', 'hist'], '_cmd_history',
+           lambda: _param_arg_choices('ping-view'),
+           '[cycle|cycle-|<mode>]',
+           'report, cycle, or set history display mode',
            cli_flags=('--ping-view',),
            cli_kwargs={'metavar': 'MODE', 'choices': [m.lower() for m in HISTORY_MODES], 'help': f"ping history display mode at startup: {' | '.join(m.lower() for m in HISTORY_MODES)}"}),
     CmdDef(['set'],              '_cmd_set',        [p.name for p in SET_PARAMS],
-           '|'.join(p.name for p in SET_PARAMS) + ' [value]',
-           'set any mode or parameter by name; omit value to cycle/show'),
-    CmdDef(['pause'],            '_cmd_pause',      None,
-           '',                    'toggle pause on/off'),
+           '<param> [cycle|cycle-|<value>]',
+           'report, cycle, or set any parameter by name; no value reports it'),
+    CmdDef(['pause'],            '_cmd_pause',
+           lambda: _param_arg_choices('pause'),
+           '[cycle|on|off]',      'report, cycle, or set global pause'),
     CmdDef(['seen'],             '_cmd_seen',       None,
            '',                    "insert 'seen' marker in event log"),
     CmdDef(['clear'],            '_cmd_clear',      None,
@@ -5645,13 +5695,17 @@ CMD_REGISTRY = [
            '',                    'fold (collapse) all sections  [alias: zM / []'),
     CmdDef(['unfold-all'],       '_cmd_unfold_all', None,
            '',                    'unfold (expand) all sections  [alias: zR / ]]'),
-    CmdDef(['sync-history'],     '_cmd_sync_history', ['on', 'off'],
-           '[on|off]',            'align history bars to wall-clock time (default on)',
+    CmdDef(['sync-history'],     '_cmd_sync_history',
+           lambda: _param_arg_choices('sync-history'),
+           '[cycle|on|off]',
+           'align history bars to wall-clock time (default on)',
            cli_flags=('--sync-history',),
            cli_kwargs={'choices': ['on', 'off'], 'default': None,
                        'help': 'align history bars to wall-clock time (default: on)'}),
-    CmdDef(['autofold'],         '_cmd_autofold',   ['on', 'off'],
-           '[on|off]',            'auto fold sections when all hosts are up, unfold when any go down'),
+    CmdDef(['autofold'],         '_cmd_autofold',
+           lambda: _param_arg_choices('autofold'),
+           '[cycle|on|off]',
+           'auto fold sections when all hosts are up, unfold when any go down'),
     CmdDef(['let'],              '_cmd_let',        None,
            '<name> [value]',     'define a variable; $name substituted in :source files and loops'),
     CmdDef(['mux', 'tmux', 'screen'], '_cmd_mux', None,
@@ -7063,7 +7117,8 @@ class Application:
                     if isinstance(param.values, str):
                         return getattr(self, param.values)(arg_prefix)
                     arg_prefix_lower = arg_prefix.lower()
-                    return [v for v in param.get_values() if v.startswith(arg_prefix_lower)]
+                    return [v for v in _param_arg_choices(subcmd)
+                            if v.startswith(arg_prefix_lower)]
 
         return []
 
@@ -7095,14 +7150,19 @@ class Application:
     def _complete_stats_arg(self, prefix):
         """Return Tab-completion candidates for the :stats / :set stats argument.
 
-        - No comma in prefix: offer all STATS_MODES names (lowercase).
+        - No comma in prefix: offer 'cycle'/'cycle-' and all STATS_MODES names
+          (lowercase).  The verbs come first here as they do for every other
+          parameter — this completer takes priority over the command's own
+          arg_choices, so leaving them out would make :stats the one cyclable
+          command that never offers the word.
         - Comma present: the user is building a comma list; offer remaining valid
           STAT_NAMES (excluding already-used names, 'all', and 'off') filtered
           by what has been typed after the last comma.
         """
         if ',' not in prefix:
-            # Single-mode completion: all STATS_MODES + STAT_NAMES aliases
-            all_names = sorted(set(m.lower() for m in STATS_MODES) | set(STAT_NAMES.keys()))
+            # Single-mode completion: the verbs, then STATS_MODES + STAT_NAMES
+            all_names = ['cycle', 'cycle-'] + sorted(
+                set(m.lower() for m in STATS_MODES) | set(STAT_NAMES.keys()))
             return [n for n in all_names if n.startswith(prefix.lower())]
         # Comma-list completion
         parts = [p.strip().lower() for p in prefix.split(',')]
@@ -8241,17 +8301,21 @@ class Application:
         _b('q', ':quit', hint='[q]uit', desc='quit')
         _b('Q', ':quit', desc='quit')
         # Display modes
-        _b('D', ':dns', desc='cycle DNS display mode')
-        _b('s', ':stats', desc='cycle stats column')
-        _b('S', ':sync-history', desc='toggle synchronized history time axis')
-        _b('o', ':sort', desc='cycle sort order')
-        _b('O', ':sort reverse', desc='cycle sort order backward')
-        _b('H', ':ping-view', desc='cycle ping-history display mode')
+        # A bare ':<param>' now reports rather than changes, so the keys
+        # name the step explicitly.  Same behaviour on screen; the difference
+        # is that a hosts file saying ':sync-history' no longer flips it.
+        _b('D', ':dns cycle', desc='cycle DNS display mode')
+        _b('s', ':stats cycle', desc='cycle stats column')
+        _b('S', ':sync-history cycle',
+           desc='toggle synchronized history time axis')
+        _b('o', ':sort cycle', desc='cycle sort order')
+        _b('O', ':sort cycle-', desc='cycle sort order backward')
+        _b('H', ':ping-view cycle', desc='cycle ping-history display mode')
         # Pause
-        _b('P', ':pause', desc='pause/resume all monitoring')
+        _b('P', ':pause cycle', desc='pause/resume all monitoring')
         _b('p', ':pause-selected', desc='pause/resume selected host')
         # Actions
-        _b('A', ':autofold', desc='toggle autofold on/off')
+        _b('A', ':autofold cycle', desc='toggle autofold on/off')
         _b('X', ':clear --confirm', desc='clear event log')
         _b('o', ':no-alarm --toggle', context=frozenset('h'),
            desc='toggle "a lost reply is expected here" on the selected host')
@@ -8267,7 +8331,8 @@ class Application:
            desc='edit an SSH command for the selected host before running it')
         _b('W', ':save', desc='write event log to a file')
         _b('l', ':layout --toggle log', desc='full-screen event log, and back')
-        _b('<C-l>', ':layout', desc='cycle layout: all / ping only / log only')
+        _b('<C-l>', ':layout cycle',
+           desc='cycle layout: all / ping only / log only')
         # Remote-ping host: ping runs on the relay, so a shell on the *host*
         # means jumping through that relay.  %J is that whole chain and %r
         # where it lands — both from connect_chain(), so a relay that is one
@@ -12770,27 +12835,26 @@ class Application:
         self.prompt = {'type': 'script_changed', 'file': self.hosts_file}
 
     def _cmd_dns(self, args=''):
-        """Cycle (no arg) or set DNS display mode."""
-        if args:
-            modes_lower = [m.lower() for m in DNS_MODES]
-            if args.lower() in modes_lower:
-                self.dns_mode = modes_lower.index(args.lower())
-                self._name_col_dirty = True
-                self._name_col_cache.clear()
-                if DNS_MODES[self.dns_mode] in ('hostname', 'ip', 'name+ip', 'ip+name'):
-                    for monitor in self.monitors:
-                        if monitor.resolved_ip is None:
-                            _spawn(monitor.resolve_dns,
-                                   f'dns:{monitor.host}',
-                                   kwargs={'on_resolved':
-                                           self._invalidate_name_col_cache})
-                if self._filter_query:
-                    self._update_filter_visible()
-            else:
-                self.add_event("cmd",
-                    f"dns: unknown mode '{args}' — choices: {' '.join(DNS_MODES)}")
-        else:
-            self.cycle_dns(1)
+        """Report (no arg), cycle, or set the DNS display mode."""
+        if self._handle_param_verb('dns', args):
+            return
+        modes_lower = [m.lower() for m in DNS_MODES]
+        if args.lower() not in modes_lower:
+            self.add_event("cmd",
+                f"dns: unknown mode '{args}' — choices: {' '.join(DNS_MODES)}")
+            return
+        self.dns_mode = modes_lower.index(args.lower())
+        self._name_col_dirty = True
+        self._name_col_cache.clear()
+        if DNS_MODES[self.dns_mode] in ('hostname', 'ip', 'name+ip', 'ip+name'):
+            for monitor in self.monitors:
+                if monitor.resolved_ip is None:
+                    _spawn(monitor.resolve_dns,
+                           f'dns:{monitor.host}',
+                           kwargs={'on_resolved':
+                                   self._invalidate_name_col_cache})
+        if self._filter_query:
+            self._update_filter_visible()
 
     def _stat_label(self, token):
         """Canonical column label for a user-typed stat name or probe name."""
@@ -12800,17 +12864,17 @@ class Application:
         return probe.label if probe is not None else token
 
     def _cmd_stats(self, args=''):
-        """Cycle (no arg), set single-mode, or set custom comma-separated column list.
+        """Report (no arg), cycle, set single-mode, or set a column list.
 
         Examples:
-          :set stats avg          — single mode
+          :set stats               — report the current columns
+          :set stats cycle         — step to the next single-column mode
+          :set stats avg           — single mode
           :set stats last,avg,stdev — custom multi-column
-          :set stats ,            — clear custom, back to off
+          :set stats ,             — clear custom, back to off
         """
-        if not args:
-            self.cycle_stats(1)
+        if self._handle_param_verb('stats', args):
             return
-
         args = args.strip()
 
         # Bare comma or empty list → clear custom, reset to off
@@ -12858,46 +12922,53 @@ class Application:
 
 
     def _cmd_sort(self, args=''):
-        """Cycle (no arg) or set sort order.  'reverse' cycles backward."""
+        """Report (no arg), cycle, or set the sort order.
+
+        'reverse' is kept as an alias for 'cycle-', the direction spelling
+        every other parameter uses.
+        """
         sorts = ['none', 'name', 'status', 'latency']
-        if args:
-            a = args.strip().lower()
-            if a == 'reverse':
-                self.cycle_sort(-1)
-            elif a in sorts:
-                self.sort_by = a
-            else:
-                self.add_event("cmd",
-                    f"sort: unknown mode '{args}' — choices: {' '.join(sorts)}")
+        if args.strip().lower() == 'reverse':
+            args = 'cycle-'
+        if self._handle_param_verb('sort', args):
+            return
+        a = args.strip().lower()
+        if a in sorts:
+            self.sort_by = a
         else:
-            self.cycle_sort(1)
+            self.add_event("cmd",
+                f"sort: unknown mode '{args}' — choices: {' '.join(sorts)}")
 
     def _cmd_history(self, args=''):
-        """Cycle (no arg) or set history display mode."""
-        if args:
-            modes_lower = [m.lower() for m in HISTORY_MODES]
-            if args.lower() in modes_lower:
-                self._history_probe = None
-                self.history_mode = modes_lower.index(args.lower())
-            elif args in self.probe_defs:
-                # Show a probe's series in the strip instead of ping results.
-                self._history_probe = self.probe_defs[args].label
-            else:
-                choices = ' '.join(list(HISTORY_MODES) + list(self.probe_defs))
-                self.add_event("cmd",
-                    f"history: unknown mode '{args}' — choices: {choices}")
+        """Report (no arg), cycle, or set the ping-history display mode."""
+        if self._handle_param_verb('ping-view', args):
+            return
+        modes_lower = [m.lower() for m in HISTORY_MODES]
+        if args.lower() in modes_lower:
+            self._history_probe = None
+            self.history_mode = modes_lower.index(args.lower())
+        elif args in self.probe_defs:
+            # Show a probe's series in the strip instead of ping results.
+            self._history_probe = self.probe_defs[args].label
         else:
-            self.cycle_history_mode(1)
+            choices = ' '.join(list(HISTORY_MODES) + list(self.probe_defs))
+            self.add_event("cmd",
+                f"history: unknown mode '{args}' — choices: {choices}")
 
     def _cmd_layout(self, args=''):
-        """Cycle, set, or toggle the screen layout: all | ping | log.
+        """Report, cycle, set, or toggle the screen layout: all | ping | log.
 
-        ``:layout``                  — cycle to the next mode
+        ``:layout``                  — report the current mode
+        ``:layout cycle``            — step to the next mode (``cycle-`` back)
         ``:layout <mode>``           — switch to *mode*
         ``:layout --toggle [mode]``  — switch to *mode* (default ``log``), or,
           when already there, back to the layout in use before the jump.  That
           makes one key a there-and-back peek at the log instead of a cycle
           the user has to walk around.
+
+        ``--toggle`` stays a flag with its own meaning: it remembers where it
+        came from, which no step through a value list can do.  ``cycle`` is
+        the positional verb every other parameter takes.
 
         Switching to 'log' clears the host selection: with the host list
         hidden there is no cursor to page, so PgUp/PgDn stay with the log.
@@ -12909,6 +12980,8 @@ class Application:
                 toggle = True
                 rest = rest[len(flag):].strip()
                 break
+        if not toggle and self._handle_param_verb('layout', rest):
+            return
         want = rest.lower()
 
         if toggle:
@@ -12921,13 +12994,10 @@ class Application:
             # back to 'all' keeps the key useful if that was the target too.
             want = target if self.layout != target else (
                 self._layout_prev if self._layout_prev != target else 'all')
-        elif want:
-            if want not in LAYOUTS:
-                self.add_event("cmd",
-                    f"layout: unknown mode '{rest}' — choices: {' '.join(LAYOUTS)}")
-                return
-        else:
-            want = LAYOUTS[(LAYOUTS.index(self.layout) + 1) % len(LAYOUTS)]
+        elif want not in LAYOUTS:
+            self.add_event("cmd",
+                f"layout: unknown mode '{rest}' — choices: {' '.join(LAYOUTS)}")
+            return
 
         if want != self.layout:
             self._layout_prev = self.layout
@@ -12938,14 +13008,79 @@ class Application:
         if self._monitoring_started:
             self.add_event("cmd", f"layout: {want}")
 
+    # The two argument words every settable parameter understands, whichever
+    # spelling reaches it — ':set dns cycle' and ':dns cycle' are the same
+    # command.  A trailing dash is backwards, per the direction convention.
+    _PARAM_VERBS = ('cycle', 'cycle-')
+
+    def _report_param(self, param, to_log=True):
+        """Say what *param* is set to, in the words that would set it.
+
+        'dns name+ip' is exactly the argument ':set dns' takes, so the answer
+        can be pasted back as a command.  It goes to the status bar because
+        that is visible at any log level — the event copy is filed under
+        'cmd', which is hidden below ':set log-level info'.
+
+        *to_log* is False after a cycle: several parameters log their own
+        change in their own words (``ssh-options`` adds that it applies to
+        connections started from now on), and a second line repeating the
+        value is noise.  A query has no other record, so it keeps its event.
+        """
+        text = f'{param.name} {param.get_current(self)}'
+        self._status_msg = {'text': text, 'expires': time.time() + 3.0}
+        if to_log:
+            self.add_event("cmd", text)
+
+    def _handle_param_verb(self, name, args):
+        """Report or cycle the parameter *name*; True when that is all to do.
+
+        Every settable parameter obeys the same two rules, and this is the
+        only implementation of them, so the two ways of reaching one — ':set
+        dns' and ':dns' — cannot drift apart:
+
+          no argument  → report the current value, change nothing
+          cycle/cycle- → step to the next / previous value and report it
+
+        Anything else is a value and belongs to the parameter's own handler,
+        which is what returning False says.  A bare invocation used to cycle,
+        which made a hosts file non-idempotent: a plain ':sync-history' line
+        flipped whatever the saved config had, so the setting depended on the
+        order the two files were read and every ':edit' reload flipped it
+        again.
+        """
+        param = _SET_PARAM_MAP.get(name)
+        if param is None:
+            return False
+        verb = args.strip().lower()
+        if not verb:
+            self._report_param(param)
+            return True
+        if verb not in self._PARAM_VERBS:
+            return False
+        step = 1 if verb == 'cycle' else -1
+        if param.cycler is not None:
+            param.cycler(self, step)
+        else:
+            nxt = param.next_value(self, step)
+            if nxt is None:
+                self.add_event("cmd",
+                    f"{param.name}: cannot cycle a free-form value — "
+                    f"give it one: {param.values}")
+                return True
+            getattr(self, param.action)(nxt)
+        self._report_param(param, to_log=False)
+        return True
+
     def _cmd_set(self, args=''):
         """Set a display mode by name: :set <setting> [value].
 
-        With no arguments or a single param name: opens the settings overlay.
+        With no arguments at all: opens the settings overlay.
+        With a param and no value: reports that param's current value.
+        With param + 'cycle'/'cycle-': steps through its values.
         With param + value: delegates to the corresponding _cmd_* handler.
 
         Supported settings are defined in SET_PARAMS (dns, stats, sort,
-        ping-view, log-level, autofold, …).
+        ping-view, layout, log-level, autofold, …).
         """
         parts = args.split(None, 1)
         if not parts:
@@ -12959,11 +13094,10 @@ class Application:
             self.add_event("cmd",
                 f"set: unknown setting '{subcmd}' — choices: {choices}")
             return
-        if len(parts) == 1:
-            # :set <param> with no value — open settings overlay focused on that param
-            self._open_settings_overlay(param_name=subcmd)
-        else:
-            getattr(self, param.action)(parts[1].strip())
+        value = parts[1].strip() if len(parts) > 1 else ''
+        if self._handle_param_verb(subcmd, value):
+            return
+        getattr(self, param.action)(value)
 
     def _open_settings_overlay(self, param_name=''):
         """Open the help overlay in settings tab, optionally focused on a param."""
@@ -12992,15 +13126,22 @@ class Application:
             self._settings_scroll_to_cursor = False
 
     def _cmd_pause(self, args=''):
-        """Toggle or set global pause (all monitors). Args: on | off | (empty = toggle)."""
+        """Report (no arg), cycle, or set global pause: on | off | cycle.
+
+        As with sync-history, an unrecognised value used to toggle, which is
+        the one answer that can be wrong in both directions.
+        """
+        if self._handle_param_verb('pause', args):
+            return
         val = args.strip().lower()
-        all_paused = all(m.paused for m in self.monitors)
         if val == 'on':
             want_pause = True
         elif val == 'off':
             want_pause = False
         else:
-            want_pause = not all_paused
+            self.add_event("cmd",
+                f"pause: unknown value '{val}' — choices: on off cycle")
+            return
         for m in self.monitors:
             m.pause() if want_pause else m.unpause()
 
@@ -13124,14 +13265,22 @@ class Application:
             self.add_event("history-size", f"per-host ping history size set to {n}")
 
     def _cmd_sync_history(self, args=''):
-        """Toggle or set sync-history mode (on/off)."""
+        """Report (no arg), cycle, or set sync-history mode (on/off).
+
+        An unrecognised value used to fall through to a toggle, so
+        ':sync-history yes' silently did the opposite of what it said.
+        """
+        if self._handle_param_verb('sync-history', args):
+            return
         val = args.strip().lower()
         if val == 'on':
             self.sync_history = True
         elif val == 'off':
             self.sync_history = False
         else:
-            self.sync_history = not self.sync_history
+            self.add_event("cmd",
+                f"sync-history: unknown value '{val}' — choices: on off cycle")
+            return
         state = 'on' if self.sync_history else 'off'
         if self._monitoring_started:
             self.add_event("sync-history", f"wall-clock history alignment {state}")
@@ -13172,17 +13321,15 @@ class Application:
             self.add_event("log-level", f"log level set to: {val}")
 
     def _cmd_autofold(self, args=''):
-        """Toggle or set autofold (on/off).  No args = toggle."""
+        """Report (no arg), cycle, or set autofold (on/off)."""
+        if self._handle_param_verb('autofold', args):
+            return
         val = args.strip().lower()
         if val == 'on':
             self.autofold = True
         elif val == 'off':
             self.autofold = False
             self._autofold_ts.clear()
-        elif not val:
-            self.autofold = not self.autofold
-            if not self.autofold:
-                self._autofold_ts.clear()
         else:
             self.add_event("cmd", f"autofold: unknown value '{val}'; choices: on off")
             return

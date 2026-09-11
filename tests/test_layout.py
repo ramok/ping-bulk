@@ -37,13 +37,29 @@ class TestLayoutCommand:
         app._cmd_layout('LOG')
         assert app.layout == 'log'
 
-    def test_no_arg_cycles_in_order(self, pb, tmp_path):
+    def test_cycle_steps_in_order(self, pb, tmp_path):
         app, _ = _app(pb, tmp_path)
         seen = []
         for _ in range(4):
-            app._cmd_layout()
+            app._cmd_layout('cycle')
             seen.append(app.layout)
         assert seen == ['ping', 'log', 'all', 'ping']
+
+    def test_cycle_back_steps_the_other_way(self, pb, tmp_path):
+        app, _ = _app(pb, tmp_path)
+        seen = []
+        for _ in range(3):
+            app._cmd_layout('cycle-')
+            seen.append(app.layout)
+        assert seen == ['log', 'ping', 'all']
+
+    def test_no_arg_reports_and_changes_nothing(self, pb, tmp_path):
+        """A bare ':layout' is a question, not a command."""
+        app, _ = _app(pb, tmp_path)
+        app._cmd_layout('log')
+        app._cmd_layout()
+        assert app.layout == 'log'
+        assert app._status_msg['text'] == 'layout log'
 
     def test_unknown_mode_rejected_and_state_kept(self, pb, tmp_path):
         app, _ = _app(pb, tmp_path)
@@ -69,7 +85,7 @@ class TestLayoutCommand:
         app, _ = _app(pb, tmp_path)
         binding, _ = app._key_trie.resolve(pb._parse_key_notation('<C-l>'), set())
         assert binding is not None
-        assert binding.commands == [':layout']
+        assert binding.commands == [':layout cycle']
 
     def test_command_is_registered_and_completable(self, pb):
         assert 'layout' in pb._CMD_MAP
@@ -128,7 +144,7 @@ class TestLayoutToggle:
     def test_cycling_updates_the_return_target(self, pb, tmp_path):
         """After cycling, toggle must come back to the cycled-to layout."""
         app, _ = _app(pb, tmp_path)
-        app._cmd_layout()                 # all -> ping
+        app._cmd_layout('cycle')          # all -> ping
         assert app.layout == 'ping'
         app._cmd_layout('--toggle log')   # ping -> log
         app._cmd_layout('--toggle log')   # log -> ping

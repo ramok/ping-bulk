@@ -213,9 +213,9 @@ class TestCustomStatsAutocomplete:
     """_complete_stats_arg() returns context-sensitive completions."""
 
     def test_no_comma_returns_all_names(self, app, pb):
-        """No comma in prefix: all STATS_MODES + STAT_NAMES returned."""
+        """No comma in prefix: the verbs, then STATS_MODES + STAT_NAMES."""
         result = app._complete_stats_arg('')
-        expected = sorted(
+        expected = ['cycle', 'cycle-'] + sorted(
             set(m.lower() for m in pb.STATS_MODES) | set(pb.STAT_NAMES.keys())
         )
         assert result == expected, result

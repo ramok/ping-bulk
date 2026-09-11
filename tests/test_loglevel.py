@@ -330,13 +330,22 @@ class TestCmdLoglevel:
         app._dispatch_cmd(':set log-level verbose')
         assert any('unknown value' in e for e in app.events)
 
-    def test_no_args_opens_settings_overlay(self, pb, tmp_path):
-        """:set log-level with no argument opens settings overlay focused on 'log-level'."""
+    def test_no_args_reports_the_level(self, pb, tmp_path):
+        """':set log-level' answers with the level and changes nothing."""
         app, _ = _make_app(pb, tmp_path)
         app.loglevel = pb.LEVEL_INFO
         app._dispatch_cmd(':set log-level')
-        assert app.help_open and app.help_show_settings
-        assert app.help_search == 'log-level'
+        assert app.loglevel == pb.LEVEL_INFO
+        assert app._status_msg['text'] == 'log-level info'
+        assert not app.help_open
+
+    def test_cycle_steps_through_the_levels(self, pb, tmp_path):
+        app, _ = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set log-level quiet')
+        app._dispatch_cmd(':set log-level cycle')
+        assert app.loglevel == pb.LEVEL_NORMAL
+        app._dispatch_cmd(':set log-level cycle-')
+        assert app.loglevel == pb.LEVEL_QUIET
 
     def test_set_resets_log_offset(self, pb, tmp_path):
         app, _ = _make_app(pb, tmp_path)
