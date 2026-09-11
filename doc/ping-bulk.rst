@@ -1250,6 +1250,14 @@ Help
     jump straight to one.  ``↑``/``↓``/``k``/``j`` scroll, ``←``/``→``/``h``/``l``
     scroll horizontally, and ``/`` searches the current tab.
 
+    The *Bindings* tab is generated from the live key table, so it shows
+    defaults and anything ``:bind-key`` added, grouped by UI mode.  Each row
+    is the key, its context guard, the command it runs, and what that does —
+    from the binding's ``--desc`` when it has one, otherwise the command's own
+    one-line help.  A row marked ``[user]`` came from a ``:bind-key``
+    directive rather than a default.  Where two rows share a key, the one
+    whose guard matches the current selection is the one that fires.
+
 Folding
 -------
 

@@ -565,11 +565,13 @@ All modes live in the **same** `_key_trie`, in per-mode buckets
 
 ### Adding a user-configurable binding (hosts file / config)
 Users write `:bind-key` directives:
+```text
+:bind-key --desc "Show help" ? :help
+:bind-key --mode details --hint "[q]uit" q :close
 ```
-:bind-key ? :help --desc "Show help"
-:bind-key --mode details q :close --hint "[q]uit"
-```
-`_cmd_bindkey` parses these and inserts into `_key_trie` under the target mode.
+`_cmd_bindkey` parses these and inserts into `_key_trie` under the target mode. **Every flag comes before the key.** The parser strips flags only from the front of its argument string, so a trailing `--desc` is passed through as part of the bound command — the examples above used to show that form and it never worked. `doc/ping-bulk.rst` has always documented the leading form.
+
+`--desc` is optional, and the Bindings tab falls back to the `CmdDef.help` of the first command when it is missing, so a binding without one still reads sensibly (`_binding_desc`).
 
 ### Dispatching
 - Normal mode: `_dispatch_key(key)` walks the trie and calls `_dispatch_cmd()`.
