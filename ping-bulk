@@ -1110,6 +1110,27 @@ _HELP_BINDINGS = [
 ]
 
 
+def _escape_hint_markup(text):
+    """Escape *text* so _draw_hint_text draws it literally.
+
+    Only ``[`` matters: it opens a ``[key desc]`` token, and everything up to
+    the next ``]`` is then read as markup.  A key notation like ``z[`` or a
+    command like ``:fold z[`` would swallow the rest of its line.  A bare
+    ``]`` outside a token is already literal, so it is left alone.
+    """
+    return text.replace('[', '\\[')
+
+
+def _hint_cell(text, width):
+    """Escape *text* and pad it to *width* rendered columns.
+
+    Padding has to be measured on the raw text: ``\\[`` is two characters and
+    one column, so padding the escaped string would misalign every row that
+    contains a bracket.
+    """
+    return _escape_hint_markup(text) + ' ' * max(0, width - len(text))
+
+
 def _strip_hint_markup(text):
     """Strip _draw_hint_text markup for plain-text output (used by --help-full).
 
@@ -14308,30 +14329,81 @@ class Application:
         self._settings_line_map = line_map
         return lines
 
-    def _build_all_bindings_lines(self):
-        """Build auto-generated lines listing every key binding (all origins)."""
-        # Group bindings by mode; multi-mode bindings appear in each mode section
-        by_mode = {}
-        for keys, b in self._key_trie:
-            for m in b.mode.split(','):
-                m = m.strip()
-                by_mode.setdefault(m, []).append((b.key_notation, b.commands,
-                                                  b.context, b.origin))
+    def _binding_desc(self, binding):
+        """The human description for *binding* — its own, else its command's.
 
-        lines = []
-        all_modes = sorted(by_mode, key=lambda m: (m != 'normal', m))
-        for mode in all_modes:
-            lines.append(f"  {mode} mode")
-            seen = set()
-            for notation, commands, context, origin in by_mode[mode]:
-                ctx_str = _format_context(context)
-                dedup_key = (notation, tuple(commands), ctx_str)
+        ``:bind-key`` makes ``--desc`` optional, so without a fallback a
+        binding the user wrote is the one row in the tab with nothing in the
+        description column.  Borrowing the one-line help of the command it
+        runs says something true about it for free.
+        """
+        if binding.desc:
+            return binding.desc
+        first = binding.commands[0].strip().lstrip(':') if binding.commands else ''
+        name = first.split()[0].lower() if first.split() else ''
+        if name:
+            for cmd in CMD_REGISTRY:
+                if name in cmd.names:
+                    return cmd.help
+        return ''
+
+    def _build_all_bindings_lines(self):
+        """Build the Bindings tab: every key, what it runs, and what it does.
+
+        Laid out in aligned columns like the Commands tab, and with the
+        description spelled out rather than left to be guessed from the
+        command — ``c`` and ``C`` run the same ``:mux ssh`` text and differ
+        only in that one of them stops on the command line for editing, which
+        the command column cannot show.
+
+        Columns are sized across *all* modes so the sections line up with
+        each other, and every generated cell is escaped: a notation like
+        ``z[`` opens a markup token and would otherwise eat its own line.
+        """
+        # Group bindings by mode; multi-mode bindings appear in each section.
+        by_mode = {}
+        for _keys, b in self._key_trie:
+            for m in b.mode.split(','):
+                by_mode.setdefault(m.strip(), []).append(b)
+
+        rows_by_mode = {}
+        for mode, bindings in by_mode.items():
+            rows, seen = [], set()
+            for b in bindings:
+                ctx = _format_context(b.context).strip()
+                cmds = ' \\; '.join(b.commands)
+                dedup_key = (b.key_notation, cmds, ctx)
                 if dedup_key in seen:
                     continue
                 seen.add(dedup_key)
-                cmds = ' \\; '.join(commands)
-                origin_tag = '' if origin == 'default' else '  [user]'
-                lines.append(f"    {ctx_str}{notation:<12} → {cmds}{origin_tag}")
+                rows.append((b.key_notation, ctx, cmds,
+                             self._binding_desc(b), b.origin))
+            rows_by_mode[mode] = rows
+
+        every = [r for rows in rows_by_mode.values() for r in rows]
+        w_key = max((len(r[0]) for r in every), default=8)
+        w_ctx = max((len(r[1]) for r in every), default=0)
+        w_cmd = max((len(r[2]) for r in every), default=0)
+
+        lines = [
+            "  Every key binding, grouped by the UI mode it belongs to.",
+            "  A '--%x' column marks a context guard: that binding fires only"
+            " while the variable exists (a host",
+            "  selected, a section selected, …) and the most specific match"
+            " wins, so one key can mean two things.",
+            "  \\[user] marks a binding set with :bind-key — see the Commands"
+            " tab for :bind-key and :unbind-key.",
+            '-DIVIDER-',
+        ]
+        for mode in sorted(rows_by_mode, key=lambda m: (m != 'normal', m)):
+            lines.append(f"  {mode} mode")
+            for notation, ctx, cmds, desc, origin in rows_by_mode[mode]:
+                tag = '' if origin == 'default' else '  [user]'
+                lines.append(
+                    '    ' + _hint_cell(notation, w_key)
+                    + '  ' + _hint_cell(ctx, w_ctx)
+                    + '  ' + _hint_cell(cmds, w_cmd)
+                    + '  ' + _escape_hint_markup(desc) + tag)
             lines.append('-DIVIDER-')
         if lines and lines[-1] == '-DIVIDER-':
             lines.pop()
