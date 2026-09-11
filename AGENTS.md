@@ -62,7 +62,15 @@ The repository is structured to keep the core application as a single deployable
   rule (matched like `:no-alarm`, flag beats rule, last rule wins);
   `auto` (the default) probes each relay once with `uname -s` — RouterOS
   answers `bad command name` — cached per `tuple(ssh_args)`, connection
-  failures fall back to linux uncached. Per-OS profiles
+  failures fall back to linux uncached. **The retry pause is stamped only
+  after a probe has failed, never before one runs.** Stamping it up front let
+  the pre-lock fast path fire while the first probe was still in flight, so
+  the other monitors behind that relay skipped the per-key lock they were
+  meant to wait on and took the linux fallback for the whole 60-second pause
+  — `ping: illegal option -- O` once per host against a FreeBSD relay, until
+  each one's backoff came round again. Measured with six threads and one slow
+  probe: five wrong verdicts, one right. It was never reload-specific; an
+  `:edit` reload just makes every monitor arrive at once. Per-OS profiles
   (`_RELAY_OS_PROFILES`) supply the argv (`/ping` on RouterOS, plain `ping`
   behind an `echo PING-BULK-READY` preamble on FreeBSD), the parser, and the
   loss model. **Everything measured on the real machines** (FreeBSD 14.3,
