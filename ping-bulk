@@ -7,6 +7,8 @@ import curses
 import difflib
 import fnmatch
 import glob as _glob
+import hashlib
+import json
 import itertools
 import math
 import os
@@ -2594,6 +2596,24 @@ class Monitor(ABC):
         """
         return self.host
 
+    @property
+    def uid(self):
+        """A short, stable, URL-safe id for this row.
+
+        Derived from the display name rather than assigned from a counter, so
+        it survives a process restart and a browser can keep a link to one
+        host.  It also comes out right across an ':edit' reload for free: a
+        host whose definition is unchanged keeps its very object (see
+        _adopt_monitors), and one that was rebuilt has the same name, so the
+        same id — while a host that was *renamed* is a different row and
+        deserves a different id.
+
+        Two hosts sharing a display name would share an id.  They already
+        share everything else the UI shows, and ':source' refuses a duplicate
+        name, so this is the same ambiguity the terminal already has.
+        """
+        return hashlib.sha1(self.host.encode('utf-8')).hexdigest()[:10]
+
     def identity(self):
         """A key saying whether two monitors probe the same thing the same way.
 
@@ -4533,6 +4553,16 @@ class SectionLabel:
         self.level = max(1, int(level))  # 1 = top-level, 2 = sub-section, …
         self.folded = bool(folded_default)  # True = starts collapsed
         self.no_autofold = bool(no_autofold)  # True = exempt from auto fold/unfold
+
+    @property
+    def uid(self):
+        """Stable id for this header, on the same reasoning as Monitor.uid.
+
+        Keyed on title *and* level, because the same title at two nesting
+        depths is two different rows.
+        """
+        key = f'{self.level}:{self.title}'
+        return 's' + hashlib.sha1(key.encode('utf-8')).hexdigest()[:9]
 
 
 def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
@@ -7406,9 +7436,18 @@ class Application:
         prefix_base = prefix[:prefix.rfind(',') + 1]
         return [prefix_base + c for c in candidates]
 
+    # Bumped whenever the row list changes shape — a host added, or the whole
+    # list rebuilt by an ':edit' reload.  A viewer that cached row order
+    # compares it and refetches rather than indexing into a list that is no
+    # longer the one it drew.  Declared on the class, not in __init__, so the
+    # several tests that build an Application through __new__ can still read
+    # it; '+= 1' rebinds it per instance.
+    _entries_generation = 0
+
     def _add_entry(self, entry):
         """Append *entry* to self.entries and invalidate layout caches."""
         self.entries.append(entry)
+        self._entries_generation += 1
         self._name_col_dirty = True
         self._name_col_cache.clear()
 
@@ -10239,15 +10278,7 @@ class Application:
 
         max_ping_count = max((m.ping_count for m in self.monitors), default=0)
 
-        # Wall-clock reference time for sync-history mode; floored to whole second
-        # so bucket boundaries are stable — gaps only move once per second.
-        render_time = int(time.time())
-        sync = self.sync_history
-        if sync:
-            # Shift t_end back by 1s: position 0 = previous (already-received) second,
-            # so the display is stable — no transient empty at position 0 while waiting
-            # for the current second's ping to arrive.
-            render_time -= 1
+        render_time, sync = self._history_render_time()
 
         if sync or self.history_offset > 0:
             # Sync mode: always show the full width — new pings land at bucket 0
@@ -11168,6 +11199,159 @@ class Application:
         against 186 failures in 7k Python-level iterations of the same deque.
         """
         return list(self.events)
+
+    @staticmethod
+    def _web_json(obj) -> bytes:
+        """Serialize *obj* for the wire, with '<', '>' and '&' escaped.
+
+        ``json.dumps`` escapes only quotes, backslashes and control
+        characters, so a display name of ``</script>…`` survives literally.
+        That is harmless in a response served as application/json and read
+        with ``JSON.parse`` — and fatal the day anyone embeds the same
+        payload in an HTML ``<script>`` block, because ``</script>`` closes it
+        wherever it appears, inside a string or not.
+
+        Everything here is attacker-controlled: display names come from the
+        hosts file, addresses from reverse DNS — whoever owns the PTR record
+        picks that string — and error text from ping's stderr.  Escaping the
+        three characters costs nothing and removes the whole class, so the
+        payload stays inert however it is later embedded.
+        """
+        text = json.dumps(obj, default=str, separators=(',', ':'))
+        text = (text.replace('<', '\\u003c')
+                    .replace('>', '\\u003e')
+                    .replace('&', '\\u0026'))
+        return text.encode('utf-8')
+
+    def _history_render_time(self):
+        """Return ``(render_time, sync)`` — the right edge of a history strip.
+
+        Extracted so the terminal and the web view cannot drift apart on the
+        two details that matter: the reference time is floored to a whole
+        second, so bucket boundaries are stable and gaps move only once per
+        second; and in sync mode it is shifted back one second, so position 0
+        is the previous — already received — second rather than a transient
+        blank while the current second's reply is still in flight.
+        """
+        render_time = int(time.time())
+        sync = self.sync_history
+        if sync:
+            render_time -= 1
+        return render_time, sync
+
+    def _web_state(self, history_len=60, event_tail=200):
+        """A JSON-serializable snapshot of everything a viewer needs.
+
+        Pure: it reads, it does not draw and it does not mutate.  Everything
+        comes from the accessors the terminal already renders from, so the two
+        views cannot disagree — the stats columns are driven by ``STAT_NAMES``
+        and ``_compute_stat`` exactly as the terminal's are, and the history
+        strip is the same string ``get_history_string`` gives ``draw_hosts``.
+        Colour is left to the client: it receives the glyphs and maps them.
+
+        **Threading.** This runs on a reader thread, so it obeys the rules in
+        AGENTS.md: events come from ``_events_snapshot()`` and are filtered
+        here rather than through ``_get_filtered_events()``, which returns a
+        *live* list that background threads append to and trim; ``entries`` is
+        copied before iteration because the ':edit' reload replaces it
+        wholesale; and per-host reads take ``monitor.lock``, which
+        ``get_history_string`` and ``_compute_stat`` already do for us.
+        """
+        render_time, sync = self._history_render_time()
+        entries = list(self.entries)
+        visible = self._get_visible_entry_indices()
+        mode = HISTORY_MODES[self.history_mode]
+
+        if self.stats_custom is not None:
+            columns = list(self.stats_custom)
+        elif STATS_MODES[self.stats_mode] == 'off':
+            columns = ['Last']
+        elif STATS_MODES[self.stats_mode] == 'All':
+            columns = [c for c in STAT_NAMES.values() if c not in ('Drift', 'RTime')]
+        else:
+            columns = [STATS_MODES[self.stats_mode]]
+
+        rows, down = [], []
+        for idx in visible:
+            if idx >= len(entries):
+                continue        # the list shrank under us; skip rather than raise
+            entry = entries[idx]
+            if isinstance(entry, SectionLabel):
+                members = self._get_section_monitors(idx)
+                badge, hist, _ = self._section_summary(
+                    members, history_len, self.history_offset,
+                    sync=sync, end_time=render_time)
+                rows.append({
+                    'kind': 'section',
+                    'uid': entry.uid,
+                    'title': entry.title,
+                    'level': entry.level,
+                    'folded': bool(entry.folded),
+                    'badge': [seg for seg, _pair in badge],
+                    'history': hist,
+                })
+                continue
+            if not isinstance(entry, Monitor):
+                continue
+            with entry.lock:
+                alive = entry.alive
+                paused = entry.paused
+                no_alarm = entry.no_alarm
+                error = entry.error
+                latency = entry.latency
+            updown, is_down = self._compute_updown(entry)
+            row = {
+                'kind': 'host',
+                'uid': entry.uid,
+                'name': entry.get_display_name(DNS_MODES[self.dns_mode]),
+                'host': entry.host,
+                'ip': entry.resolved_ip,
+                'alive': alive,
+                'paused': paused,
+                'no_alarm': no_alarm,
+                'error': error,
+                'latency': latency,
+                'updown': updown.strip(),
+                'down': bool(is_down),
+                'stats': {c: self._compute_stat(entry, c).strip() for c in columns},
+                'history': entry.get_history_string(
+                    history_len, self.history_offset, mode, 1,
+                    sync=sync, end_time=render_time),
+            }
+            rows.append(row)
+            # 'What is broken right now' — the first question a viewer has, so
+            # it is answered in the payload rather than left to the client to
+            # re-derive.  A ':no-alarm' host is expected to be quiet and does
+            # not belong here, on the same reasoning as _counts_as_down.
+            if is_down and not no_alarm and not paused:
+                down.append({'uid': entry.uid, 'name': row['name'],
+                             'updown': row['updown'], 'error': error})
+
+        events = [
+            {'level': e.level, 'category': e.category, 'text': e.text}
+            for e in self._events_snapshot() if e.level <= self.loglevel
+        ][-event_tail:]
+
+        return {
+            'generation': self._entries_generation,
+            'time': time.time(),
+            'view': {
+                'dns': DNS_MODES[self.dns_mode],
+                'sort': self.sort_by,
+                'ping_view': mode,
+                'sync': bool(sync),
+                'layout': self.layout,
+                'loglevel': self._LOGLEVEL_LABELS.get(self.loglevel, 'normal'),
+                'filter': self._filter_query,
+                'history_offset': self.history_offset,
+                'paused': bool(self.monitors)
+                          and all(m.paused for m in self.monitors),
+            },
+            'columns': columns,
+            'rows': rows,
+            'down': down,
+            'events': events,
+        }
 
     def _get_filtered_events(self) -> list:
         """Return (and cache) the event list filtered to the current loglevel.
@@ -13339,6 +13523,7 @@ class Application:
 
         self.highlighted_index = None
         self.host_scroll = 0
+        self._entries_generation += 1
         self.monitors.clear()
         self.entries.clear()
         self._name_col_dirty = True

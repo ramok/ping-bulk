@@ -528,6 +528,52 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
 - `_proc`: Subprocess handle (if applicable).
 - `resolv_static`: Flag for static DNS mappings.
 
+## 9c. The web read side: `uid` and `_web_state()`
+
+Groundwork for a browser view. No socket yet — this is the read model only.
+
+**`Monitor.uid` / `SectionLabel.uid` are derived from the display name, not
+handed out by a counter.** Row indices are not identity: the `:edit` reload
+rebuilds `entries` and `monitors` wholesale, and `highlighted_index` is a
+single global cursor shared with whoever is at the console — who, in this
+project's own kiosk threat model, is the attacker. A viewer that says "pause
+row 7" three seconds after fetching the list would pause a different host.
+Deriving from the name gets three properties at once: it survives a reload
+(and an adopted monitor is literally the same object anyway, see §9b), it
+survives a process restart so a browser link keeps working, and it changes
+exactly when the row genuinely becomes a different row. Two hosts sharing a
+display name share a uid — they already share everything the UI shows, and
+`:source` refuses a duplicate name.
+
+**`_web_state()` is pure and reads under the §9 threading rules.** Events come
+from `_events_snapshot()` and are filtered against `loglevel` *here*, not
+through `_get_filtered_events()` — that returns a **live plain list** which
+background threads append to and trim, and a plain list has no "mutated during
+iteration" guard, so a concurrent read gets silently wrong results rather than
+an exception. `entries` is copied before iterating because the reload replaces
+it wholesale, and the loop skips an index past the end rather than raising.
+Per-host reads take `monitor.lock`, which `get_history_string` and
+`_compute_stat` already do.
+
+**The stats columns are driven by `STAT_NAMES` + `_compute_stat`**, the same
+pair the terminal renders from — the `data_fields[]` idea from mtr, where one
+column table drives five output formats. The history strip is the same string
+`draw_hosts` gets. `_history_render_time()` was extracted so the two views
+cannot drift on the floored-second bucket boundary or the one-second shift
+that keeps position 0 stable in sync mode.
+
+**`_web_json()` escapes `<`, `>` and `&`.** `json.dumps` escapes only quotes,
+backslashes and control characters, so a display name of `</script>…` survives
+literally — harmless in a response read with `JSON.parse`, and fatal the day
+that payload is embedded in an HTML `<script>` block, because `</script>`
+closes it wherever it appears, inside a string or not. Every string in the
+payload is attacker-controlled: names from the hosts file, `ip` from reverse
+DNS (whoever owns the PTR record picks it), `error` from ping's stderr.
+
+`_entries_generation` is declared on the class, not in `__init__`: several
+tests build an `Application` through `__new__`, and `+= 1` rebinds per
+instance anyway.
+
 ## 9b. `:edit` reload keeps what it did not change
 
 `_edit_reload_inplace` used to stop every monitor, clear the lists, rebuild all
