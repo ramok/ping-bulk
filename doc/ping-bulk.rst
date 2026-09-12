@@ -2044,8 +2044,17 @@ Web interface
     Serve the host list over HTTP, on a thread inside this process reading the
     same live state the terminal draws from.  With no argument, report.
 
-    **Read-only.**  It answers ``GET`` and refuses everything else, so a
-    viewer can watch but not touch.
+    **Read-only.**  It answers ``GET``, plus ``POST /api/login``, and
+    refuses everything else — so a viewer can watch but not touch.
+
+    Starting it prints a URL with a one-time token in it::
+
+        web: listening on http://127.0.0.1:8765/?t=hT2s… (read-only)
+
+    Open that and the token is exchanged for a session cookie and dropped
+    from the address bar, so it stops living in history and in any
+    ``Referer``.  The token is fresh on every start and is never written
+    down; for a listener that has to outlive one run, set a password.
 
     The page leads with what is down, then shows the host rows with their
     sections, stats columns and history strips, then the event log.  It polls
@@ -2060,10 +2069,12 @@ Web interface
     for any free port, which ``:web status`` and the status bar then report.
     IPv6 goes in brackets: ``[::1]:8765``.
 
-    **Only a loopback address is accepted so far.**  Until there is a
-    password, binding anywhere else would publish the whole fleet to anyone
-    who can reach the port.  A non-loopback address is remembered but refused
-    at ``:web start``, with a reminder of the alternative::
+    **A non-loopback address needs a password.**  The start-up token dies
+    with the process, which is fine for a tunnel and useless for a listener
+    other machines keep coming back to, so binding anywhere but loopback is
+    refused until ``web-password-file`` is set.  The address is still
+    remembered; only starting on it is refused, with a reminder of the
+    alternative::
 
         ssh -L 8765:localhost:8765 <the monitored host>
 
@@ -2076,7 +2087,41 @@ Web interface
     paths exist.  Default ``any``, which means "whatever the bind address
     already allows" — with a loopback bind that is this machine.
 
-Both settings are written by ``:save-config``.  The server itself is not
+``:set web-password-file <path> | none``
+    A file holding either a plain password or an already-derived
+    ``pbkdf2_sha256$…`` verifier — the second form lets a deployment keep the
+    plaintext out of the image entirely.  It must not be group- or
+    world-readable; ping-bulk refuses it otherwise, because the whole point
+    is that the local user cannot read it.
+
+    The password is never stored in the config and never echoed.  Only the
+    *path* is saved, so what it contains stays where you put it, under
+    permissions you chose.  That matters under the kiosk unit, where the
+    config directory is readable by the console user — who is exactly who
+    kiosk mode is guarding against.
+
+    Failed logins are counted per client and refused outright after five in a
+    minute.  Refused, not delayed: a request handler that slept would be
+    holding one of a bounded number of threads, which would hand an attacker
+    the denial of service the limit is meant to prevent.
+
+``:set web-hosts <name>[,<name>…] | none``
+    Extra ``Host:`` names to answer to.  Only needed for a non-loopback bind —
+    ``localhost``, the bind address and this machine's own name are already
+    accepted.  They are declared rather than inferred, because accepting any
+    ``Host`` is the same as not checking it.
+
+``:set web-tls-cert <file> | none``, ``:set web-tls-key <file> | none``
+    Serve HTTPS instead.  The key may live in the certificate file; the
+    second setting is only needed when it does not.  Both take effect at the
+    next ``:web start``.
+
+    Binding a non-loopback address without this logs a warning every time,
+    because the password and every reading then cross the network in clear.
+    For anything beyond a small trusted network the better answer is still to
+    bind loopback and let nginx or caddy terminate TLS in front.
+
+All of these are written by ``:save-config``.  The server itself is not
 started by a saved setting: a network socket should open because someone asked
 for it, not because a preference file was written.  To have it up from the
 start, put ``:web start`` in the hosts file.

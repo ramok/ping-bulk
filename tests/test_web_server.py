@@ -50,12 +50,36 @@ class Client:
         host, port = app._web_server.server_address[:2]
         self.host, self.port = host, port
         self.base = f'http://{host}:{port}'
+        self.cookie = ''
+
+    def sign_in(self):
+        """Exchange the start-up token for a session cookie.
+
+        '/api/state' is behind a session; the page and the assets are not.
+        The cookie rides on the 303, so the redirect must not be followed.
+        """
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **kw):
+                return None
+
+        req = urllib.request.Request(
+            self.base + f'/?t={self.app._web_server.token}')
+        try:
+            resp = urllib.request.build_opener(NoRedirect).open(req, timeout=10)
+            header = resp.headers.get('Set-Cookie', '')
+        except urllib.error.HTTPError as e:
+            header = e.headers.get('Set-Cookie', '')
+        assert header, 'the token link must hand back a session'
+        self.cookie = header.split(';')[0]
+        return self
 
     def get(self, path='/', host_header=None, method='GET', data=None):
         req = urllib.request.Request(self.base + path, data=data,
                                      method=method)
         if host_header is not None:
             req.add_header('Host', host_header)
+        if self.cookie:
+            req.add_header('Cookie', self.cookie)
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, dict(r.headers), r.read()
@@ -104,7 +128,7 @@ class TestItServes:
 
     def test_the_state_is_json_and_parses(self, served):
         app, c = served
-        status, headers, body = c.get('/api/state')
+        status, headers, body = c.sign_in().get('/api/state')
         assert status == 200
         assert headers['Content-Type'].startswith('application/json')
         state = json.loads(body)
@@ -183,6 +207,7 @@ class TestTheContentSecurityPolicy:
 
     def test_every_response_carries_it(self, served):
         _app, c = served
+        c.sign_in()
         for path in ('/', '/api/state', '/static/app.js', '/nope'):
             csp = c.get(path)[1].get('Content-Security-Policy', '')
             assert "script-src 'self'" in csp, path
@@ -214,7 +239,7 @@ class TestTheContentSecurityPolicy:
 
     def test_responses_are_not_sniffable_or_cached(self, served):
         _app, c = served
-        headers = c.get('/api/state')[1]
+        headers = c.sign_in().get('/api/state')[1]
         assert headers.get('X-Content-Type-Options') == 'nosniff'
         assert headers.get('Cache-Control') == 'no-store'
 
@@ -313,13 +338,14 @@ class TestLifecycle:
 
 class TestWhereItListens:
 
-    def test_a_non_loopback_bind_is_refused_for_now(self, pb, tmp_path):
-        """No credential exists yet, so 0.0.0.0 would publish the fleet."""
+    def test_a_non_loopback_bind_is_refused_without_a_password(self, pb,
+                                                                 tmp_path):
+        """A per-run token dies with the process; a LAN listener needs more."""
         app = _make_app(pb, tmp_path)
         app._dispatch_cmd(':set web-listen 0.0.0.0:8765')
         app._dispatch_cmd(':web start')
         assert app._web_server is None
-        assert 'only loopback' in _events(app)
+        assert 'without a password' in _events(app)
         assert 'ssh -L' in _events(app), 'and says how to reach it instead'
 
     def test_the_address_is_still_remembered(self, pb, tmp_path):
@@ -429,6 +455,7 @@ class TestFailuresAreVisible:
         UI looking healthy — the exact shape of a bug this program has had.
         """
         app, c = served
+        c.sign_in()
         with patch.object(type(app), '_web_state',
                           side_effect=RuntimeError('boom')):
             status = c.get('/api/state')[0]

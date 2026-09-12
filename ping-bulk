@@ -8,6 +8,7 @@ import difflib
 import fnmatch
 import glob as _glob
 import hashlib
+import hmac
 import http.server
 import ipaddress
 import json
@@ -15,15 +16,18 @@ import itertools
 import math
 import os
 import re
+import secrets
 import select
 import shlex
 import shutil
 import signal
 import stat
 import socket
+import ssl
 import subprocess
 import sys
 import textwrap
+import urllib.parse
 import threading
 import time
 import traceback
@@ -470,6 +474,18 @@ SET_PARAMS = [
     SetParam('web-allow', '_cmd_web_allow', '<cidr>[,<cidr>]|any',
              'client addresses allowed to reach the web interface',
              getter=lambda app: app.web_allow or 'any'),
+    SetParam('web-password-file', '_cmd_web_password_file', '<path>|none',
+             'file holding the web password (mode 600; plain or pbkdf2)',
+             getter=lambda app: app.web_password_file or 'none'),
+    SetParam('web-hosts', '_cmd_web_hosts', '<name>[,<name>]|none',
+             "extra 'Host:' names the web interface answers to",
+             getter=lambda app: app.web_hosts or 'none'),
+    SetParam('web-tls-cert', '_cmd_web_tls_cert', '<file>|none',
+             'TLS certificate for the web interface (key too, if combined)',
+             getter=lambda app: app.web_tls_cert or 'none'),
+    SetParam('web-tls-key', '_cmd_web_tls_key', '<file>|none',
+             'TLS private key, when it is not in the certificate file',
+             getter=lambda app: app.web_tls_key or 'none'),
     SetParam('mux-split', '_cmd_mux_split', ['v', 'h', 'window'],
              'default pane split direction for :mux (v=below h=right window=new)',
              getter=lambda app: app.mux_split),
@@ -1169,6 +1185,9 @@ _HELP_BINDINGS = [
     "  :web \\[start|stop|status]   serve the host list over HTTP, read-only  (no arg reports)",
     "  :set web-listen <host:port> where it binds (default 127.0.0.1:8765; loopback only)",
     "  :set web-allow <cidr>,...   client addresses allowed to connect (default any)",
+    "  :set web-password-file <f>  file with the web password (mode 600); needed off loopback",
+    "  :set web-hosts <name>,...   extra 'Host:' names the web interface answers to",
+    "  :set web-tls-cert <file>    serve HTTPS (:set web-tls-key too, if separate)",
     "  keys: a-z A-Z 0-9   <CR> <Esc> <Space> <C-x>  <Up>/<Down>/<Left>/<Right>",
     "        <PageUp> <PageDown>  za zc zo …  (arbitrary multi-key sequences)",
     "  %h = host  %i = IP  %r = connectable target  %d = SSH dest  %j = jump hosts",
@@ -6750,6 +6769,125 @@ def _kiosk_validate_ssh_args(ssh_args: list) -> str | None:
     return None
 
 
+# ── Web authentication ───────────────────────────────────────────────────────
+#
+# Two credentials, for two different situations.
+#
+# A per-run **token**, generated at ':web start' and printed as a ready-made
+# URL.  Nothing to set up, nothing stored, and it dies with the process — the
+# loopback case, where the operator already had to get onto the machine.
+#
+# A **password file**, for a bind that outlives one run.  The path and its
+# permissions are the operator's, which is the answer to "where would a hash
+# live?": under the kiosk unit's ProtectSystem=strict the config directory is
+# writable by the service and readable by the console user, and that user is
+# precisely who kiosk mode is guarding against.  /etc/<prog>/ is not.
+
+_WEB_SESSION_TTL = 12 * 3600.0      # a browser tab left open overnight
+_WEB_SESSION_MAX = 64               # bound the dict; oldest are dropped first
+_WEB_LOGIN_FAILS = 5                # per client, per window
+_WEB_LOGIN_WINDOW = 60.0
+_WEB_PBKDF2_ROUNDS = 200_000
+_WEB_COOKIE = 'pb_session'
+
+
+def _web_hash_password(password, salt=None, rounds=_WEB_PBKDF2_ROUNDS):
+    """Derive a verifier string from *password*.
+
+    Format: ``pbkdf2_sha256$<rounds>$<salt_b64>$<hash_b64>``.  Self-describing
+    so the cost can be raised later without invalidating what is already
+    written down.
+    """
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'),
+                                 salt, rounds)
+    return 'pbkdf2_sha256${}${}${}'.format(
+        rounds,
+        base64.b64encode(salt).decode('ascii'),
+        base64.b64encode(digest).decode('ascii'))
+
+
+def _web_check_password(stored, password):
+    """Constant-time check of *password* against a verifier from above."""
+    try:
+        scheme, rounds, salt_b64, want_b64 = stored.split('$')
+        if scheme != 'pbkdf2_sha256':
+            return False
+        salt = base64.b64decode(salt_b64)
+        want = base64.b64decode(want_b64)
+        rounds = int(rounds)
+    except (ValueError, TypeError):
+        return False
+    got = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, rounds)
+    return hmac.compare_digest(got, want)
+
+
+def _web_read_password_file(path):
+    """Return a verifier from *path*, or raise ValueError saying why not.
+
+    The file may hold a plain password or an already-derived
+    ``pbkdf2_sha256$…`` string; deriving here means a deployment can keep the
+    plaintext out of the image entirely.
+    """
+    resolved = _resolve_path(path)
+    try:
+        st = os.stat(resolved)
+    except OSError as exc:
+        raise ValueError(f'cannot read {resolved}: {exc}') from None
+    if st.st_mode & 0o077:
+        # Not merely tidy: the point of the file is that the local user cannot
+        # read it.  Refusing is better than a password everyone already has.
+        raise ValueError(f'{resolved} is group- or world-readable '
+                         f'({oct(st.st_mode & 0o777)}); chmod 600 it')
+    try:
+        with open(resolved, encoding='utf-8') as f:
+            text = f.read().strip()
+    except OSError as exc:
+        raise ValueError(f'cannot read {resolved}: {exc}') from None
+    if not text:
+        raise ValueError(f'{resolved} is empty')
+    if text.startswith('pbkdf2_sha256$'):
+        return text
+    return _web_hash_password(text)
+
+
+class _WebLoginGate:
+    """Refuse repeated failures per client, without sleeping.
+
+    Deliberately *not* _ssh_spawn_gate: that one paces by sleeping, which is
+    right for outbound connections on their own threads and wrong here — a
+    request handler that sleeps is holding one of a bounded number of threads,
+    so throttling that way would hand an attacker the denial of service it is
+    supposed to prevent.  This one answers straight away with 429.
+    """
+
+    def __init__(self, limit=_WEB_LOGIN_FAILS, window=_WEB_LOGIN_WINDOW):
+        self.limit = limit
+        self.window = window
+        self._fails = {}
+        self._lock = threading.Lock()
+
+    def blocked(self, client):
+        now = time.monotonic()
+        with self._lock:
+            recent = [t for t in self._fails.get(client, ()) if now - t < self.window]
+            if recent:
+                self._fails[client] = recent
+            else:
+                self._fails.pop(client, None)
+            return len(recent) >= self.limit
+
+    def record_failure(self, client):
+        now = time.monotonic()
+        with self._lock:
+            self._fails.setdefault(client, []).append(now)
+
+    def clear(self, client):
+        with self._lock:
+            self._fails.pop(client, None)
+
+
 # ── Web interface ────────────────────────────────────────────────────────────
 #
 # One HTTP thread inside this process, reading the same live state the curses
@@ -6859,6 +6997,12 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             self.request.settimeout(_WEB_SOCKET_TIMEOUT)
         except OSError:
             pass
+        ctx = getattr(self.server, 'tls_context', None)
+        if ctx is not None:
+            # Handshake here, on the worker thread, not in get_request(): in
+            # the accept loop one slow client would stall every other
+            # connection waiting to be accepted.
+            self.request = ctx.wrap_socket(self.request, server_side=True)
         super().setup()
 
     def log_message(self, fmt, *args):
@@ -6870,15 +7014,96 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _send(self, status, body=b'', ctype='text/plain; charset=utf-8'):
+    def _send(self, status, body=b'', ctype='text/plain; charset=utf-8',
+              extra=()):
         self.send_response(status)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
         for name, value in _WEB_SECURITY_HEADERS:
             self.send_header(name, value)
+        for name, value in extra:
+            self.send_header(name, value)
         self.end_headers()
         if body and self.command != 'HEAD':
             self.wfile.write(body)
+
+    def _cookie(self, name):
+        """One cookie value, parsed by hand.
+
+        http.cookies is lenient in ways that are awkward to reason about here
+        and this needs exactly one opaque token.
+        """
+        for part in (self.headers.get('Cookie') or '').split(';'):
+            key, _, value = part.strip().partition('=')
+            if key == name:
+                return value.strip('"')
+        return ''
+
+    def _set_session_cookie(self, sid):
+        flags = [f'{_WEB_COOKIE}={sid}', 'Path=/', 'HttpOnly',
+                 'SameSite=Strict', f'Max-Age={int(_WEB_SESSION_TTL)}']
+        if self.server.is_tls:
+            flags.append('Secure')
+        return ('Set-Cookie', '; '.join(flags))
+
+    def _authenticated(self):
+        return self.server.session_valid(self._cookie(_WEB_COOKIE))
+
+    @staticmethod
+    def _query_token(query):
+        for part in query.split('&'):
+            key, _, value = part.partition('=')
+            if key == 't':
+                return urllib.parse.unquote(value)
+        return ''
+
+    def _read_json_body(self):
+        """Parse a JSON body, refusing anything that is not one.
+
+        The content-type check is a CSRF control, not politeness: a form post
+        from another origin can only send the three 'simple' types, so
+        requiring application/json forces a preflight that a foreign page
+        cannot satisfy.
+        """
+        ctype = (self.headers.get('Content-Type') or '').split(';')[0].strip()
+        if ctype != 'application/json':
+            raise ValueError('expected Content-Type: application/json')
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            raise ValueError('bad Content-Length') from None
+        if length <= 0 or length > _WEB_MAX_BODY:
+            raise ValueError('body missing or too large')
+        try:
+            return json.loads(self.rfile.read(length).decode('utf-8'))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError(f'bad JSON: {exc}') from None
+
+    def _do_login(self):
+        client = self.client_address[0]
+        gate = self.server.login_gate
+        if gate.blocked(client):
+            self._send(429, b'too many attempts; wait a minute\n')
+            return
+        try:
+            payload = self._read_json_body()
+            password = str(payload.get('password', ''))
+        except ValueError as exc:
+            self._send(400, f'{exc}\n'.encode('utf-8'))
+            return
+        stored = self.server.password_hash
+        ok = bool(stored) and _web_check_password(stored, password)
+        if not ok:
+            gate.record_failure(client)
+            self.server.app.add_event(
+                'web', f'web: failed login from {client}', level=LEVEL_NORMAL)
+            self._send(401, b'wrong password\n')
+            return
+        gate.clear(client)
+        sid = self.server.new_session()
+        self.server.app.add_event('web', f'web: login from {client}',
+                                  level=LEVEL_NORMAL)
+        self._send(204, b'', 'text/plain', extra=[self._set_session_cookie(sid)])
 
     # ── gates, cheapest first ────────────────────────────────────────────
     def _client_allowed(self):
@@ -6915,9 +7140,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         self._handle()
 
     def do_POST(self):
-        # Writes arrive in a later phase; refusing now keeps the read-only
-        # promise true rather than merely intended.
-        self._send(405, b'read-only\n')
+        self._handle()
 
     def _handle(self):
         try:
@@ -6927,10 +7150,33 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             if not self._host_header_ok():
                 self._send(421, b'unexpected Host header\n')
                 return
-            path = self.path.split('?', 1)[0]
+            path, _, query = self.path.partition('?')
             app = self.server.app
             self.server.note_client(self.client_address[0])
+
+            if self.command == 'POST':
+                if path == '/api/login':
+                    self._do_login()
+                else:
+                    # Writes arrive in a later phase; refusing now keeps the
+                    # read-only promise true rather than merely intended.
+                    self._send(405, b'read-only\n')
+                return
+
+            # The page and its assets carry no data, so they are served
+            # unauthenticated — otherwise there would be nowhere to type the
+            # password.  Everything that *is* data sits behind the session.
             if path == '/':
+                token = self._query_token(query)
+                if token and hmac.compare_digest(token, self.server.token):
+                    # A one-shot link: swap the token for a session and drop
+                    # it from the URL, so it stops living in history, in the
+                    # title bar and in any Referer.
+                    sid = self.server.new_session()
+                    self._send(303, b'', 'text/plain',
+                               extra=[self._set_session_cookie(sid),
+                                      ('Location', '/')])
+                    return
                 self._send(200, _WEB_HTML.encode('utf-8'),
                            'text/html; charset=utf-8')
             elif path == '/static/app.css':
@@ -6940,6 +7186,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, _WEB_JS.encode('utf-8'),
                            'application/javascript; charset=utf-8')
             elif path == '/api/state':
+                if not self._authenticated():
+                    self._send(401, b'{"error":"login required"}',
+                               'application/json; charset=utf-8')
+                    return
                 body = Application._web_json(app._web_state())
                 self._send(200, body, 'application/json; charset=utf-8')
             else:
@@ -6971,15 +7221,53 @@ class _WebServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 16
 
-    def __init__(self, addr, app, allow_nets, allowed_hosts):
+    def __init__(self, addr, app, allow_nets, allowed_hosts,
+                 password_hash=None, tls_context=None):
         self.app = app
+        self.tls_context = tls_context
+        self.is_tls = tls_context is not None
         self.allow_nets = allow_nets
         self.allowed_hosts = allowed_hosts
+        self.password_hash = password_hash
+        # Regenerated every start, never written down.  ':web start' prints it
+        # as a whole URL, so the loopback case needs no setup at all.
+        self.token = secrets.token_urlsafe(24)
+        self.sessions = {}
+        self.login_gate = _WebLoginGate()
         self.last_client = None
         self.request_count = 0
         self._active = 0
         self._active_lock = threading.Lock()
+        self._session_lock = threading.Lock()
         super().__init__(addr, _WebHandler)
+
+    def new_session(self):
+        """Mint a session id and forget the oldest if there are too many."""
+        sid = secrets.token_urlsafe(24)
+        now = time.monotonic()
+        with self._session_lock:
+            for old, expiry in list(self.sessions.items()):
+                if expiry <= now:
+                    del self.sessions[old]
+            while len(self.sessions) >= _WEB_SESSION_MAX:
+                del self.sessions[min(self.sessions, key=self.sessions.get)]
+            self.sessions[sid] = now + _WEB_SESSION_TTL
+        return sid
+
+    def session_valid(self, sid):
+        if not sid:
+            return False
+        now = time.monotonic()
+        with self._session_lock:
+            # Compared in constant time against each live id: a plain dict
+            # lookup leaks by timing how much of a guess matched.
+            for known, expiry in list(self.sessions.items()):
+                if expiry <= now:
+                    del self.sessions[known]
+                    continue
+                if hmac.compare_digest(known, sid):
+                    return True
+        return False
 
     def note_client(self, addr):
         self.last_client = addr
@@ -7002,7 +7290,9 @@ class _WebServer(http.server.ThreadingHTTPServer):
         """Base class prints a traceback to stderr; under curses that is lost."""
         exc = sys.exc_info()[1]
         if isinstance(exc, (BrokenPipeError, ConnectionResetError,
-                            socket.timeout)):
+                            socket.timeout, ssl.SSLError)):
+            # A browser that speaks http:// to an https:// port, or simply
+            # leaves, is not an event worth logging once per attempt.
             return
         try:
             self.app.add_event('web',
@@ -7026,6 +7316,15 @@ _WEB_HTML = """<!DOCTYPE html>
   <h1>ping-bulk</h1>
   <div id="summary" class="summary">connecting…</div>
 </header>
+<section id="login-wrap" hidden>
+  <h2>Sign in</h2>
+  <form id="login">
+    <input id="password" type="password" autocomplete="current-password"
+           placeholder="password" aria-label="password">
+    <button type="submit">Sign in</button>
+    <span id="login-error" class="login-error"></span>
+  </form>
+</section>
 <section id="down-wrap" hidden>
   <h2>Down now</h2>
   <ul id="down"></ul>
@@ -7061,6 +7360,13 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
      color: var(--dim); margin: 24px 0 8px; font-weight: 600; }
 .summary { color: var(--dim); font-size: 13px; }
 .summary.stale { color: var(--slow); }
+#login { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#login input, #login button {
+  font: inherit; padding: 6px 10px; border-radius: 3px;
+  border: 1px solid var(--line); background: #1b1e26; color: var(--fg);
+}
+#login button { cursor: pointer; border-color: var(--dim); }
+.login-error { color: var(--bad); font-size: 13px; }
 #down { margin: 0; padding: 0; list-style: none;
         border-left: 3px solid var(--bad); }
 #down li { padding: 6px 12px; background: #1b1418; margin-bottom: 2px; }
@@ -7114,6 +7420,10 @@ var downWrap = document.getElementById('down-wrap');
 var downList = document.getElementById('down');
 var rowsEl = document.getElementById('rows');
 var eventsEl = document.getElementById('events');
+var loginWrap = document.getElementById('login-wrap');
+var loginForm = document.getElementById('login');
+var passwordEl = document.getElementById('password');
+var loginError = document.getElementById('login-error');
 
 function glyphClass(ch) {
   if (ch === '.' || (ch >= '0' && ch <= '4')) return 'g-ok';
@@ -7211,13 +7521,48 @@ function render(state) {
     }));
 }
 
+function showLogin(on) {
+  loginWrap.hidden = !on;
+  if (on) { passwordEl.focus(); }
+}
+
+loginForm.addEventListener('submit', function (ev) {
+  ev.preventDefault();
+  loginError.textContent = '';
+  // Content-Type: application/json is deliberate -- it forces a preflight, so
+  // a form on another site cannot post here.
+  fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: passwordEl.value })
+  }).then(function (r) {
+    if (r.ok) {
+      passwordEl.value = '';
+      showLogin(false);
+      poll();
+      return;
+    }
+    loginError.textContent = r.status === 429
+      ? 'too many attempts; wait a minute'
+      : 'wrong password';
+  }).catch(function (err) {
+    loginError.textContent = err.message;
+  });
+});
+
 function poll() {
   fetch('/api/state', { headers: { 'Accept': 'application/json' } })
     .then(function (r) {
+      if (r.status === 401) {
+        showLogin(true);
+        summary.textContent = 'sign in to see the hosts';
+        return null;
+      }
       if (!r.ok) { throw new Error('HTTP ' + r.status); }
+      showLogin(false);
       return r.json();
     })
-    .then(render)
+    .then(function (state) { if (state) { render(state); } })
     .catch(function (err) {
       summary.classList.add('stale');
       summary.textContent = 'not updating: ' + err.message;
@@ -7342,6 +7687,10 @@ class Application:
         # preference file was written.
         self.web_listen = _WEB_DEFAULT_LISTEN
         self.web_allow = ''
+        self.web_password_file = ''
+        self.web_hosts = ''
+        self.web_tls_cert = ''
+        self.web_tls_key = ''
         self._web_server = None
         self._web_thread = None
         self.startup_select = None     # host name to pre-highlight at startup (--select)
@@ -7714,6 +8063,16 @@ class Application:
                     f.write(f":set web-listen {self.web_listen}\n")
                 if self.web_allow:
                     f.write(f":set web-allow {self.web_allow}\n")
+                # The path, never the password: what it contains stays where
+                # the operator put it, under permissions they chose.
+                if self.web_password_file:
+                    f.write(f":set web-password-file {self.web_password_file}\n")
+                if self.web_hosts:
+                    f.write(f":set web-hosts {self.web_hosts}\n")
+                if self.web_tls_cert:
+                    f.write(f":set web-tls-cert {self.web_tls_cert}\n")
+                if self.web_tls_key:
+                    f.write(f":set web-tls-key {self.web_tls_key}\n")
                 if self.late_grace != 1.0:
                     f.write(f":set late-grace {self.late_grace:g}\n")
                 for pattern in self.no_alarm_patterns:
@@ -11752,8 +12111,33 @@ class Application:
             names.add(socket.getfqdn().lower())
         except OSError:
             pass
+        # A non-loopback listener is reached by names this process cannot
+        # guess — a CNAME, a VPN name, whatever the operator typed.  They are
+        # declared rather than inferred, because inferring them would mean
+        # accepting any Host, which is the check itself.
+        names.update(n.strip().lower()
+                     for n in re.split(r'[,\s]+', self.web_hosts or '')
+                     if n.strip())
         names.discard('')
         return names
+
+    def _web_tls_context(self):
+        """Build an SSLContext from the configured cert, or None.
+
+        Raises ValueError with a message worth showing.  The key may live in
+        the cert file; a separate one is only needed when it does not.
+        """
+        if not self.web_tls_cert:
+            return None
+        cert = _resolve_path(self.web_tls_cert)
+        key = _resolve_path(self.web_tls_key) if self.web_tls_key else None
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        try:
+            ctx.load_cert_chain(cert, key)
+        except (OSError, ssl.SSLError) as exc:
+            raise ValueError(f'{cert}: {exc}') from None
+        return ctx
 
     def _web_running(self):
         return getattr(self, '_web_server', None) is not None
@@ -11791,8 +12175,10 @@ class Application:
                                   f'{self.web_listen})', level=LEVEL_NORMAL)
             return
         host, port = server.server_address[:2]
-        parts = [f'web: listening on {host}:{port}',
-                 f'{server.request_count} request(s)']
+        parts = [f'web: listening on '
+                 f'{"https" if server.is_tls else "http"}://{host}:{port}/',
+                 f'{server.request_count} request(s)',
+                 'password login' if server.password_hash else 'token only']
         if server.last_client:
             parts.append(f'last client {server.last_client}')
         if self.web_allow:
@@ -11822,14 +12208,26 @@ class Application:
         except ValueError as exc:
             self.add_event('cmd', f'web: bad web-allow: {exc}')
             return
-        if not _web_is_loopback(host):
-            # Until there is a password, a non-loopback bind would publish the
-            # whole fleet to anyone who can reach the port.  The address is
-            # accepted and remembered; only starting on it is refused.
+        password_hash = None
+        if self.web_password_file:
+            try:
+                password_hash = _web_read_password_file(self.web_password_file)
+            except ValueError as exc:
+                self.add_event('cmd', f'web: web-password-file: {exc}')
+                return
+        if not _web_is_loopback(host) and password_hash is None:
+            # A per-run token dies with the process, which is fine for a
+            # tunnel and useless for a listener other machines come back to.
             self.add_event('cmd',
-                           f'web: refusing to listen on {host} — only '
-                           'loopback is supported so far; reach it with '
-                           f'"ssh -L {port}:localhost:{port} <this host>"')
+                           f'web: refusing to listen on {host} without a '
+                           'password — set ":set web-password-file <path>" '
+                           f'first, or bind loopback and use "ssh -L '
+                           f'{port}:localhost:{port} <this host>"')
+            return
+        try:
+            tls_context = self._web_tls_context()
+        except ValueError as exc:
+            self.add_event('cmd', f'web: web-tls-cert: {exc}')
             return
         # Port 0 asks the kernel to pick, and it picks an ephemeral one well
         # above 1024 — so it is not the privileged case this rejects.
@@ -11841,15 +12239,32 @@ class Application:
             return
         try:
             server = _WebServer((host, port), self, allow_nets,
-                                self._web_allowed_hosts(host))
+                                self._web_allowed_hosts(host),
+                                password_hash=password_hash,
+                                tls_context=tls_context)
         except OSError as exc:
             self.add_event('cmd', f'web: cannot listen on {host}:{port}: {exc}')
             return
         self._web_server = server
         self._web_thread = _spawn(server.serve_forever, 'web')
         bound_host, bound_port = server.server_address[:2]
-        self.add_event('web', f'web: listening on http://{bound_host}:'
-                              f'{bound_port}/ (read-only)', level=LEVEL_NORMAL)
+        scheme = 'https' if tls_context is not None else 'http'
+        # The whole URL, token and all: nothing to configure for the common
+        # case, and the token then leaves the address bar on first use.
+        self.add_event('web',
+                       f'web: listening on {scheme}://{bound_host}:'
+                       f'{bound_port}/?t={server.token} (read-only)',
+                       level=LEVEL_NORMAL)
+        if password_hash is not None:
+            self.add_event('web', 'web: password login is also enabled',
+                           level=LEVEL_INFO)
+        if not _web_is_loopback(bound_host) and tls_context is None:
+            self.add_event('warn',
+                           'warning: web is listening on '
+                           f'{bound_host} without TLS — the password and '
+                           'every reading cross the network in clear; set '
+                           '":set web-tls-cert" or put a reverse proxy '
+                           'in front')
         if self.kiosk_mode:
             self._kiosk_audit('web-start', f'{bound_host}:{bound_port}')
 
@@ -11896,6 +12311,78 @@ class Application:
             # Rebind rather than leave the setting and the socket disagreeing.
             self._web_stop(quiet=True)
             self._web_start()
+
+    def _cmd_web_password_file(self, args=''):
+        """:set web-password-file <path> — where the web password lives.
+
+        The file holds either a plain password or an already-derived
+        'pbkdf2_sha256$…' verifier, and must not be group- or world-readable.
+        It is read at ':web start', never stored in the config, and never
+        echoed: the point of keeping it out of the config file is that under
+        the kiosk unit the config directory is readable by the console user,
+        who is exactly who kiosk mode guards against.
+        """
+        if self._handle_param_verb('web-password-file', args):
+            return
+        value = args.strip()
+        if value.lower() in ('none', 'off', '-'):
+            self.web_password_file = ''
+            if self._monitoring_started:
+                self.add_event('config', 'web-password-file: none')
+            return
+        try:
+            _web_read_password_file(value)
+        except ValueError as exc:
+            self.add_event('cmd', f'web-password-file: {exc}')
+            return
+        self.web_password_file = value
+        if self._monitoring_started:
+            self.add_event('config', f'web-password-file: {value}')
+
+    def _cmd_web_hosts(self, args=''):
+        """:set web-hosts <name>[,<name>…] — extra Host: names to answer to.
+
+        Only needed for a non-loopback bind: the defaults already cover
+        localhost, the bind address and this machine's own name.  Declared
+        rather than inferred, because accepting any Host is the same as not
+        checking it — see the note on DNS rebinding.
+        """
+        if self._handle_param_verb('web-hosts', args):
+            return
+        value = args.strip()
+        if value.lower() in ('none', 'off', '-'):
+            value = ''
+        self.web_hosts = ' '.join(
+            n for n in re.split(r'[,\s]+', value) if n)
+        if self._monitoring_started:
+            self.add_event('config',
+                           f'web-hosts: {self.web_hosts or "(defaults only)"}')
+        server = getattr(self, '_web_server', None)
+        if server is not None:
+            host = server.server_address[0]
+            server.allowed_hosts = self._web_allowed_hosts(host)
+
+    def _cmd_web_tls_cert(self, args=''):
+        """:set web-tls-cert <file> — certificate (and key, if combined)."""
+        if self._handle_param_verb('web-tls-cert', args):
+            return
+        value = args.strip()
+        self.web_tls_cert = '' if value.lower() in ('none', 'off', '-') else value
+        if self._monitoring_started:
+            self.add_event('config',
+                           f'web-tls-cert: {self.web_tls_cert or "none"} '
+                           '(applies at the next ":web start")')
+
+    def _cmd_web_tls_key(self, args=''):
+        """:set web-tls-key <file> — private key, when not in the cert file."""
+        if self._handle_param_verb('web-tls-key', args):
+            return
+        value = args.strip()
+        self.web_tls_key = '' if value.lower() in ('none', 'off', '-') else value
+        if self._monitoring_started:
+            self.add_event('config',
+                           f'web-tls-key: {self.web_tls_key or "none"} '
+                           '(applies at the next ":web start")')
 
     def _cmd_web_allow(self, args=''):
         """:set web-allow <cidr>[,<cidr>…] — who may connect at all.

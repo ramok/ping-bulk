@@ -575,6 +575,59 @@ Each control below answers a specific way it could go wrong.
   actually runs under systemd. There was no signal handling in this program
   at all before.
 
+### Who may read it
+
+Two credentials, for two situations.
+
+**A per-run token.** Minted at every `:web start`, printed as a whole URL, and
+never written down. `GET /?t=<token>` swaps it for a session cookie and
+answers 303 to `/`, so the token leaves the address bar, the history and any
+`Referer` after one use. This is the loopback case: nothing to configure, and
+the operator already had to get onto the machine to start it.
+
+**A password file.** `:set web-password-file <path>`, holding either a plain
+password or a `pbkdf2_sha256$rounds$salt$hash` verifier. Refused if it is
+group- or world-readable, since the point is that the local user cannot read
+it. **The verifier is never written to the config — only the path is.** That
+is the answer to "where would a hash live?": under the kiosk unit
+`ProtectSystem=strict` leaves the config directory writable by the service and
+readable by the console user, and that user is exactly who kiosk mode guards
+against. `/etc/<prog>/` is not.
+
+**A non-loopback bind requires the password file**, because a token that dies
+with the process is useless to a listener other machines keep returning to.
+The refusal happens before the bind, so it is a policy and not an accident of
+which addresses happen to be local.
+
+**The page is served without a session; the data is not.** `/` and `/static/*`
+carry nothing, and there has to be somewhere to type the password.
+`/api/state` returns 401 and the client shows a login form.
+
+**`Content-Type: application/json` is required on `POST /api/login`.** That is
+a CSRF control, not politeness: a form on another site can only send the three
+"simple" content types, so requiring JSON forces a preflight it cannot
+satisfy. Together with the `Host` pin and `SameSite=Strict`, a foreign page
+cannot drive this.
+
+**The login throttle refuses; it does not sleep.** Five failures per client
+per minute, then 429 — and a *correct* password is refused too while blocked,
+or the throttle becomes an oracle for "that guess was close". Deliberately
+**not** `_ssh_spawn_gate`, which paces by sleeping: that is right for outbound
+connections on their own threads and wrong in a request handler, where
+sleeping holds one of a bounded number of threads and hands an attacker the
+denial of service the limit exists to prevent.
+
+**Sessions are compared in constant time** (`hmac.compare_digest` against each
+live id, not a dict lookup, which leaks by timing how much of a guess
+matched), expire after 12 hours, and are capped so the dict cannot grow.
+
+**TLS is optional and handshakes on the worker thread**, not in `get_request`:
+in the accept loop one slow client would stall every connection waiting to be
+accepted. A non-loopback bind without it warns every time, because the
+password and every reading then cross the network in clear. For anything
+beyond a small trusted network, bind loopback and put a real reverse proxy in
+front — that advice has not changed.
+
 **Kiosk mode: declared, never typed.** `:web start` is refused at the console
 and allowed while `_loading_file` is set — the rule `:probe-source` already
 follows. Starting is audited. A port below 1024 is refused with the reason
