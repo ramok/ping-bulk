@@ -64,12 +64,33 @@ One command supplies every value; each value declares how it is displayed:
 
 ```text
 # one round trip carries all parameters
-:probe-source --cmd '/usr/local/bin/pb-probe' --interval 60
+:probe-source --cmd '/usr/local/bin/pb-probe' --interval 60 --hosts '*-nuc'
 
 # per-value display metadata
 :probe temp --unit °C  --range 20:90   --warn 70 --crit 85
 :probe rpm  --unit rpm --range 0:5000
+:probe gps  --unit s   --range 0:5     --label GPS
 ```
+
+Three later additions, each answering something the first cut could not:
+
+- **`--hosts <globs>`** — which hosts run the command at all. Undeclared keys
+  were always ignored, but that is a display filter: the connection is opened
+  either way, so a file mixing Linux boards, routers and cameras opened one to
+  every host and the ones with no shell each held a failing connection on a
+  backoff loop for the life of the run.
+- **`--script <local file>`** — the alternative to `--cmd`, for when nothing is
+  installed on the hosts. Its contents are carried inside the remote command as
+  base64 and decoded once per connection into a shell variable; nothing is
+  written to the host. Base64 rather than inline shell because a hosts file
+  expands `$name` at parse time and reads `$1` as a `:for` backreference, which
+  empties or rewrites most of a real script before it is ever sent.
+- **`--label TEXT`** — the column header, which otherwise is the name with its
+  first letter capitalised. That suits `temp`; it heads a `gps` column `Gps`.
+
+The login is the host's own `:prog-options ssh` rule, so a site records it once
+for `:mux`, `[c]` and the probe alike, and `--disable` there means no probe
+connection either.
 
 The remote command prints one `key=value` per line:
 
@@ -272,11 +293,18 @@ On top of that, the script a kiosk deployment names is verified rather than
 assumed: a regular file, not group- or world-writable, with no
 group/other-writable directory on the path to it -- a writable parent lets the
 file be swapped wholesale. This is what `ssh` does for a private key and `sudo`
-for sudoers. Only the first token can be ownership-checked, so a kiosk probe
-must be a script rather than a shell pipeline, and `;`, `|`, `&`, backticks,
-`$`, and redirections are refused outright in the command — otherwise
+for sudoers. Only the first token of a `--cmd` can be ownership-checked, so a
+kiosk probe must be a script rather than a shell pipeline, and `;`, `|`, `&`,
+backticks, `$`, and redirections are refused outright in it — otherwise
 `/usr/bin/true; curl … | sh` would pass a check on `/usr/bin/true` and run
 whatever follows on every host.
+
+`--script` is checked the same way, on the **local** file it ships. The
+metacharacter rule does not carry over and must not: the command that reaches
+the host is composed by ping-bulk and contains `|` and `$` by construction, so
+applying it there would refuse every `--script`. The question the rule exists
+to answer is "can the console user choose what runs", and for `--script` that
+is settled by the ownership of the file being read.
 
 The probe connection also carries the same SSH isolation flags as `:mux` and
 `:remote-ping` (`-F none`, `IdentityFile=none`, `ProxyCommand=none`). Without

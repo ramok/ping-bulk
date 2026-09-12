@@ -96,7 +96,7 @@ automatically in kiosk mode.
 | `:log` / `:source` paths | Restricted to `/tmp/`, `~/.local/state/ping-bulk/`, `/etc/ping-bulk/`, and the hosts-file directory |
 | Symlink traversal | Blocked — all path checks use `realpath()` |
 | `:probe` / `:probe-source` | **Interactive use blocked** — probes may only be declared in the hosts file |
-| Probe command | Checked — an absolute path to a regular file that is not group/world-writable, with no writable directory on the path to it; shell metacharacters refused |
+| Probe command | `--cmd`: checked — an absolute path to a regular file that is not group/world-writable, with no writable directory on the path to it; shell metacharacters refused. `--script`: the same ownership check, applied to the **local** file that is shipped (the composed remote command contains `\|` and `$` by construction, so the metacharacter rule cannot apply to it) |
 | Probe SSH connection | Isolated with the same flags as `:mux` (`-F none`, `IdentityFile=none`, `ProxyCommand=none`) |
 | Command audit log | Every `:cmd` dispatch is logged to syslog (`LOG_NOTICE`, facility `DAEMON`) |
 | Session lock | Optional via `lock-after-time` in `ping-bulk-kiosk.tmux.conf` |

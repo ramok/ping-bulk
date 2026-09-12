@@ -1,0 +1,77 @@
+#!/bin/sh
+# ping-bulk ':probe-source' script — GPS health, from gpsd via gpspipe(1).
+#
+# Deploy to each host that has a GPS and declare it in the hosts file:
+#
+#   :probe-source --cmd '/usr/local/bin/pb-probe-gps' --interval 30 \
+#                 --hosts '*-comm-mod'
+#   :probe gps    --unit s --range 0:5  --warn 2 --crit 4
+#   :probe gpsoff --unit s --range 0:10 --warn 2 --crit 5
+#   :probe gpssat          --range 0:32
+#
+# It prints one 'key=value' per line, every key on every round.  A key left
+# out would leave the previous reading standing, which reads as healthy — so a
+# receiver with no fix says so explicitly rather than falling silent.
+#
+#   gps=<s>      seconds of the sample window with no valid fix.  0 is healthy.
+#                Continuous and higher-is-worse, which is the only shape
+#                ping-bulk's --warn/--crit and its 0-9 history strip can read:
+#                a 1-for-OK flag would need thresholds that redden 0 harder
+#                than 1.  'GPS is ok' is a flat row of 0s.
+#   gpsoff=<s>   |GPS UTC - system clock|, from the $G.RMC date and time
+#                fields.  Catches a receiver that still answers while the
+#                host's own clock has drifted.  'nofix' when there is no fix,
+#                which ping-bulk shows as 'err'.
+#   gpssat=<n>   satellites used in the fix, from $G.GGA.  Informational: no
+#                thresholds, because more is better and the colouring runs the
+#                other way.  'nofix' when there is none.
+#
+# Needs: gpspipe (gpsd-clients), timeout, awk, date -d.  No root.
+
+W=${PB_GPS_WINDOW:-5}
+
+# Sample a second longer than the window being scored.  gpsd cycles at 1 Hz
+# but the sampler starts mid-second, so an exactly-W-second read of a healthy
+# receiver returns W-1 sentences about half the time — which would report a
+# lost second that never happened.
+raw=$(timeout $((W + 1)) gpspipe -r 2>/dev/null)
+now=$(date -u +%s)
+
+# Newest valid RMC (field 3 is 'A' for active, 'V' for void) as an ISO time,
+# plus how many valid ones arrived — one per second, so the count is seconds.
+set -- $(printf '%s\n' "$raw" | awk -F, '
+    /^\$G.RMC,/ && $3 == "A" { n++; t = $2; d = $10 }
+    END {
+        if (d == "")
+            print 0, "-"
+        else
+            printf "%d 20%s-%s-%sT%s:%s:%sZ\n", n,
+                   substr(d,5,2), substr(d,3,2), substr(d,1,2),
+                   substr(t,1,2), substr(t,3,2), substr(t,5,2)
+    }')
+nvalid=$1
+fixtime=$2
+
+sat=$(printf '%s\n' "$raw" | awk -F, '
+    /^\$G.GGA,/ && $7 + 0 > 0 { s = $8 + 0 }
+    END { if (s != "") print s }')
+
+[ "$nvalid" -gt "$W" ] && nvalid=$W
+echo "gps=$((W - nvalid))"
+
+if [ "$fixtime" = "-" ]; then
+    echo "gpsoff=nofix"
+    echo "gpssat=nofix"
+else
+    fixepoch=$(date -u -d "$fixtime" +%s 2>/dev/null)
+    if [ -n "$fixepoch" ]; then
+        off=$((now - fixepoch))
+        [ "$off" -lt 0 ] && off=$((-off))
+        echo "gpsoff=$off"
+    else
+        echo "gpsoff=nofix"
+    fi
+    # A fix with no GGA to read is "could not read it", not zero
+    # satellites — 0 would read as a fix with nothing behind it.
+    echo "gpssat=${sat:-nofix}"
+fi

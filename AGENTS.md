@@ -78,6 +78,45 @@ The repository is structured to keep the core application as a single deployable
   becomes reachable. `tests/test_history_scan_bounded.py` asserts the *read
   budget* rather than a wall-clock ratio; at 0.07 ms a timing assertion
   measures noise and would flake under `-n auto`.
+- **Phase 19 (probes choose their hosts, their login, and bring their own
+  script)**: `:probe-source` opened a connection to *every* monitored host and
+  passed no ssh options, which made it unusable on a real mixed file — 54
+  hosts including cameras and MikroTiks, each authenticating as the local user
+  and the ones with no shell holding a failing connection on a backoff loop for
+  the life of the run. Three additions fix that, and one more was asked for:
+  `--hosts <globs>` (matched like `:no-alarm`, against the name *and* its
+  `:resolv` alias, which is what a `##` label becomes); the host's own
+  `:prog-options ssh` rule now supplies the probe login, with `--disable` there
+  meaning no probe connection either — every other ssh path already respected
+  those rules; `--script <local file>`, which carries the file inside the
+  remote command as base64 so **nothing is installed on the host**; and
+  `:probe --label TEXT` for the column header, since the default capitalises
+  the name and heads a `gps` column `Gps`.
+  **Base64 is not decoration.** Inlining the same shell in `--cmd` was tried
+  first and cannot work: a hosts file expands `$name` at parse time and reads
+  `$1` as a `:for` backreference, so an awk body came back shredded as
+  `probe-source: unknown argument`. A base64 payload has no `$`, quote or
+  backslash, so the hosts parser, `shlex`, `shlex.quote` and the remote shell
+  all pass it through. It is decoded once per connection into `$_pb` and run as
+  `sh -c "$_pb"` — not piped into `sh`, which would spend the script's own
+  stdin, and not written to a temp file, which would need cleanup that a killed
+  ssh never runs. Needs `base64` on the target. A relative `--script` path
+  resolves against the hosts file's directory, falling back to the link
+  target's when that file is a symlink: `:log` uses abspath so a log lands
+  beside the name that was typed, but a log is *written* and a script has to
+  already be there.
+  A `ProxyJump` in a `:prog-options` rule cannot displace a relayed host's own
+  chain, which is placed first — ssh keeps the first value of a repeated
+  option, so no ssh-option parsing is needed to guarantee it (§9a).
+  **Found while using it, and worse than the missing feature**: `:set stats`
+  refuses the *whole* line on one unknown column, and a probe name is unknown
+  until its `:probe` has been read — so a hosts file that names a probe column
+  above its declaration silently lost every column and fell back to the default
+  single `ms` one. The refusal was logged under category `cmd`, which is
+  `LEVEL_INFO`, while the default log level is `LEVEL_NORMAL`, so **nothing
+  appeared on screen at all**; it was reported as "my settings did not survive
+  a restart". It now reports at `LEVEL_NORMAL`, says the previous columns are
+  kept, and names the ordering rule.
 - **Phase 18 (relays that do not run Linux)**: `:remote-ping` works through
   FreeBSD/OPNsense and MikroTik RouterOS relays. Declared with `--os
   auto|linux|freebsd|mikrotik` on the directive or a `:relay-os <glob> <os>`

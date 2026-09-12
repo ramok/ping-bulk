@@ -757,13 +757,52 @@ Key bindings
 ``:bind-key``
     List all user-defined key bindings in the event log.
 
-``:probe-source [--cmd 'CMD'] [--interval SEC] [--retain N] | off``
+``:probe-source [--cmd 'CMD' | --script PATH] [--interval SEC] [--retain N] [--hosts GLOBS] | off``
     Command run on each monitored host that prints one ``key=value`` per
     line.  It is wrapped in a loop on the far side and the SSH connection is
     held open, so one connection per host serves every reading and the
     interval is not a cost decision.  A host reached through a relay is
     probed *through* that relay, since the values belong to the host.
     Default interval 60 s; ``--retain`` bounds the samples kept per host.
+
+    ``--hosts`` limits which hosts run the command, as a comma- or
+    space-separated list of ``fnmatch`` globs matched against the host name
+    and its ':resolv' alias — the same resolution ``:no-alarm`` applies.
+    The default is every host.  Undeclared keys are already ignored, but
+    that is a display filter: the connection is opened either way, so a file
+    describing Linux boards, routers and cameras together needs this to say
+    which of them have a shell at all.  The rest would each hold a failing
+    connection open on a backoff loop for the life of the run.
+
+    The login is the host's own ``:prog-options ssh`` rule, so a site records
+    it once for ``:mux``, ``[c]`` and the probe alike; ``--disable`` there
+    means no probe connection either.  A ``ProxyJump`` in such a rule cannot
+    displace a relayed host's own chain, which is placed first — ssh keeps
+    the first value of a repeated option.
+
+    ``--cmd`` names a command that already exists on the host; ``--script``
+    names a **local** file, whose contents are carried inside the remote
+    command and run there.  Nothing is installed on the host and nothing is
+    left behind: the script is decoded once per connection into a shell
+    variable, not written to disk, so there is no temporary file to clean up
+    when ssh is killed.  The two are alternatives, not a pair.
+
+    A relative ``--script`` path is resolved against the **hosts file's**
+    directory, not the working directory, so a file that names the script
+    beside it works wherever ping-bulk is started from.  A leading ``~``
+    expands as it does for ``:log`` and ``:save``.
+
+    The script is carried as base64, which is what makes it safe: the payload
+    has no ``$``, quote or backslash in it, so the hosts-file variable
+    expander, ``shlex`` and the remote shell all pass it through unchanged.
+    Writing the same shell inline in ``--cmd`` cannot work — a hosts file
+    substitutes ``$name`` at parse time and reads ``$1`` as a ``:for``
+    backreference, so most of a real script is emptied or rewritten before it
+    is ever sent.  The target needs ``base64`` (coreutils or busybox); where
+    it is missing, the remote shell's complaint reaches the event log.
+    ``--script`` is capped at 64 KiB, since the whole thing travels as one
+    argument.  In kiosk mode the ownership rules above apply to the local
+    script file.
 
     In kiosk mode this may only be declared in the hosts file, not typed at
     the ``:`` prompt, and the command must be an absolute path to a script
@@ -773,12 +812,21 @@ Key bindings
     be checked.  The connection carries the same SSH isolation flags as
     ``:mux``.
 
-``:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N] [--on-fail retry|give-up]``
+``:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N] [--on-fail retry|give-up] [--label TEXT]``
     Declare how one key from ``:probe-source`` is displayed.  Keys with no
     declaration are ignored, so a single site-wide script can serve hosts
     that show different subsets.  ``--range`` scales the history strip,
     ``--warn``/``--crit`` colour the column and the overlay, and ``--unit``
-    labels both.
+    labels both.  ``--label`` sets the column header, which otherwise is the
+    name with its first letter capitalised — that suits ``temp`` and not an
+    acronym, where ``gps`` would head a column ``Gps``.  The label is
+    presentation only: ``:set stats`` and ``:set ping-view`` still take the
+    name the probe command emits.
+
+    **Declare a probe before the** ``:set stats`` **that names it.**  A hosts
+    file is read top to bottom, and a column that is neither a built-in stat
+    nor an already-declared probe refuses the whole line, leaving the columns
+    as they were.
 
     A probe never changes host status: a host at 95 °C that answers ping is
     still UP.  ``-`` means nothing has been read yet, ``err`` means the read

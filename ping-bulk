@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import ctypes
 import ctypes.util
 import curses
@@ -1066,11 +1067,18 @@ _HELP_CMDS_HOSTSFILE = [
     "                            an exact host name beats any glob, whatever the order;",
     "                            among rules of the same kind the last match wins",
     "",
-    "  :probe-source --cmd '<cmd>' \\[--interval SEC] \\[--retain N]",
+    "  :probe-source --cmd '<cmd>'|--script <file> \\[--interval SEC] \\[--retain N] \\[--hosts GLOBS]",
     "                            command run on each host printing key=value lines",
     "                            one SSH connection per host, held open",
-    "  :probe <name> \\[--unit U] \\[--range MIN:MAX] \\[--warn N] \\[--crit N] \\[--on-fail retry|give-up]",
+    "                            --cmd runs a command already on the host;",
+    "                            --script ships a local file (nothing installed),",
+    "                            --hosts limits which hosts run it (default: all);",
+    "                            the login comes from :prog-options ssh, and",
+    "                            --disable there means no probe connection either",
+    "  :probe <name> \\[--unit U] \\[--range MIN:MAX] \\[--warn N] \\[--crit N] \\[--on-fail retry|give-up] \\[--label TEXT]",
     "                            declare how one key is displayed; undeclared keys ignored",
+    "                            --label sets the column header ('gps' heads 'Gps' otherwise);",
+    "                            declare a probe BEFORE the :set stats that names it",
     "                            show it: :set stats <name> | :set ping-view <name> | \\[Enter] on a host",
     "",
     "  :with remote-ping \\[--os <os>] \\[ssh-opts] <relay>  open block; host lines → :remote-ping commands",
@@ -1332,9 +1340,22 @@ example.com:443
 # One command runs on each host and prints 'key=value' lines; the SSH
 # connection is held open, so the interval costs nothing.  Keys with no :probe
 # declaration are ignored, so one script can serve hosts showing different
-# subsets.  Commented out: it would open a connection per host.
-# :probe-source --cmd '/usr/local/bin/pb-probe' --interval 60
+# subsets.  Commented out: it opens a connection per matching host.
+# :probe-source --cmd '/usr/local/bin/pb-probe' --interval 60 --hosts '*-nuc,*-jetson'
 # :probe temp --unit °C --range 20:90 --warn 70 --crit 85
+#
+# '--hosts' says which hosts can run the command; without it, every host gets a
+# connection, and the ones with no shell (a camera, a switch) each hold a
+# failing one open on a backoff loop.  The login is the host's own
+# ':prog-options ssh' rule, and '--disable' there means no probe either.
+#
+# '--script' ships a LOCAL file instead, so nothing has to be installed on the
+# hosts — it travels inside the remote command as base64 and never touches
+# their disks.  A relative path is taken from this file's own directory:
+# :probe-source --script bin/pb-probe --interval 60 --hosts '*-nuc'
+# Do not try to inline the same shell into --cmd: a hosts file expands '$name'
+# and reads '$1' as a :for backreference, so a real script is shredded here
+# before it is ever sent.
 #
 # The value shows up three ways:
 #   :set stats temp        — a column with the latest value
@@ -2378,6 +2399,13 @@ def _probe_char(value, vmin, vmax):
     return str(min(9, int(step * 10)))
 
 
+# A ':probe-source --script' is base64'd into one argv element, which grows it
+# by 4/3 and is bounded by the kernel's total argv+env limit.  A probe script is
+# a few dozen lines; anything approaching this is a mistake worth naming, rather
+# than an E2BIG from Popen once per reconnect inside a backoff loop.
+_PROBE_SCRIPT_MAX = 64 * 1024
+
+
 class ProbeDef:
     """Display metadata for one custom probe value, from ':probe <name> ...'.
 
@@ -2391,10 +2419,12 @@ class ProbeDef:
                  'on_fail')
 
     def __init__(self, name, unit='', vmin=None, vmax=None,
-                 warn=None, crit=None, on_fail='retry'):
+                 warn=None, crit=None, on_fail='retry', label=None):
         self.name = name
-        # Column header: the name as written, capitalised like the built-ins.
-        self.label = name[:1].upper() + name[1:]
+        # Column header: ':probe --label' as written, else the name capitalised
+        # like the built-ins.  The default cannot serve an acronym — 'gps'
+        # becomes 'Gps', and a header is read as a word, not a sentence.
+        self.label = label or (name[:1].upper() + name[1:])
         self.unit = unit
         self.vmin = vmin
         self.vmax = vmax
@@ -3401,9 +3431,12 @@ class ProbeReader(_PipeReaderLoop):
     _child_label = 'probe reader'
 
     def __init__(self, monitor, source_cmd, interval, defs, retain,
-                 ssh_args=None, kiosk_mode=False):
+                 ssh_args=None, kiosk_mode=False, script=None):
         self.monitor = monitor
         self.source_cmd = source_cmd
+        # The text of a ':probe-source --script', or None when '--cmd' named a
+        # command that already exists on the host.
+        self.script = script
         self.interval = float(interval)
         self.defs = defs
         self.retain = int(retain)
@@ -3418,9 +3451,47 @@ class ProbeReader(_PipeReaderLoop):
 
     # ── command ─────────────────────────────────────────────────────────────
 
+    def _round_cmd(self):
+        """What one round runs on the host: a named command, or a shipped script.
+
+        A ':probe-source --script' is carried inside the remote command as
+        base64 and decoded once per connection, so nothing is installed on the
+        host and nothing is left behind.  Base64 is the point: the payload is
+        alphanumeric plus '+/=', with no '$', quote or backslash in it, so it
+        survives the hosts-file variable expander, shlex, shlex.quote and the
+        remote shell alike.  Writing the script inline as shell instead cannot:
+        a hosts file substitutes '$name' at parse time and reads '$1' as a ':for'
+        backreference, which empties or rewrites most of a real script.
+
+        Decoded into $_pb rather than a temp file: no mktemp, no cleanup to get
+        wrong when ssh is killed, and nothing on a read-only or full /tmp.  Run
+        as 'sh -c "$_pb"' rather than piped into sh, which would spend the
+        script's own stdin on the script itself.
+
+        Needs 'base64' on the target (coreutils or busybox).  Where it is
+        missing the remote shell says so on stderr, which the reader already
+        routes into the event log.
+        """
+        if self.script is None:
+            return self.source_cmd
+        # Decoded once per connection into $_pb, not once per round.
+        return 'sh -c "$_pb"'
+
+    def _loop_preamble(self):
+        """Shell run once when the connection opens, before the round loop."""
+        if self.script is None:
+            return ''
+        blob = base64.b64encode(self.script.encode('utf-8')).decode('ascii')
+        return f'_pb=$(echo {blob} | base64 -d) || exit 1; '
+
     def _build_cmd(self):
-        """ssh <host> sh -c 'while :; do <cmd>; echo ---; sleep N; done'"""
-        loop = (f"while :; do {self.source_cmd}; echo ---; "
+        """ssh <host> sh -c '[<preamble>] while :; do <cmd>; echo ---; sleep N; done'
+
+        The preamble is empty for '--cmd' and decodes the shipped script once
+        per connection for '--script' (see _round_cmd / _loop_preamble).
+        """
+        loop = (f"{self._loop_preamble()}"
+                f"while :; do {self._round_cmd()}; echo ---; "
                 f"sleep {self.interval:g}; done")
         # The login shell parses whatever ssh sends, and `while` is Bourne
         # syntax: a FreeBSD root logs in with csh, which rejects the loop
@@ -6686,6 +6757,19 @@ class Application:
         self.probe_defs: dict = {}     # probe name → ProbeDef (':probe')
         self.probe_readers: list = []  # one ProbeReader per host, while running
         self.probe_source = None       # command run on each host (':probe-source')
+        # Which hosts run it ('--hosts'), as fnmatch globs; ['*'] is every
+        # host, which is what an undeclared flag means.  A probe source is a
+        # persistent SSH connection per host, so a site whose file mixes
+        # cameras, MikroTiks and Linux boards cannot afford one everywhere:
+        # the hosts that cannot serve the command would each hold a failing
+        # connection open on a backoff loop forever.
+        self.probe_hosts: list = ['*']
+        # ':probe-source --script': the script's text, shipped to the host
+        # inside the remote command instead of being installed there.  The
+        # text, not the path, because that is what the readers actually run --
+        # an ':edit' that changes the file has to restart them.
+        self.probe_script = None
+        self.probe_script_path = None
         self.probe_interval = 60.0     # seconds between readings
         self.probe_retain = 1440       # samples kept per probe per host
         self._mux_from_binding = False  # True while executing commands from a key binding
@@ -7434,8 +7518,75 @@ class Application:
         # Check for state changes
         _spawn(self.check_state_changes, 'state-loop')
 
+    def _probe_script_path(self, path):
+        """Resolve a ':probe-source --script' path.
+
+        A leading '~' expands as it does for every other path command.  A
+        *relative* path is taken relative to the hosts file's directory, not the
+        working directory: a hosts file names the script that sits beside it,
+        and resolving against the cwd would make the same file work or silently
+        read nothing depending on where ping-bulk was started from — the shape
+        of the ':log ~/x.log' bug, where the failure was invisible.  With no
+        hosts file (hosts given as arguments) there is no "beside it", so the
+        cwd is all there is.
+
+        A hosts file reached through a symlink has two directories with a claim
+        to "beside it", and the script lives with the real file: ':log' resolves
+        such a path with abspath so a log lands beside the name that was typed,
+        but a *log* is written and a *script* has to already be there.  So the
+        typed path is tried first, keeping the ':log' reading where it works,
+        and the link target's directory is the fallback rather than a failure —
+        a symlink into a checkout is how these files are normally reached.
+        """
+        path = _resolve_path(path)
+        if os.path.isabs(path) or not self.hosts_file:
+            return path
+        typed = os.path.join(
+            os.path.dirname(os.path.abspath(self.hosts_file)), path)
+        if os.path.exists(typed):
+            return typed
+        real = os.path.join(
+            os.path.dirname(os.path.realpath(self.hosts_file)), path)
+        return real if os.path.exists(real) else typed
+
+    def _probe_reader_args(self, monitor):
+        """SSH arguments for this host's probe connection, or None for no reader.
+
+        None means "do not probe this host at all", for either of two reasons:
+        it is outside ':probe-source --hosts', or ':prog-options ssh' disables
+        ssh for it.  Honouring '--disable' here is the same judgement the rest
+        of the program already makes -- a camera or a streamcaster marked that
+        way has no shell on the far side, and a probe reader is a shell.
+
+        The options are the host's own ':prog-options ssh' rules, which is
+        where a site records how to log in to it ('*-comm-mod -l root').  Every
+        other ssh path ping-bulk opens respects those rules; this one silently
+        did not, so a probe authenticated as the local user and failed on every
+        host whose login differs.
+
+        They are appended, never parsed.  ProbeReader places its own '-J' chain
+        first and ssh keeps the first value of a repeated option, so a relayed
+        host still reaches its target through its relay even if a rule carries a
+        ProxyJump of its own -- and taking ssh options apart at runtime is the
+        mistake AGENTS.md s9a exists to warn about.
+        """
+        if isinstance(monitor, PortMonitor):
+            return None           # no shell on the far side of a TCP check
+        name, alias = self._prog_match_names(monitor)
+        if not any(fnmatch.fnmatch(name, g)
+                   or (alias and fnmatch.fnmatch(alias, g))
+                   for g in self.probe_hosts):
+            return None
+        disabled, opts = self._match_prog_options('ssh', name, alias)
+        if disabled:
+            return None
+        try:
+            return shlex.split(opts) if opts else []
+        except ValueError:
+            return []
+
     def _start_probe_readers(self):
-        """Open one probe connection per host, when probes are configured.
+        """Open one probe connection per matching host, when probes are configured.
 
         Nothing is started unless both a source command and at least one
         ':probe' declaration exist — an undeclared source would open a
@@ -7444,11 +7595,13 @@ class Application:
         if not self.probe_source or not self.probe_defs:
             return
         for monitor in self.monitors:
-            if isinstance(monitor, PortMonitor):
-                continue          # no shell on the far side of a TCP check
+            ssh_args = self._probe_reader_args(monitor)
+            if ssh_args is None:
+                continue
             reader = ProbeReader(monitor, self.probe_source, self.probe_interval,
                                  self.probe_defs, self.probe_retain,
-                                 kiosk_mode=self.kiosk_mode)
+                                 ssh_args=ssh_args, kiosk_mode=self.kiosk_mode,
+                                 script=self.probe_script)
             self.probe_readers.append(reader)
             self.threads.append(
                 _spawn(reader.run, f'probe:{monitor.host}'))
@@ -12449,17 +12602,31 @@ class Application:
                 monitor._request_respawn()
 
     def _cmd_probe_source(self, args=''):
-        """:probe-source --cmd '<command>' [--interval <seconds>]
+        """:probe-source --cmd '<cmd>' | --script <file>
+                       [--interval <seconds>] [--hosts <globs>] [--retain <n>]
+
+        '--cmd' names a command that already exists on the host; '--script'
+        names a local file whose contents are carried to it.  They are
+        alternatives.
 
         The command runs on each monitored host and prints one 'key=value' per
         line.  A single command supplies every probe, so one round trip per
         interval carries all of them.
+
+        '--hosts' limits which hosts run it.  Keys with no ':probe' are already
+        ignored, so one script can serve hosts that display different subsets --
+        but that is a display filter, and the connection is opened either way.
+        A file describing cameras, MikroTiks and Linux boards needs to say which
+        of them can run the command at all, or the rest each hold a failing SSH
+        connection open on a backoff loop for the life of the run.
         """
         if not args:
             if self.probe_source:
+                scope = ('' if self.probe_hosts == ['*']
+                         else " on " + ','.join(self.probe_hosts))
                 self.add_event("probe",
                     f"probe-source: {self.probe_source} "
-                    f"every {self.probe_interval:g}s")
+                    f"every {self.probe_interval:g}s{scope}")
             else:
                 self.add_event("probe", "probe-source: not set")
             return
@@ -12469,12 +12636,28 @@ class Application:
             self.add_event("cmd", f"probe-source: {e}")
             return
         cmd = None
+        script_path = None
         interval = self.probe_interval
+        # Absent '--hosts' means every host, not "keep what the last call said".
+        # ':probe-source' requires '--cmd' on every invocation, so a call always
+        # restates the whole declaration -- carrying the scope over would make a
+        # re-read of an edited file depend on what the previous read contained.
+        hosts = ['*']
         i = 0
         while i < len(tokens):
             t = tokens[i]
             if t == '--cmd' and i + 1 < len(tokens):
                 cmd = tokens[i + 1]
+                i += 2
+            elif t == '--script' and i + 1 < len(tokens):
+                script_path = tokens[i + 1]
+                i += 2
+            elif t == '--hosts' and i + 1 < len(tokens):
+                hosts = [g for g in tokens[i + 1].replace(',', ' ').split() if g]
+                if not hosts:
+                    self.add_event("cmd",
+                        "probe-source: --hosts needs at least one host or glob")
+                    return
                 i += 2
             elif t == '--interval' and i + 1 < len(tokens):
                 try:
@@ -12501,15 +12684,56 @@ class Application:
                 i += 2
             elif t == 'off':
                 self.probe_source = None
+                self.probe_script = None
+                self.probe_script_path = None
                 self.add_event("probe", "probe-source: disabled")
                 return
             else:
                 self.add_event("cmd", f"probe-source: unknown argument {t!r}")
                 return
-        if cmd is None:
-            self.add_event("cmd", "probe-source: missing --cmd")
+        if cmd is not None and script_path is not None:
+            self.add_event("cmd",
+                "probe-source: --cmd and --script are alternatives — --cmd "
+                "names a command already on the host, --script ships a local "
+                "file to it")
             return
-        if self.kiosk_mode:
+        if cmd is None and script_path is None:
+            self.add_event("cmd", "probe-source: missing --cmd or --script")
+            return
+        script = None
+        if script_path is not None:
+            script_path = self._probe_script_path(script_path)
+            if self.kiosk_mode:
+                # The thing this check protects is "can the console user choose
+                # what runs".  For '--script' that is the local file's
+                # ownership, which is the same test '--cmd' applies to the
+                # command it names — not the composed remote one-liner, whose
+                # '|' and '$' every metacharacter rule would refuse.
+                if self._monitoring_started:
+                    self.add_event("cmd",
+                        "probe-source: not allowed interactively in kiosk mode — "
+                        "declare it in the hosts file")
+                    return
+                if not self._kiosk_probe_cmd_allowed(script_path):
+                    return
+            try:
+                with open(script_path, 'r', encoding='utf-8') as f:
+                    script = f.read(_PROBE_SCRIPT_MAX + 1)
+            except OSError as e:
+                self.add_event("cmd", f"probe-source: --script {script_path}: {e}")
+                return
+            if len(script) > _PROBE_SCRIPT_MAX:
+                self.add_event("cmd",
+                    f"probe-source: --script {script_path} is larger than "
+                    f"{_PROBE_SCRIPT_MAX // 1024} KiB — it is carried inside the "
+                    f"remote command, not installed on the host")
+                return
+            if not script.strip():
+                self.add_event("cmd",
+                    f"probe-source: --script {script_path} is empty")
+                return
+            cmd = script_path        # what the reports and the kiosk log name
+        if self.kiosk_mode and script is None:
             # A probe runs a command of someone's choosing on every monitored
             # host.  In kiosk mode the console user is the adversary, so the
             # declaration has to come from the admin-owned hosts file rather
@@ -12522,14 +12746,19 @@ class Application:
             if not self._kiosk_probe_cmd_allowed(cmd):
                 return
         self.probe_source = cmd
+        self.probe_script = script
+        self.probe_script_path = script_path
         self.probe_interval = interval
+        self.probe_hosts = hosts
         if self._monitoring_started:
+            scope = '' if hosts == ['*'] else " on " + ','.join(hosts)
+            how = ' (shipped)' if script is not None else ''
             self.add_event("probe",
-                f"probe-source: {cmd} every {interval:g}s")
+                f"probe-source: {cmd}{how} every {interval:g}s{scope}")
 
     def _cmd_probe(self, args=''):
         """:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N]
-                         [--on-fail retry|give-up]
+                         [--on-fail retry|give-up] [--label TEXT]
 
         Declares how one 'key=value' emitted by :probe-source is displayed.
         Keys with no :probe declaration are ignored, so one site-wide script can
@@ -12567,6 +12796,7 @@ class Application:
                 f"probe: {name!r} is a built-in stat column — choose another name")
             return
         unit, vmin, vmax, warn, crit, on_fail = '', None, None, None, None, 'retry'
+        label = None
         i = 1
         while i < len(tokens):
             t = tokens[i]
@@ -12599,6 +12829,9 @@ class Application:
                 else:
                     crit = val
                 i += 2
+            elif t == '--label' and has_val:
+                label = tokens[i + 1]
+                i += 2
             elif t == '--on-fail' and has_val:
                 val = tokens[i + 1]
                 if val not in ('retry', 'give-up'):
@@ -12611,7 +12844,8 @@ class Application:
                 self.add_event("cmd", f"probe: unknown argument {t!r}")
                 return
         self.probe_defs[name] = ProbeDef(name, unit=unit, vmin=vmin, vmax=vmax,
-                                         warn=warn, crit=crit, on_fail=on_fail)
+                                         warn=warn, crit=crit, on_fail=on_fail,
+                                         label=label)
         if self._monitoring_started:
             self.add_event("probe", f"probe: defined {name}")
 
@@ -12798,20 +13032,38 @@ class Application:
         if not self.probe_source or not self.probe_defs:
             self._stop_probe_readers()
             return
-        live = {id(m) for m in self.monitors}
+        # An adopted monitor is still the same object, but the file may have
+        # narrowed ':probe-source --hosts' or disabled ssh for it, so a live
+        # monitor is not by itself a reason to keep its reader.
+        wanted = {id(m): self._probe_reader_args(m) for m in self.monitors}
         keep, drop = [], []
         for reader in self.probe_readers:
-            (keep if id(reader.monitor) in live else drop).append(reader)
+            # The command a reader runs is baked into its child at spawn time,
+            # so a reload that edits the declaration -- or the '--script' file
+            # itself, whose *text* is what gets shipped -- has to replace the
+            # reader.  Keeping it would leave the old bytes running with
+            # nothing on screen to say so.
+            # For a shipped script the *text* is the contract; its path can
+            # differ between a symlink and the real file while the bytes are
+            # identical, and replacing four readers over that is pure churn.
+            stale = (reader.script != self.probe_script
+                     or reader.interval != float(self.probe_interval)
+                     or (self.probe_script is None
+                         and reader.source_cmd != self.probe_source))
+            (keep if wanted.get(id(reader.monitor)) is not None and not stale
+             else drop).append(reader)
         for reader in drop:
             reader.stop()
         self.probe_readers = keep
         covered = {id(r.monitor) for r in keep}
         for monitor in self.monitors:
-            if id(monitor) in covered or isinstance(monitor, PortMonitor):
+            ssh_args = wanted[id(monitor)]
+            if id(monitor) in covered or ssh_args is None:
                 continue
             reader = ProbeReader(monitor, self.probe_source, self.probe_interval,
                                  self.probe_defs, self.probe_retain,
-                                 kiosk_mode=self.kiosk_mode)
+                                 ssh_args=ssh_args, kiosk_mode=self.kiosk_mode,
+                                 script=self.probe_script)
             self.probe_readers.append(reader)
             self.threads.append(_spawn(reader.run, f'probe:{monitor.host}'))
 
@@ -13161,9 +13413,21 @@ class Application:
                        if t not in STAT_NAMES and t not in self.probe_defs]
             if unknown:
                 valid = sorted(list(STAT_NAMES.keys()) + list(self.probe_defs))
+                # LEVEL_NORMAL, not the 'cmd' default of LEVEL_INFO: this
+                # refuses the whole line, so the columns the user asked for are
+                # simply not there.  At the default log level the explanation
+                # was invisible and the layout silently fell back to the single
+                # 'ms' column — reported as "my settings did not survive a
+                # restart", with nothing on screen to connect the two.  A probe
+                # name is the likely cause: ':probe' must be read before the
+                # ':set stats' that names it.
                 self.add_event("cmd",
                     f"stats: unknown column(s): {', '.join(unknown)} — "
-                    f"valid: {', '.join(valid)}")
+                    f"keeping the previous columns; valid: {', '.join(valid)}"
+                    + (" (a ':probe' name must be declared before the "
+                       "':set stats' that uses it)" if self.probe_defs
+                       or not self._monitoring_started else ""),
+                    level=LEVEL_NORMAL)
                 return
             self._set_stats_custom([self._stat_label(t) for t in tokens])
             self.stats_mode = _CUSTOM_STATS_SENTINEL
@@ -13185,7 +13449,8 @@ class Application:
             self.add_event("cmd",
                 f"stats: unknown mode '{args}' — "
                 f"choices: {', '.join(v for v in valid if v != 'last')}"
-                f" (or comma list e.g. last,avg,stdev)")
+                f" (or comma list e.g. last,avg,stdev)",
+                level=LEVEL_NORMAL)
 
 
     def _cmd_sort(self, args=''):

@@ -56,11 +56,39 @@
 # single SSH connection per host that is held open, so the interval costs
 # nothing.  The command prints one 'key=value' per line; keys with no :probe
 # declaration are ignored, so one site-wide script can serve hosts that show
-# different subsets.  Left commented out: it would open a connection per host.
+# different subsets.  Left commented out: it opens a connection per matching
+# host.
 #
-# :probe-source --cmd '/usr/local/bin/pb-probe' --interval 60
+# :probe-source --cmd '/usr/local/bin/pb-probe' --interval 60 --hosts '*-nuc,*-jetson'
 # :probe temp --unit °C --range 20:90 --warn 70 --crit 85
 # :probe rpm  --unit rpm --range 0:5000 --on-fail give-up
+# :probe gps  --unit s   --range 0:5    --label GPS
+#
+# --label sets the column header; without it the name is capitalised, which
+# suits 'temp' but heads a 'gps' column 'Gps'.  It is presentation only --
+# ':set stats gps' still uses the name the probe command emits.
+#
+# Declare a probe BEFORE the ':set stats' that names it: a hosts file is read
+# top to bottom, and one unknown column refuses the whole line, which leaves
+# the previous columns in place and is easy to read as "my settings vanished".
+#
+# --hosts says which hosts can run the command, as globs matched the way
+# :no-alarm matches (the name and its :resolv alias).  Leaving it out probes
+# every host, and the ones with no shell -- a camera, a PoE switch -- each hold
+# a failing connection open on a backoff loop.  The login comes from the host's
+# own ':prog-options ssh' rule, and '--disable' there means no probe either.
+#
+# --script is the alternative to --cmd: it names a LOCAL file and carries its
+# contents inside the remote command, so nothing is installed on the hosts and
+# nothing is left on their disks.  A relative path is resolved against this
+# file's directory, so the script can simply sit next to it:
+# :probe-source --script pb-probe-gps --interval 30 --hosts '*-comm-mod'
+#
+# Do NOT try to inline the same shell into --cmd instead.  A hosts file expands
+# '$name' at parse time and reads '$1' as a :for backreference, so every '$n',
+# '$(...)' and '$((...))' in a one-liner is emptied or rewritten before the
+# remote shell ever sees it.  --script avoids that entirely: the payload
+# travels as base64, which contains no '$', quote or backslash at all.
 #
 # Each value can be shown three ways:
 #   :set stats temp        -- a column with the latest reading
