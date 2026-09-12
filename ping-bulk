@@ -430,7 +430,7 @@ SET_PARAMS = [
              cycler=lambda app, d: app.cycle_dns(d)),
     SetParam('stats',     '_cmd_stats',    '_complete_stats_arg',
              'stats column mode (single name or comma-separated list e.g. last,avg,stdev)',
-             getter=lambda app: (','.join(h.lower() for h in app.stats_custom)
+             getter=lambda app: (','.join(app._stats_custom_tokens())
                                  if app.stats_custom else STATS_MODES[app.stats_mode].lower()),
              cycler=lambda app, d: app.cycle_stats(d)),
     SetParam('sort',      '_cmd_sort',     ['none', 'name', 'status', 'latency'],
@@ -1075,9 +1075,11 @@ _HELP_CMDS_HOSTSFILE = [
     "                            --hosts limits which hosts run it (default: all);",
     "                            the login comes from :prog-options ssh, and",
     "                            --disable there means no probe connection either",
-    "  :probe <name> \\[--unit U] \\[--range MIN:MAX] \\[--warn N] \\[--crit N] \\[--on-fail retry|give-up] \\[--label TEXT]",
+    "  :probe <name> \\[--unit U] \\[--range MIN:MAX] \\[--warn N] \\[--crit N] \\[--on-fail retry|give-up] \\[--label TEXT] \\[--combine A,B,C]",
     "                            declare how one key is displayed; undeclared keys ignored",
     "                            --label sets the column header ('gps' heads 'Gps' otherwise);",
+    "                            --combine a,b,c joins several readings in ONE column",
+    "                            (':probe gpsall --combine gps,gpsoff,gpssat' -> 0/0/29);",
     "                            declare a probe BEFORE the :set stats that names it",
     "                            show it: :set stats <name> | :set ping-view <name> | \\[Enter] on a host",
     "",
@@ -1343,6 +1345,11 @@ example.com:443
 # subsets.  Commented out: it opens a connection per matching host.
 # :probe-source --cmd '/usr/local/bin/pb-probe' --interval 60 --hosts '*-nuc,*-jetson'
 # :probe temp --unit °C --range 20:90 --warn 70 --crit 85
+# :probe all  --combine temp,rpm --label 'temp/rpm'   # both in ONE column
+#
+# '--combine' joins several readings into one column ('54.2/1200'), so related
+# numbers cost one header instead of one each.  It takes its worst member's
+# colour; a member with no reading shows '-' in place.
 #
 # '--hosts' says which hosts can run the command; without it, every host gets a
 # connection, and the ones with no shell (a camera, a switch) each hold a
@@ -2405,6 +2412,11 @@ def _probe_char(value, vmin, vmax):
 # than an E2BIG from Popen once per reconnect inside a backoff loop.
 _PROBE_SCRIPT_MAX = 64 * 1024
 
+# What ':probe --combine' puts between the readings it joins.  '/' rather than
+# a space because the cell is one column: a space would read as two columns
+# that happen to abut, and the column width is measured on the joined string.
+_PROBE_GROUP_SEP = '/'
+
 
 class ProbeDef:
     """Display metadata for one custom probe value, from ':probe <name> ...'.
@@ -2416,11 +2428,16 @@ class ProbeDef:
     """
 
     __slots__ = ('name', 'label', 'unit', 'vmin', 'vmax', 'warn', 'crit',
-                 'on_fail')
+                 'on_fail', 'members')
 
     def __init__(self, name, unit='', vmin=None, vmax=None,
-                 warn=None, crit=None, on_fail='retry', label=None):
+                 warn=None, crit=None, on_fail='retry', label=None,
+                 members=()):
         self.name = name
+        # ':probe --combine a,b,c' — the names whose latest readings this
+        # column joins.  Empty for an ordinary probe, which reads one key of
+        # its own; a group reads none and has no series.
+        self.members = tuple(members)
         # Column header: ':probe --label' as written, else the name capitalised
         # like the built-ins.  The default cannot serve an acronym — 'gps'
         # becomes 'Gps', and a header is read as a word, not a sentence.
@@ -2431,6 +2448,11 @@ class ProbeDef:
         self.warn = warn
         self.crit = crit
         self.on_fail = on_fail
+
+    @property
+    def is_group(self):
+        """True for a ':probe --combine' column, which has no reading of its own."""
+        return bool(self.members)
 
     def __repr__(self):
         return f"ProbeDef({self.name!r}, unit={self.unit!r})"
@@ -3654,8 +3676,16 @@ class ProbeReader(_PipeReaderLoop):
             backoff = min(backoff * 2, 30)
 
     def _fail_all(self):
-        """Mark every declared probe failed, honouring '--on-fail'."""
-        for name in self.defs:
+        """Mark every declared probe failed, honouring '--on-fail'.
+
+        A ':probe --combine' group is skipped: it reads no key of its own, so
+        a series under its name is state nothing displays.  Its members are
+        declared in their own right and are marked here, which is what makes
+        the group's cell collapse to 'err'.
+        """
+        for name, d in self.defs.items():
+            if d.is_group:
+                continue
             self._mark(name, 'err')
 
     def stop(self):
@@ -7120,7 +7150,7 @@ class Application:
                 f.write(f"# {_PROG_NAME} configuration\n")
                 f.write(f":set dns {DNS_MODES[self.dns_mode]}\n")
                 if self.stats_custom is not None:
-                    custom_str = ','.join(h.lower() for h in self.stats_custom)
+                    custom_str = ','.join(self._stats_custom_tokens())
                     f.write(f":set stats {custom_str}\n")
                 else:
                     f.write(f":set stats {STATS_MODES[self.stats_mode]}\n")
@@ -10688,6 +10718,8 @@ class Application:
         """
         lines = []
         for name, probe in self.probe_defs.items():
+            if probe.is_group:
+                continue      # no series of its own; its members appear below
             with monitor.lock:
                 series = monitor.probes.get(name)
                 values = list(series.values) if series else []
@@ -10857,9 +10889,9 @@ class Application:
                 return ('idle', None)
             return (series.state, series.last[0])
 
-    def _probe_cell(self, monitor, probe):
-        """Format one probe's column cell: the value, '-', or 'err'."""
-        state, value = self._probe_state(monitor, probe.name)
+    def _probe_value_text(self, monitor, name):
+        """One probe reading as text: the value, '-' for none, 'err' for failed."""
+        state, value = self._probe_state(monitor, name)
         if state in ('err', 'gave-up'):
             return "err"
         if value is None:
@@ -10868,24 +10900,74 @@ class Application:
         text = f"{value:.1f}"
         return text[:-2] if text.endswith('.0') else text
 
+    def _probe_cell(self, monitor, probe):
+        """Format one probe's column cell, or a ':probe --combine' group.
+
+        A group joins its members' latest readings with '/', so three related
+        numbers cost one column instead of three headers wide enough to name
+        themselves: 'GPS s/off/sat' over '0/0/29' says in one column what
+        'GPS,s  GPSoff,s  GPSsat' says in three.
+        """
+        if probe.is_group:
+            parts = [self._probe_value_text(monitor, m) for m in probe.members]
+            # A group on a host the probe does not reach would otherwise draw
+            # '-/-/-' on every such row — on a fleet where four hosts of fifty
+            # carry the sensor, that is fifty rows of punctuation saying what a
+            # single '-' says.  Collapsed only when every field agrees and
+            # carries no reading, so a partial answer stays '0/0/-'.
+            if len(set(parts)) == 1 and parts[0] in ('-', 'err'):
+                return parts[0]
+            return _PROBE_GROUP_SEP.join(parts)
+        return self._probe_value_text(monitor, probe.name)
+
     def _stat_header(self, cname):
         """Column header for a stat label, including a probe's unit."""
         probe = self._probe_def_for_label(cname)
         if probe is not None:
+            if probe.is_group:
+                # The members carry the units and the label already spells out
+                # what each field is ('GPS s/off/sat'); appending one member's
+                # unit would label the whole column with a third of the truth.
+                return probe.label
             return f"{probe.label},{probe.unit}" if probe.unit else probe.label
         return _STAT_HEADER.get(cname, cname)
 
-    def _probe_attr(self, monitor, probe, row_attr):
-        """Colour a probe cell by its --warn / --crit thresholds."""
-        state, value = self._probe_state(monitor, probe.name)
+    def _probe_severity(self, monitor, name):
+        """Rank one probe reading, so a group can be coloured by its worst."""
+        state, value = self._probe_state(monitor, name)
         if state in ('err', 'gave-up'):
-            return curses.color_pair(2) | row_attr
+            return 4
         if value is None:
-            return self.stale_attr | row_attr
-        if probe.crit is not None and value >= probe.crit:
+            return 1                       # nothing read yet
+        d = self.probe_defs.get(name)
+        if d is not None:
+            if d.crit is not None and value >= d.crit:
+                return 3
+            if d.warn is not None and value >= d.warn:
+                return 2
+        return 0
+
+    def _probe_attr(self, monitor, probe, row_attr):
+        """Colour a probe cell by its --warn / --crit thresholds.
+
+        A group takes the colour of its worst member, so one bad field cannot
+        hide behind two good ones in a shared cell.  'Nothing read yet' ranks
+        above 'fine' for the same reason: a dim cell says a field is missing,
+        which a green one would not.
+        """
+        if probe.is_group:
+            rank = max((self._probe_severity(monitor, m) for m in probe.members),
+                       default=1)
+        else:
+            rank = self._probe_severity(monitor, probe.name)
+        if rank == 4:
+            return curses.color_pair(2) | row_attr
+        if rank == 3:
             return curses.color_pair(2) | curses.A_BOLD | row_attr
-        if probe.warn is not None and value >= probe.warn:
+        if rank == 2:
             return curses.color_pair(3) | row_attr
+        if rank == 1:
+            return self.stale_attr | row_attr
         return curses.color_pair(1) | row_attr
 
     def _stat_attr(self, monitor, cname, row_attr):
@@ -12797,6 +12879,7 @@ class Application:
             return
         unit, vmin, vmax, warn, crit, on_fail = '', None, None, None, None, 'retry'
         label = None
+        members = ()
         i = 1
         while i < len(tokens):
             t = tokens[i]
@@ -12829,6 +12912,14 @@ class Application:
                 else:
                     crit = val
                 i += 2
+            elif t == '--combine' and has_val:
+                members = tuple(m for m in tokens[i + 1].replace(',', ' ').split()
+                                if m)
+                if not members:
+                    self.add_event("cmd",
+                        "probe: --combine needs at least one probe name")
+                    return
+                i += 2
             elif t == '--label' and has_val:
                 label = tokens[i + 1]
                 i += 2
@@ -12843,9 +12934,60 @@ class Application:
             else:
                 self.add_event("cmd", f"probe: unknown argument {t!r}")
                 return
+        if members:
+            # Every other flag describes a single reading; the members carry
+            # their own, and a group has no series for a range to scale.
+            clash = [f for f, v in (('--unit', unit), ('--range', vmin),
+                                    ('--warn', warn), ('--crit', crit))
+                     if v not in ('', None)]
+            if clash:
+                self.add_event("cmd",
+                    f"probe: {', '.join(clash)} cannot be combined with "
+                    f"--combine — those belong on the members "
+                    f"({', '.join(members)}), which carry their own")
+                return
+            if name in members:
+                self.add_event("cmd",
+                    f"probe: --combine cannot include {name!r} itself")
+                return
+            dupes = sorted({m for m in members if members.count(m) > 1})
+            if dupes:
+                self.add_event("cmd",
+                    f"probe: --combine lists {', '.join(dupes)} twice — "
+                    f"a field would be drawn once per mention")
+                return
+            # The same guard the probe's own name gets.  Without it the
+            # setdefault below shadows a built-in: a member called 'avg' takes
+            # the 'Avg' column label, which then resolves to a probe with no
+            # readings, so a column the user never mentioned reads '-' for the
+            # rest of the run.  'drift'/'rtime' are worse still, because
+            # _clock_enabled looks for those labels in stats_custom and would
+            # stop starting the clock probe at all.
+            builtin = [m for m in members if m.lower() in STAT_NAMES]
+            if builtin:
+                self.add_event("cmd",
+                    f"probe: --combine member(s) {', '.join(builtin)} name "
+                    f"built-in stat columns — --combine joins ':probe' "
+                    f"readings, not built-in stats")
+                return
+            nested = [m for m in members
+                      if m in self.probe_defs and self.probe_defs[m].is_group]
+            if nested:
+                self.add_event("cmd",
+                    f"probe: --combine member(s) {', '.join(nested)} are "
+                    f"themselves groups, which have no reading to join — "
+                    f"name their members instead")
+                return
+            # A member with no ':probe' of its own gets a bare one, so the
+            # reader stores its key (it drops anything undeclared), the details
+            # overlay gets its sparkline, and it can also be a column in its
+            # own right.  Never overwrites: an explicit declaration, before or
+            # after, is the one that carries the thresholds.
+            for m in members:
+                self.probe_defs.setdefault(m, ProbeDef(m))
         self.probe_defs[name] = ProbeDef(name, unit=unit, vmin=vmin, vmax=vmax,
                                          warn=warn, crit=crit, on_fail=on_fail,
-                                         label=label)
+                                         label=label, members=members)
         if self._monitoring_started:
             self.add_event("probe", f"probe: defined {name}")
 
@@ -13382,6 +13524,24 @@ class Application:
         probe = self.probe_defs.get(token)
         return probe.label if probe is not None else token
 
+    def _stats_custom_tokens(self):
+        """The ':set stats' argument that reproduces the current columns.
+
+        stats_custom holds column *labels*, and a label is not always its own
+        name: ':probe --label' exists precisely to let them differ, and a
+        '--combine' group's label is a phrase ('GPS s/off/sat') that
+        ':set stats' cannot parse back at all.  Writing the lowercased label
+        round-tripped only while it happened to equal the name — so
+        ':save-config' wrote a line that refused itself on the next start, and
+        every column was lost.  Built-ins keep the lowercased label, which is
+        their name.
+        """
+        out = []
+        for label in self.stats_custom or ():
+            probe = self._probe_def_for_label(label)
+            out.append(probe.name if probe is not None else label.lower())
+        return out
+
     def _cmd_stats(self, args=''):
         """Report (no arg), cycle, set single-mode, or set a column list.
 
@@ -13480,6 +13640,16 @@ class Application:
             self._history_probe = None
             self.history_mode = modes_lower.index(args.lower())
         elif args in self.probe_defs:
+            if self.probe_defs[args].is_group:
+                # One cell per reading needs one series; a group has none of
+                # its own, and interleaving its members would put three
+                # different scales on one axis.
+                self.add_event("cmd",
+                    f"history: '{args}' combines "
+                    f"{', '.join(self.probe_defs[args].members)} — "
+                    f"name one of them for the strip",
+                    level=LEVEL_NORMAL)
+                return
             # Show a probe's series in the strip instead of ping results.
             self._history_probe = self.probe_defs[args].label
         else:

@@ -551,3 +551,270 @@ class TestStatsRefusalIsVisible:
         app._cmd_probe('gps --label GPS')
         app._cmd_stats('gps,rtime,down')
         assert app.stats_custom == ['GPS', 'RTime', 'Down']
+
+
+# ---------------------------------------------------------------------------
+# ':probe --combine' — several readings in one column
+# ---------------------------------------------------------------------------
+
+class TestCombinedProbe:
+
+    def _app(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path)
+        app._cmd_probe('gps    --unit s --range 0:5  --warn 2 --crit 4 --label GPS')
+        app._cmd_probe('gpsoff --unit s --range 0:10 --warn 2 --crit 5')
+        app._cmd_probe('gpssat --range 0:32')
+        app._cmd_probe("gpsall --combine gps,gpsoff,gpssat --label 'GPS s/off/sat'")
+        return app
+
+    def _read(self, pb, monitor, **values):
+        for name, v in values.items():
+            series = pb.ProbeSeries(10)
+            series.add(float(v), 1.0)
+            monitor.probes[name] = series
+
+    def test_the_cell_joins_the_members(self, pb, tmp_path):
+        app = self._app(pb, tmp_path)
+        self._read(pb, app.monitors[0], gps=0, gpsoff=0, gpssat=29)
+        assert app._probe_cell(app.monitors[0], app.probe_defs['gpsall']) == '0/0/29'
+
+    def test_the_header_is_the_label_alone(self, pb, tmp_path):
+        """The members carry the units and the label already spells out the
+        fields; appending one member's unit would label the column with a
+        third of the truth."""
+        app = self._app(pb, tmp_path)
+        assert app._stat_header('GPS s/off/sat') == 'GPS s/off/sat'
+
+    def test_it_is_one_column(self, pb, tmp_path):
+        app = self._app(pb, tmp_path)
+        app._cmd_stats('gpsall,last')
+        assert app.stats_custom == ['GPS s/off/sat', 'Last']
+
+    def test_a_member_with_no_reading_shows_a_dash(self, pb, tmp_path):
+        app = self._app(pb, tmp_path)
+        self._read(pb, app.monitors[0], gps=0, gpsoff=0)
+        assert app._probe_cell(app.monitors[0], app.probe_defs['gpsall']) == '0/0/-'
+
+    def test_a_failed_member_shows_err_in_place(self, pb, tmp_path):
+        app = self._app(pb, tmp_path)
+        self._read(pb, app.monitors[0], gps=0, gpsoff=0)
+        app.monitors[0].probes['gpssat'] = pb.ProbeSeries(10)
+        app.monitors[0].probes['gpssat'].state = 'err'
+        assert app._probe_cell(app.monitors[0], app.probe_defs['gpsall']) == '0/0/err'
+
+    def test_a_host_the_probe_does_not_reach_shows_one_dash(self, pb, tmp_path):
+        """Not '-/-/-': on a fleet where four hosts of fifty carry the sensor
+        that is fifty rows of punctuation saying what a single '-' says."""
+        app = self._app(pb, tmp_path)
+        assert app._probe_cell(app.monitors[0], app.probe_defs['gpsall']) == '-'
+
+    def test_a_partial_answer_is_not_collapsed(self, pb, tmp_path):
+        app = self._app(pb, tmp_path)
+        self._read(pb, app.monitors[0], gps=0)
+        assert app._probe_cell(app.monitors[0], app.probe_defs['gpsall']) == '0/-/-'
+
+    def test_every_field_failed_collapses_to_err(self, pb, tmp_path):
+        app = self._app(pb, tmp_path)
+        for name in ('gps', 'gpsoff', 'gpssat'):
+            series = pb.ProbeSeries(10)
+            series.state = 'err'
+            app.monitors[0].probes[name] = series
+        assert app._probe_cell(app.monitors[0], app.probe_defs['gpsall']) == 'err'
+
+    def test_an_ordinary_probe_is_unaffected(self, pb, tmp_path):
+        app = self._app(pb, tmp_path)
+        self._read(pb, app.monitors[0], gps=3)
+        assert app._probe_cell(app.monitors[0], app.probe_defs['gps']) == '3'
+
+
+class TestCombinedProbeColour:
+    """A group takes its worst member's colour, so one bad field cannot hide
+    behind two good ones in a shared cell.
+
+    These call _probe_attr itself.  An earlier version re-implemented
+    max(_probe_severity) in the test and stayed green when _probe_attr was
+    changed to take the first member instead of the worst.
+    """
+
+    def _attrs(self, pb, tmp_path, **values):
+        """Return (group_attr, {member: its own attr}) from the real code."""
+        app = _make_app(pb, tmp_path)
+        app._cmd_probe('gps --warn 2 --crit 4')
+        app._cmd_probe('gpssat')
+        app._cmd_probe('g --combine gps,gpssat')
+        m = app.monitors[0]
+        for name, v in values.items():
+            series = pb.ProbeSeries(10)
+            series.add(float(v), 1.0)
+            m.probes[name] = series
+        # curses.color_pair needs initscr(); the attribute values do not
+        # matter here, only that distinct severities stay distinct.
+        with patch.object(pb.curses, 'color_pair', lambda n: n << 8):
+            group = app._probe_attr(m, app.probe_defs['g'], 0)
+            members = {n: app._probe_attr(m, app.probe_defs[n], 0)
+                       for n in ('gps', 'gpssat')}
+        return group, members
+
+    def test_a_crit_member_colours_the_group(self, pb, tmp_path):
+        group, members = self._attrs(pb, tmp_path, gps=5, gpssat=29)
+        assert group == members['gps']
+        assert group != members['gpssat']      # not the good one, nor the last
+
+    def test_a_warn_member_colours_the_group(self, pb, tmp_path):
+        group, members = self._attrs(pb, tmp_path, gps=3, gpssat=29)
+        assert group == members['gps']
+        assert group != members['gpssat']
+
+    def test_all_good_reads_as_good(self, pb, tmp_path):
+        group, members = self._attrs(pb, tmp_path, gps=0, gpssat=29)
+        assert group == members['gps'] == members['gpssat']
+
+    def test_a_missing_reading_outranks_a_good_one(self, pb, tmp_path):
+        """A dim cell says a field is missing, which a green one would not."""
+        group, members = self._attrs(pb, tmp_path, gps=0)
+        assert group == members['gpssat']      # the one with no reading
+        assert group != members['gps']
+
+    def test_the_worst_member_wins_whichever_end_it_sits_at(self, pb, tmp_path):
+        """Guards against 'first member' and against 'last member'."""
+        first_bad, m1 = self._attrs(pb, tmp_path, gps=5, gpssat=29)
+        assert first_bad == m1['gps']
+        app = _make_app(pb, tmp_path)
+        app._cmd_probe('gps')
+        app._cmd_probe('gpssat --warn 2 --crit 4')
+        app._cmd_probe('g --combine gps,gpssat')
+        m = app.monitors[0]
+        for name, v in (('gps', 0), ('gpssat', 9)):
+            series = pb.ProbeSeries(10)
+            series.add(float(v), 1.0)
+            m.probes[name] = series
+        with patch.object(pb.curses, 'color_pair', lambda n: n << 8):
+            last_bad = app._probe_attr(m, app.probe_defs['g'], 0)
+            assert last_bad == app._probe_attr(m, app.probe_defs['gpssat'], 0)
+            assert last_bad != app._probe_attr(m, app.probe_defs['gps'], 0)
+
+
+class TestCombinedProbeRules:
+
+    def test_members_are_declared_implicitly(self, app):
+        """So '--combine' alone works: the reader drops any key with no
+        declaration, and the overlay needs one per sparkline."""
+        app._cmd_probe('gpsall --combine gps,gpsoff')
+        assert sorted(app.probe_defs) == ['gps', 'gpsall', 'gpsoff']
+        assert not app.probe_defs['gps'].is_group
+
+    def test_an_explicit_declaration_wins_whenever_it_comes(self, app):
+        app._cmd_probe('gpsall --combine gps,gpsoff')
+        app._cmd_probe('gps --warn 2 --label GPS')
+        assert app.probe_defs['gps'].warn == 2.0
+        assert app.probe_defs['gps'].label == 'GPS'
+
+    def test_single_reading_flags_are_refused(self, app):
+        """--unit/--range/--warn/--crit describe one reading; the members
+        carry their own."""
+        app._cmd_probe('g --combine x,y --unit s')
+        assert '--unit cannot be combined' in _last(app)[0]
+        assert 'g' not in app.probe_defs
+
+    def test_a_member_naming_a_built_in_stat_is_refused(self, app):
+        """The setdefault below the guard would otherwise shadow the built-in:
+        a member 'avg' takes the 'Avg' column label, which then resolves to a
+        probe with no readings, so a column nobody asked about reads '-' for
+        the rest of the run."""
+        m = app.monitors[0]
+        m._lat_count, m._lat_mean = 1, 12.0
+        before = app._stat_cell(m, 'Avg')
+        app._cmd_probe('g --combine avg,last')
+        assert 'built-in stat columns' in _last(app)[0]
+        assert app.probe_defs == {}
+        assert app._stat_cell(m, 'Avg') == before
+
+    def test_a_member_that_is_itself_a_group_is_refused(self, app):
+        """A group has no reading to join, so nesting draws '-' in its place."""
+        app._cmd_probe('inner --combine gps,gpsoff')
+        app._cmd_probe('outer --combine inner,gps')
+        assert 'themselves groups' in _last(app)[0]
+        assert 'outer' not in app.probe_defs
+
+    def test_a_duplicated_member_is_refused(self, app):
+        app._cmd_probe('g --combine gps,gps')
+        assert 'twice' in _last(app)[0]
+        assert 'g' not in app.probe_defs
+
+    def test_a_group_cannot_contain_itself(self, app):
+        app._cmd_probe('g --combine g,x')
+        assert 'cannot include' in _last(app)[0]
+        assert 'g' not in app.probe_defs
+
+    def test_the_history_strip_refuses_a_group(self, pb, app):
+        """One cell per reading needs one series, and interleaving members
+        would put three scales on one axis."""
+        app._cmd_probe('gpsall --combine gps,gpsoff')
+        app._cmd_set('ping-view gpsall')
+        assert 'name one of them' in _last(app)[0]
+        assert app._history_probe is None
+        assert list(app.events)[-1].level == pb.LEVEL_NORMAL
+
+    def test_a_member_still_works_in_the_strip(self, app):
+        app._cmd_probe('gpsall --combine gps,gpsoff')
+        app._cmd_set('ping-view gps')
+        assert app._history_probe == 'Gps'
+
+    def test_the_overlay_skips_the_group(self, pb, tmp_path):
+        """It has no series; its members appear there in their own right."""
+        app = _make_app(pb, tmp_path)
+        app._cmd_probe('gpsall --combine gps,gpsoff --label GPS')
+        series = pb.ProbeSeries(10)
+        series.add(1.0, 1.0)
+        app.monitors[0].probes['gps'] = series
+        text = '\n'.join(app._probe_overlay_lines(app.monitors[0], 60))
+        assert 'gpsall' not in text and 'GPS' not in text
+        assert 'Probe: gps' in text
+
+
+class TestStatsColumnsRoundTrip:
+    """':save-config' has to write something ':set stats' can read back.
+
+    stats_custom holds labels, and the written line was the lowercased label --
+    which round-tripped only while a label happened to equal its name.  A
+    '--combine' label is a phrase, so every column was lost on the next start.
+    """
+
+    def _app(self, pb, tmp_path, cfg):
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application([('host', '10.0.0.1')])
+        app._monitoring_started = True
+        app._cmd_probe('gps')
+        app._cmd_probe('gpsoff')
+        app._cmd_probe("gpsall --combine gps,gpsoff --label 'GPS s/off'")
+        return app
+
+    def test_a_group_column_survives_save_and_reload(self, pb, tmp_path):
+        cfg = tmp_path / 'config'
+        app = self._app(pb, tmp_path, cfg)
+        app._cmd_stats('gpsall,last,avg')
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app._cmd_saveconfig()
+        line = [l.strip() for l in cfg.read_text().splitlines()
+                if l.startswith(':set stats')][0]
+        assert line == ':set stats gpsall,last,avg'
+        fresh = self._app(pb, tmp_path, cfg)
+        fresh._dispatch_cmd(line)
+        assert fresh.stats_custom == app.stats_custom
+
+    def test_a_relabelled_probe_survives_too(self, pb, tmp_path):
+        cfg = tmp_path / 'config'
+        app = self._app(pb, tmp_path, cfg)
+        app._cmd_probe('temp --label "Deg C"')
+        app._cmd_stats('temp,last')
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app._cmd_saveconfig()
+        line = [l.strip() for l in cfg.read_text().splitlines()
+                if l.startswith(':set stats')][0]
+        assert line == ':set stats temp,last'
+
+    def test_built_in_columns_are_unchanged(self, pb, tmp_path):
+        cfg = tmp_path / 'config'
+        app = self._app(pb, tmp_path, cfg)
+        app._cmd_stats('last,avg,stdev')
+        assert app._stats_custom_tokens() == ['last', 'avg', 'stdev']

@@ -56,6 +56,41 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 21 (several readings in one column)**: `:probe <name> --combine a,b,c`
+  joins its members' latest readings with `/`, so `GPS s/off/sat` over
+  `0/0/29` costs one header instead of three each wide enough to name
+  themselves — which is what an 80-column kiosk console has room for. A group
+  has no reading of its own: `--unit`/`--range`/`--warn`/`--crit` are refused
+  on it and belong on the members, `--label` is the header used verbatim (no
+  unit appended, since one member's unit would label the whole column with a
+  third of the truth), `:set ping-view` needs a single series and so names a
+  member, and the details overlay skips the group because its members are
+  already there. The cell takes its **worst** member's colour, with "nothing
+  read yet" ranking above "fine" — a dim cell says a field is missing where a
+  green one would not — and collapses to a single `-` or `err` when no field
+  has a reading, because `-/-/-` on the fifty hosts of fifty-four that carry no
+  sensor is punctuation saying what one `-` says.
+  **An undeclared member is declared implicitly** (`setdefault`), because the
+  reader drops any key with no `:probe` and the overlay needs one per
+  sparkline; an explicit declaration wins whether it comes before or after.
+  That convenience is also where the two bugs were, both caught in review
+  rather than by the tests:
+  1. `setdefault` bypassed the guard that stops a probe being named after a
+     built-in stat. `:probe g --combine avg,last` created a `ProbeDef('avg')`
+     whose label `Avg` then resolved ahead of the built-in, so **two columns
+     the user never mentioned read `-` for the rest of the run**, silently.
+     `drift`/`rtime` were worse: `_clock_enabled` looks for those labels in
+     `stats_custom`, so shadowing them stops the clock probe being started at
+     all. Members now get the same guard, plus rejections for a member that is
+     itself a group (no reading to join) and for a repeated member.
+  2. `_save_config` wrote `stats_custom` — which holds **labels** — lowercased,
+     and `:set stats` reads **names**. That round-tripped only while a label
+     happened to equal its name, which `--label` made untrue and `--combine`
+     makes untrue by design: `:set stats gps s/off/sat` refuses itself, so
+     every column was lost on the next start. `_stats_custom_tokens()` is now
+     the single place that turns columns back into a settable argument.
+  A `--combine` group is skipped by `ProbeReader._fail_all`, which would
+  otherwise build a `ProbeSeries` under a name nothing reads.
 - **Phase 20 (the history bar costs a screen width, not a day of samples)**:
   `get_history_string` copied both history deques in full and walked them, in
   *both* branches, to fill the `length` cells a bar actually shows.

@@ -812,7 +812,7 @@ Key bindings
     be checked.  The connection carries the same SSH isolation flags as
     ``:mux``.
 
-``:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N] [--on-fail retry|give-up] [--label TEXT]``
+``:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N] [--on-fail retry|give-up] [--label TEXT] [--combine A,B,C]``
     Declare how one key from ``:probe-source`` is displayed.  Keys with no
     declaration are ignored, so a single site-wide script can serve hosts
     that show different subsets.  ``--range`` scales the history strip,
@@ -822,6 +822,33 @@ Key bindings
     acronym, where ``gps`` would head a column ``Gps``.  The label is
     presentation only: ``:set stats`` and ``:set ping-view`` still take the
     name the probe command emits.
+
+    ``--combine`` makes one column out of several readings, joined with
+    ``/``, instead of one header per value::
+
+        :probe gpsall --combine gps,gpsoff,gpssat --label 'GPS s/off/sat'
+        :set stats gpsall            # -> GPS s/off/sat
+                                     #    0/0/29
+
+    Three related numbers then cost one column rather than three headers each
+    wide enough to name itself.  A member with no reading shows ``-`` and a
+    failed one ``err``, in place, so the cell says which field is missing —
+    except when *every* field agrees and carries no reading, where the cell
+    collapses to a single ``-`` or ``err``: on a fleet where four hosts of
+    fifty carry the sensor, ``-/-/-`` on the other forty-six is punctuation
+    saying what one ``-`` says.
+    The column takes the colour of its **worst** member — one bad field cannot
+    hide behind two good ones — and "nothing read yet" outranks "fine", since
+    a dim cell says a field is missing where a green one would not.
+
+    A group has no reading of its own, so the flags that describe one
+    (``--unit``, ``--range``, ``--warn``, ``--crit``) are refused on it and
+    belong on the members, which carry their own.  ``--label`` is the header,
+    used as written and with no unit appended.  A member that has no ``:probe``
+    of its own gets a plain one, so ``--combine`` alone is enough; an explicit
+    declaration, before or after, is the one that carries the thresholds.
+    ``:set ping-view`` needs a single series and so names a member, not the
+    group; the details overlay likewise shows the members.
 
     **Declare a probe before the** ``:set stats`` **that names it.**  A hosts
     file is read top to bottom, and a column that is neither a built-in stat

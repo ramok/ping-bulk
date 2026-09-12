@@ -72,7 +72,7 @@ One command supplies every value; each value declares how it is displayed:
 :probe gps  --unit s   --range 0:5     --label GPS
 ```
 
-Three later additions, each answering something the first cut could not:
+Four later additions, each answering something the first cut could not:
 
 - **`--hosts <globs>`** — which hosts run the command at all. Undeclared keys
   were always ignored, but that is a display filter: the connection is opened
@@ -87,6 +87,13 @@ Three later additions, each answering something the first cut could not:
   empties or rewrites most of a real script before it is ever sent.
 - **`--label TEXT`** — the column header, which otherwise is the name with its
   first letter capitalised. That suits `temp`; it heads a `gps` column `Gps`.
+- **`--combine A,B,C`** — one column holding several readings joined with `/`,
+  so `GPS s/off/sat` over `0/0/29` costs the width of one header rather than
+  three each wide enough to name itself. It has no reading of its own, so the
+  flags describing one are refused on it and the members carry them; it takes
+  its worst member's colour, and collapses to a single `-` or `err` when no
+  field has a reading, since `-/-/-` on every host the probe does not reach is
+  punctuation saying what one `-` says.
 
 The login is the host's own `:prog-options ssh` rule, so a site records it once
 for `:mux`, `[c]` and the probe alike, and `--disable` there means no probe

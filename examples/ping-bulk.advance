@@ -63,6 +63,12 @@
 # :probe temp --unit °C --range 20:90 --warn 70 --crit 85
 # :probe rpm  --unit rpm --range 0:5000 --on-fail give-up
 # :probe gps  --unit s   --range 0:5    --label GPS
+# :probe all  --combine temp,rpm,gps    --label 'temp/rpm/gps'
+#
+# --combine puts several readings in ONE column, joined with '/', so three
+# related numbers cost one header instead of three.  The column takes its
+# worst member's colour, and a member with no reading shows '-' in place.
+# The flags that describe a single value belong on the members, not the group.
 #
 # --label sets the column header; without it the name is capitalised, which
 # suits 'temp' but heads a 'gps' column 'Gps'.  It is presentation only --
