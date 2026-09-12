@@ -2290,6 +2290,16 @@ def _hist_char_rank(ch):
     return _HIST_RANK.get(ch, _HIST_RANK['.'])
 
 
+# How far back of the drawn window a sample may still be worth scanning for.
+# A history bar shows the newest `length` seconds, but a sample is not always
+# filed under the second it arrived in: a lost probe is dated when it was
+# *sent* (_probe_send_time subtracts the interval) and a late reply is dated the
+# same way, so history_times is not monotonic.  The back-dating is bounded by
+# the ping interval plus ':set late-grace', both of which are seconds; a minute
+# of slack costs one screen-width of extra scanning and cannot lose a cell.
+_SYNC_SCAN_GRACE = 60
+
+
 def _worse_hist_sample(a, b, no_alarm=False):
     """Return the worse of two raw history values sharing one time bucket.
 
@@ -2829,10 +2839,38 @@ class Monitor(ABC):
             return (' ' * cell_width) * length if cell_width > 1 else ' ' * length
 
         if sync and end_time is not None:
-            with self.lock:
-                history_list = list(self.history)
-                times_list   = list(self.history_times)
             t_end = int(end_time - offset)
+            # Scan only the tail that can still land in a visible bucket.
+            #
+            # These deques hold ':set history-size' samples — 86400 by default,
+            # 24 h at one ping a second — while the bar shows `length` of them,
+            # a screen width.  Copying both in full and walking them was O(24 h)
+            # per host per draw, and the section headers repeat it for every
+            # host they cover, so the cost grew with uptime: measured at 100
+            # columns and 54 hosts, a redraw cost 17 ms after ten minutes, 402 ms
+            # after five and a half hours and 1.8 s once the deque filled.  The
+            # draw loop runs on a 100 ms key timeout, so that is what turned
+            # every keypress into a one-second wait after half a day.
+            #
+            # Walked newest-first and stopped once the samples are older than
+            # the window (plus _SYNC_SCAN_GRACE for back-dated losses), then put
+            # back in order so the loop below sees exactly what a forward walk
+            # saw.  _worse_hist_sample is symmetric over every value these
+            # deques hold, so the reversal changes no cell today; it is kept
+            # because that function has a tie-break that returns its *first*
+            # argument, and an ordering this loop no longer guaranteed would be
+            # a silent wrong reading the moment that branch becomes reachable.
+            # Reverse iteration is safe here for the same reason the copy was —
+            # every append to these deques holds this lock.
+            oldest_wanted = t_end - length + 1 - _SYNC_SCAN_GRACE
+            tail = []
+            with self.lock:
+                for ts, val in zip(reversed(self.history_times),
+                                   reversed(self.history)):
+                    if ts < oldest_wanted:
+                        break
+                    tail.append((ts, val))
+            tail.reverse()
             # One pass: map each (timestamp, value) to a bucket index.
             # Bucket 0 = the current second; bucket i = i seconds ago.
             # Each ping belongs to the second it arrived in: int(ts) i.e. floor(ts).
@@ -2848,7 +2886,7 @@ class Monitor(ABC):
             # made on the value and rendered once, so every view shows the
             # same sample.
             picked: dict = {}
-            for ts, val in zip(times_list, history_list):
+            for ts, val in tail:
                 bucket = t_end - int(ts)
                 if 0 <= bucket < length:
                     if bucket in picked:
@@ -2875,30 +2913,40 @@ class Monitor(ABC):
             self._fill_connect_gaps(result, t_end, length, cell_width)
             return "".join(result)  # result[0]=newest, result[length-1]=oldest (no reversal)
 
+        # Same reasoning as the sync branch: only the newest offset+length
+        # samples are ever indexed, so copying the whole deque to slice a screen
+        # width off the end scaled the draw with uptime rather than with the bar.
+        want = max(0, offset + length)
         with self.lock:
-            history_list = list(self.history)
-            total = len(history_list)
-            end = total - offset
-            start = end - length
-            result = []
-            for i in range(start, end):
-                if i < 0 or i >= total:
-                    cell = " " * cell_width if cell_width > 1 else " "
-                else:
-                    val = history_list[i]
-                    if cell_width > 1:
-                        num_w = cell_width - 1
-                        if val is None:
-                            cell = ("o" if self.no_alarm else "X") * num_w + " "
-                        elif val == "ERR":
-                            cell = "?" * num_w + " "
-                        else:
-                            capped = min(int(round(_hist_rtt(val))), 10**num_w - 1)
-                            cell = f"{capped:>{num_w}} "
+            total = len(self.history)
+            tail = []
+            for val in reversed(self.history):
+                if len(tail) >= want:
+                    break
+                tail.append(val)
+        tail.reverse()
+        base = total - len(tail)      # index in the full history of tail[0]
+        end = total - offset
+        start = end - length
+        result = []
+        for i in range(start, end):
+            if i < base or i >= total:
+                cell = " " * cell_width if cell_width > 1 else " "
+            else:
+                val = tail[i - base]
+                if cell_width > 1:
+                    num_w = cell_width - 1
+                    if val is None:
+                        cell = ("o" if self.no_alarm else "X") * num_w + " "
+                    elif val == "ERR":
+                        cell = "?" * num_w + " "
                     else:
-                        cell = _history_char(val, mode, self.no_alarm)
-                result.append(cell)
-            return "".join(reversed(result))
+                        capped = min(int(round(_hist_rtt(val))), 10**num_w - 1)
+                        cell = f"{capped:>{num_w}} "
+                else:
+                    cell = _history_char(val, mode, self.no_alarm)
+            result.append(cell)
+        return "".join(reversed(result))
 
     def stop(self):
         """Stop the ping loop and terminate the subprocess cleanly."""

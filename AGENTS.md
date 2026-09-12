@@ -56,6 +56,28 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 20 (the history bar costs a screen width, not a day of samples)**:
+  `get_history_string` copied both history deques in full and walked them, in
+  *both* branches, to fill the `length` cells a bar actually shows.
+  `:set history-size` defaults to 86400 — 24 h at one ping a second — and
+  `_section_summary` repeats the work for every host a section covers, so the
+  cost grew with uptime rather than with the bar. **Measured on a 54-host
+  production screen at 100 columns**: 17 ms per redraw after ten minutes,
+  75 ms after an hour, 402 ms after five and a half hours, 1.8 s once the deque
+  filled. The draw loop runs on a 100 ms `getch` timeout, so that *is* the key
+  latency — reported as "every keypress takes about a second after a while",
+  and the main thread held 14451 s of the process's 14662 s of CPU, 95 % of it
+  in this one function. Now both branches walk the deque backwards and stop
+  once the samples are older than the window (plus `_SYNC_SCAN_GRACE`, because
+  a lost probe is dated when it was *sent*, so `history_times` is not
+  monotonic): **0.07 ms, flat at every uptime**. The rebuilt tail is put back
+  in order before the bucket loop — that changes no cell today, since
+  `_worse_hist_sample` is symmetric over every value these deques hold, but it
+  has a tie-break returning its *first* argument and an ordering this loop no
+  longer guaranteed would be a silent wrong reading the moment that branch
+  becomes reachable. `tests/test_history_scan_bounded.py` asserts the *read
+  budget* rather than a wall-clock ratio; at 0.07 ms a timing assertion
+  measures noise and would flake under `-n auto`.
 - **Phase 18 (relays that do not run Linux)**: `:remote-ping` works through
   FreeBSD/OPNsense and MikroTik RouterOS relays. Declared with `--os
   auto|linux|freebsd|mikrotik` on the directive or a `:relay-os <glob> <os>`
