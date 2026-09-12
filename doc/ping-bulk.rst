@@ -2037,6 +2037,81 @@ pressing ``c`` directly.
     to prevent shell escapes.  The same three-option prompt appears after
     editing.
 
+Web interface
+-------------
+
+``:web [start|stop|status]``
+    Serve the host list over HTTP, on a thread inside this process reading the
+    same live state the terminal draws from.  With no argument, report.
+
+    **Read-only.**  It answers ``GET`` and refuses everything else, so a
+    viewer can watch but not touch.
+
+    The page leads with what is down, then shows the host rows with their
+    sections, stats columns and history strips, then the event log.  It polls
+    once every two seconds and collapses to a single column on a phone.
+
+    While the server is running the status bar carries a ``web:<host>:<port>``
+    slot, so a listening socket is not something to discover months later.
+    ``:web status`` adds the request count and the address of the last client.
+
+``:set web-listen <host:port>``
+    Where to bind.  Default ``127.0.0.1:8765``.  Port ``0`` asks the kernel
+    for any free port, which ``:web status`` and the status bar then report.
+    IPv6 goes in brackets: ``[::1]:8765``.
+
+    **Only a loopback address is accepted so far.**  Until there is a
+    password, binding anywhere else would publish the whole fleet to anyone
+    who can reach the port.  A non-loopback address is remembered but refused
+    at ``:web start``, with a reminder of the alternative::
+
+        ssh -L 8765:localhost:8765 <the monitored host>
+
+    Changing the address while the server is running rebinds it, so the
+    setting and the socket cannot disagree.
+
+``:set web-allow <cidr>[,<cidr>…] | any``
+    Client addresses permitted to connect.  Checked against the peer address
+    before routing, so an address outside the list learns nothing about which
+    paths exist.  Default ``any``, which means "whatever the bind address
+    already allows" — with a loopback bind that is this machine.
+
+Both settings are written by ``:save-config``.  The server itself is not
+started by a saved setting: a network socket should open because someone asked
+for it, not because a preference file was written.  To have it up from the
+start, put ``:web start`` in the hosts file.
+
+Why a browser cannot be tricked into driving it
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Binding to loopback is not a boundary against a browser.  A page the operator
+visits can resolve a name of its own choosing to ``127.0.0.1`` and then treat
+the reply as same-origin — DNS rebinding — because the request comes *from*
+the browser on this machine.  Three things answer that:
+
+* The ``Host:`` header is pinned to the names this server was asked to answer
+  to (``localhost``, the bind address, this machine's own name).  Anything
+  else gets ``421``.
+* Every response carries
+  ``Content-Security-Policy: default-src 'none'; script-src 'self'``.  The
+  page has no inline script and no event-handler attributes, so a string that
+  reached the DOM could not execute even if the client were careless.
+* The client writes text with ``textContent`` and never ``innerHTML``, and
+  ``<``, ``>`` and ``&`` are escaped in the JSON.  Every string in the payload
+  is chosen by somebody else: display names come from the hosts file,
+  addresses from reverse DNS — whoever owns the PTR record picks that string —
+  and error text from ping's stderr.
+
+In kiosk mode
+~~~~~~~~~~~~~
+
+``:web start`` is refused at the console.  Kiosk mode exists because the
+person at the keyboard is not trusted, and opening an inbound socket would be
+a way around that.  The hosts file may still declare it, exactly as it may
+declare ``:probe-source``, and starting it is written to syslog through the
+usual audit.  A port below 1024 is refused with the reason: the kiosk unit
+sets ``NoNewPrivileges=yes``, so the bind would fail anyway.
+
 Kiosk mode
 ----------
 

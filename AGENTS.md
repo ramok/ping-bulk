@@ -528,6 +528,68 @@ The monitor classes use an abstract base class pattern to unify ICMP and TCP mon
 - `_proc`: Subprocess handle (if applicable).
 - `resolv_static`: Flag for static DNS mappings.
 
+## 9d. The web listener
+
+The program's first inbound socket. It runs on one thread inside this process
+and reads the same live state the curses view reads — not a separate engine
+behind a protocol. mtr splits `mtr-packet` out for privilege separation and
+that engine is *stateless*; here the engine **is** the statistics owner
+(Welford accumulators and history deques live on each `Monitor`) and nothing
+needs privileges, so a split would move the whole stats layer across a
+boundary and buy nothing.
+
+**Read-only, and the code says so rather than merely intending it:** `do_POST`
+returns 405. Writes arrive in a later phase.
+
+Each control below answers a specific way it could go wrong.
+
+- **`Host:` is pinned.** Binding to loopback is *not* a boundary against a
+  browser: a page the operator visits can resolve a name of its own choosing
+  to `127.0.0.1` and treat the reply as same-origin (DNS rebinding), because
+  the request comes *from* the browser on this machine. Anything outside
+  `_web_allowed_hosts()` gets 421. This is also why a non-loopback bind is
+  refused for now — the names it would be reached by cannot be enumerated
+  from here.
+- **The client allowlist is checked before routing**, so an address outside
+  `:set web-allow` learns nothing about which paths exist.
+- **CSP `default-src 'none'; script-src 'self'`**, with no inline script and
+  no `on*=` attribute in the page. Assets are separate HTTP resources served
+  from a constant in this file — `script-src 'self'` needs separate
+  *resources*, not separate *source files*, so the single-file rule survives
+  intact. The client uses `textContent`, never `innerHTML`, and `_web_json()`
+  escapes `<`, `>`, `&`.
+- **HTTP/1.0, so the server closes each connection.** Keep-alive would hold a
+  thread per idle browser tab and `ThreadingHTTPServer` has no cap of its own;
+  those threads would sit beside dozens of ping subprocesses. `verify_request`
+  adds a hard cap (`_WEB_MAX_CONNECTIONS`) and `setup()` a socket timeout, so
+  a client that connects and says nothing cannot hold a thread.
+- **`allow_reuse_address`**, because the kiosk unit is `Restart=always` and a
+  restart otherwise races its own `TIME_WAIT` sockets and the bind just fails.
+- **Nothing reaches stderr.** `log_message` and `handle_error` are overridden
+  to report into the event log: under curses the next redraw paints over
+  stderr, which is exactly how "the log just stops" happened before (§8). A
+  handler exception becomes a 500 plus an event, not a dead thread and a
+  hanging request.
+- **`:quit` closes the listener**, from `run()`'s `finally`, and `main()`
+  installs a `SIGTERM` handler that sets `running = False` so that teardown
+  actually runs under systemd. There was no signal handling in this program
+  at all before.
+
+**Kiosk mode: declared, never typed.** `:web start` is refused at the console
+and allowed while `_loading_file` is set — the rule `:probe-source` already
+follows. Starting is audited. A port below 1024 is refused with the reason
+(`NoNewPrivileges=yes`), and port **0** is explicitly not that case: the
+kernel picks an ephemeral port well above 1024, which a first cut got wrong.
+
+**Settings persist; the listener does not.** `_save_config` writes
+`web-listen` and `web-allow` but never `:web start` — a network socket should
+open because someone asked, not because a preference file was written. Put
+`:web start` in the hosts file to have it up from boot.
+
+The status bar carries a `web:<host>:<port>` slot whenever the socket is open,
+on the same "only when it is not the default" rule as `layout`. A listening
+port must not be something you discover months later.
+
 ## 9c. The web read side: `uid` and `_web_state()`
 
 Groundwork for a browser view. No socket yet — this is the read model only.

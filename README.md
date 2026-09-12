@@ -55,6 +55,10 @@ Events
 - **Key binding system** — fully rebindable keys via `:bind-key` /
   `:unbind-key`, with per-mode bindings (normal, help, details, command).
 - **Search** — `/` search in host list or event log with `n`/`N` navigation.
+- **Web view** — `:web start` serves the same live host list over HTTP on
+  127.0.0.1, read-only, no dependencies.  Reach it with
+  `ssh -L 8765:localhost:8765 <host>` and open
+  [http://localhost:8765](http://localhost:8765).
 - **Configurable log levels** — quiet/normal/info/debug via `:set log-level`,
   `-v`/`-q` flags.  Event coloring by severity.
 - **Event log** — timestamped up/down/recover events with up-time and

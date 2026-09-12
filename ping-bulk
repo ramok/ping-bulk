@@ -8,6 +8,8 @@ import difflib
 import fnmatch
 import glob as _glob
 import hashlib
+import http.server
+import ipaddress
 import json
 import itertools
 import math
@@ -16,6 +18,7 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import stat
 import socket
 import subprocess
@@ -461,6 +464,12 @@ SET_PARAMS = [
              getter=lambda app: ('on' if app.monitors
                                  and all(m.paused for m in app.monitors)
                                  else 'off')),
+    SetParam('web-listen', '_cmd_web_listen', '<host:port>',
+             'address the web interface binds to (loopback only so far)',
+             getter=lambda app: app.web_listen),
+    SetParam('web-allow', '_cmd_web_allow', '<cidr>[,<cidr>]|any',
+             'client addresses allowed to reach the web interface',
+             getter=lambda app: app.web_allow or 'any'),
     SetParam('mux-split', '_cmd_mux_split', ['v', 'h', 'window'],
              'default pane split direction for :mux (v=below h=right window=new)',
              getter=lambda app: app.mux_split),
@@ -1157,6 +1166,9 @@ _HELP_BINDINGS = [
     "  :bind-key                 list all user bindings",
     "  :unbind-key <key>         remove a key binding",
     "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
+    "  :web \\[start|stop|status]   serve the host list over HTTP, read-only  (no arg reports)",
+    "  :set web-listen <host:port> where it binds (default 127.0.0.1:8765; loopback only)",
+    "  :set web-allow <cidr>,...   client addresses allowed to connect (default any)",
     "  keys: a-z A-Z 0-9   <CR> <Esc> <Space> <C-x>  <Up>/<Down>/<Left>/<Right>",
     "        <PageUp> <PageDown>  za zc zo …  (arbitrary multi-key sequences)",
     "  %h = host  %i = IP  %r = connectable target  %d = SSH dest  %j = jump hosts",
@@ -5880,6 +5892,9 @@ CMD_REGISTRY = [
     CmdDef(['pause'],            '_cmd_pause',
            lambda: _param_arg_choices('pause'),
            '[cycle|on|off]',      'report, cycle, or set global pause'),
+    CmdDef(['web'],              '_cmd_web',        ['start', 'stop', 'status'],
+           '[start|stop|status]',
+           'serve the host list over HTTP (read-only); no arg reports'),
     CmdDef(['seen'],             '_cmd_seen',       None,
            '',                    "insert 'seen' marker in event log"),
     CmdDef(['clear'],            '_cmd_clear',      None,
@@ -6735,6 +6750,485 @@ def _kiosk_validate_ssh_args(ssh_args: list) -> str | None:
     return None
 
 
+# ── Web interface ────────────────────────────────────────────────────────────
+#
+# One HTTP thread inside this process, reading the same live state the curses
+# view reads.  Not a separate engine behind a protocol: mtr splits mtr-packet
+# out for privilege separation, and that engine is stateless — here the engine
+# *is* the statistics owner (Welford accumulators and history deques live on
+# each Monitor), and nothing needs privileges, so a split would move the whole
+# stats layer across a boundary for nothing.
+#
+# This is the program's first inbound socket.  Everything below that looks
+# paranoid is answering a specific way it could go wrong; see AGENTS.md.
+
+_WEB_DEFAULT_LISTEN = '127.0.0.1:8765'
+# ThreadingHTTPServer has no cap of its own: every connection is a thread, and
+# those threads sit beside dozens of ping subprocesses and their readers.
+_WEB_MAX_CONNECTIONS = 16
+_WEB_SOCKET_TIMEOUT = 15.0        # a client that opens and says nothing
+_WEB_MAX_BODY = 64 * 1024         # nothing here reads a body yet; cap it anyway
+
+_WEB_SECURITY_HEADERS = (
+    # No inline script and no inline style: the page pulls both from /static,
+    # so a string that reached the DOM could not execute even if something
+    # else went wrong.  'none' everywhere else because this page fetches
+    # nothing from anywhere.
+    ('Content-Security-Policy',
+     "default-src 'none'; script-src 'self'; style-src 'self'; "
+     "connect-src 'self'; base-uri 'none'; form-action 'none'; "
+     "frame-ancestors 'none'"),
+    ('X-Content-Type-Options', 'nosniff'),
+    ('Referrer-Policy', 'no-referrer'),
+    ('Cache-Control', 'no-store'),
+)
+
+
+def _web_parse_listen(text):
+    """Parse 'host:port' or ':port' into ``(host, port)``.
+
+    Raises ValueError with a message worth showing the user.  IPv6 goes in
+    brackets, as everywhere else a host and port share one string.
+    """
+    text = (text or '').strip()
+    if not text:
+        raise ValueError('missing address; try 127.0.0.1:8765')
+    if text.startswith('['):
+        end = text.find(']')
+        if end < 0:
+            raise ValueError(f"unbalanced '[' in {text!r}")
+        host, rest = text[1:end], text[end + 1:]
+        if not rest.startswith(':'):
+            raise ValueError(f'missing port in {text!r}')
+        port_s = rest[1:]
+    elif ':' in text:
+        host, _, port_s = text.rpartition(':')
+    else:
+        host, port_s = '', text
+    host = host.strip() or '127.0.0.1'
+    try:
+        port = int(port_s)
+    except ValueError:
+        raise ValueError(f'port {port_s!r} is not a number') from None
+    # 0 is legal and useful: the kernel picks a free port, which ':web
+    # status' and the menu bar then report.  Anything above 65535 is not.
+    if not 0 <= port <= 65535:
+        raise ValueError(f'port {port} is out of range')
+    return host, port
+
+
+def _web_parse_allow(text):
+    """Parse a comma/space separated CIDR list into network objects."""
+    nets = []
+    for token in re.split(r'[,\s]+', (text or '').strip()):
+        if not token:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(token, strict=False))
+        except ValueError as exc:
+            raise ValueError(f'{token!r}: {exc}') from None
+    return nets
+
+
+def _web_is_loopback(host):
+    """True when *host* can only be reached from this machine."""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host in ('localhost', '')
+
+
+class _WebHandler(http.server.BaseHTTPRequestHandler):
+    """Read-only HTTP for one request.
+
+    HTTP/1.0, so the server closes each connection itself.  Keep-alive would
+    hold a thread per idle browser tab and there is no cap in the base class;
+    at a one-second poll the reconnect costs nothing and a forgotten tab costs
+    no thread.
+    """
+
+    protocol_version = 'HTTP/1.0'
+    server_version = f'{_PROG_NAME}-web'
+    sys_version = ''        # do not advertise the Python version
+
+    # ── plumbing ─────────────────────────────────────────────────────────
+    def setup(self):
+        # A client that connects and then says nothing would otherwise hold a
+        # thread until it felt like leaving.
+        try:
+            self.request.settimeout(_WEB_SOCKET_TIMEOUT)
+        except OSError:
+            pass
+        super().setup()
+
+    def log_message(self, fmt, *args):
+        """Never stderr: under curses the next redraw paints straight over it."""
+        app = getattr(self.server, 'app', None)
+        if app is not None:
+            try:
+                app.add_event('web', fmt % args, level=LEVEL_DEBUG)
+            except Exception:
+                pass
+
+    def _send(self, status, body=b'', ctype='text/plain; charset=utf-8'):
+        self.send_response(status)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        for name, value in _WEB_SECURITY_HEADERS:
+            self.send_header(name, value)
+        self.end_headers()
+        if body and self.command != 'HEAD':
+            self.wfile.write(body)
+
+    # ── gates, cheapest first ────────────────────────────────────────────
+    def _client_allowed(self):
+        """Is the peer inside ':set web-allow'?  Checked before anything else."""
+        server = self.server
+        if not server.allow_nets:
+            return True
+        try:
+            addr = ipaddress.ip_address(self.client_address[0])
+        except (ValueError, IndexError):
+            return False
+        return any(addr in net for net in server.allow_nets)
+
+    def _host_header_ok(self):
+        """Reject a Host this server was not asked to answer to.
+
+        A browser will happily resolve attacker.example to 127.0.0.1 and then
+        treat the reply as same-origin — DNS rebinding.  Binding to loopback
+        does not stop it, because the request comes *from* the browser on this
+        machine.  Pinning the Host header is what stops it.
+        """
+        host = (self.headers.get('Host') or '').strip()
+        if not host:
+            return False
+        name = host.rsplit(':', 1)[0] if not host.endswith(']') else host
+        name = name.strip('[]').lower()
+        return name in self.server.allowed_hosts
+
+    # ── routing ──────────────────────────────────────────────────────────
+    def do_GET(self):
+        self._handle()
+
+    def do_HEAD(self):
+        self._handle()
+
+    def do_POST(self):
+        # Writes arrive in a later phase; refusing now keeps the read-only
+        # promise true rather than merely intended.
+        self._send(405, b'read-only\n')
+
+    def _handle(self):
+        try:
+            if not self._client_allowed():
+                self._send(403, b'not allowed from this address\n')
+                return
+            if not self._host_header_ok():
+                self._send(421, b'unexpected Host header\n')
+                return
+            path = self.path.split('?', 1)[0]
+            app = self.server.app
+            self.server.note_client(self.client_address[0])
+            if path == '/':
+                self._send(200, _WEB_HTML.encode('utf-8'),
+                           'text/html; charset=utf-8')
+            elif path == '/static/app.css':
+                self._send(200, _WEB_CSS.encode('utf-8'),
+                           'text/css; charset=utf-8')
+            elif path == '/static/app.js':
+                self._send(200, _WEB_JS.encode('utf-8'),
+                           'application/javascript; charset=utf-8')
+            elif path == '/api/state':
+                body = Application._web_json(app._web_state())
+                self._send(200, body, 'application/json; charset=utf-8')
+            else:
+                self._send(404, b'no such path\n')
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            pass            # the client left; not worth an event
+        except Exception as exc:
+            # A handler exception must not leave a silently half-dead UI: the
+            # thread would die, this request would hang, and under curses the
+            # traceback would be painted over.
+            try:
+                self.server.app.add_event(
+                    'web', f'error: request {self.path!r} failed: '
+                           f'{type(exc).__name__}: {exc}', level=LEVEL_NORMAL)
+            except Exception:
+                pass
+            try:
+                self._send(500, b'internal error\n')
+            except Exception:
+                pass
+
+
+class _WebServer(http.server.ThreadingHTTPServer):
+    """The listener, plus the bits ThreadingHTTPServer does not bound."""
+
+    daemon_threads = True
+    # A restart under systemd 'Restart=always' races its own TIME_WAIT
+    # sockets; without this the bind fails and the server is simply missing.
+    allow_reuse_address = True
+    request_queue_size = 16
+
+    def __init__(self, addr, app, allow_nets, allowed_hosts):
+        self.app = app
+        self.allow_nets = allow_nets
+        self.allowed_hosts = allowed_hosts
+        self.last_client = None
+        self.request_count = 0
+        self._active = 0
+        self._active_lock = threading.Lock()
+        super().__init__(addr, _WebHandler)
+
+    def note_client(self, addr):
+        self.last_client = addr
+        self.request_count += 1
+
+    def verify_request(self, request, client_address):
+        """Refuse past the connection cap instead of growing threads forever."""
+        with self._active_lock:
+            if self._active >= _WEB_MAX_CONNECTIONS:
+                return False
+            self._active += 1
+        return True
+
+    def shutdown_request(self, request):
+        with self._active_lock:
+            self._active = max(0, self._active - 1)
+        super().shutdown_request(request)
+
+    def handle_error(self, request, client_address):
+        """Base class prints a traceback to stderr; under curses that is lost."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError,
+                            socket.timeout)):
+            return
+        try:
+            self.app.add_event('web',
+                               f'error: connection from {client_address[0]}: '
+                               f'{type(exc).__name__}: {exc}',
+                               level=LEVEL_NORMAL)
+        except Exception:
+            pass
+
+
+_WEB_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ping-bulk</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <h1>ping-bulk</h1>
+  <div id="summary" class="summary">connecting…</div>
+</header>
+<section id="down-wrap" hidden>
+  <h2>Down now</h2>
+  <ul id="down"></ul>
+</section>
+<section>
+  <h2>Hosts</h2>
+  <div id="rows" class="rows"></div>
+</section>
+<section>
+  <h2>Events</h2>
+  <div id="events" class="events"></div>
+</section>
+<script src="/static/app.js"></script>
+</body>
+</html>
+"""
+
+_WEB_CSS = """
+:root {
+  --bg: #12141a; --fg: #d6dae2; --dim: #767d8c; --line: #262a34;
+  --ok: #49b86b; --slow: #d3a43a; --bad: #d9534f; --vslow: #b06ec8;
+  --quiet: #5a6070;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0 16px 48px;
+  background: var(--bg); color: var(--fg);
+  font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+header { padding: 16px 0 8px; }
+h1 { margin: 0; font-size: 18px; font-weight: 600; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+     color: var(--dim); margin: 24px 0 8px; font-weight: 600; }
+.summary { color: var(--dim); font-size: 13px; }
+.summary.stale { color: var(--slow); }
+#down { margin: 0; padding: 0; list-style: none;
+        border-left: 3px solid var(--bad); }
+#down li { padding: 6px 12px; background: #1b1418; margin-bottom: 2px; }
+#down .name { font-weight: 600; }
+#down .since { color: var(--dim); margin-left: 8px; font-size: 13px; }
+.rows { display: flex; flex-direction: column; gap: 1px; }
+.row { display: flex; align-items: center; gap: 12px;
+       padding: 5px 8px; background: #171a21; border-radius: 3px; }
+.row.section { background: none; padding: 12px 0 2px; font-weight: 600; }
+.row.section .name { color: var(--dim); }
+.row.lvl2 { padding-left: 16px; }
+.row.lvl3 { padding-left: 32px; }
+.row .name { flex: 1 1 12em; min-width: 0; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+.row.down .name { color: var(--bad); }
+.row.paused .name, .row.quiet .name { color: var(--quiet); }
+.stats { display: flex; gap: 10px; color: var(--dim);
+         font-variant-numeric: tabular-nums; font-size: 13px; }
+.stats b { color: var(--fg); font-weight: 500; }
+.strip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         font-size: 12px; letter-spacing: 0; white-space: pre;
+         overflow-x: auto; flex: 0 1 auto; }
+.badge { color: var(--dim); font-size: 12px; }
+.g-ok { color: var(--ok); }
+.g-late { color: var(--slow); }
+.g-bad { color: var(--bad); }
+.g-vslow { color: var(--vslow); }
+.g-quiet { color: var(--quiet); }
+.g-none { color: var(--line); }
+.events { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 12px; white-space: pre-wrap; word-break: break-word;
+          color: var(--dim); display: flex; flex-direction: column-reverse; }
+.events div { padding: 1px 0; }
+.events .warn { color: var(--slow); }
+.events .error { color: var(--bad); }
+@media (max-width: 600px) {
+  .row { flex-wrap: wrap; }
+  .row .name { flex-basis: 100%; }
+  .strip { flex-basis: 100%; }
+}
+"""
+
+_WEB_JS = """
+'use strict';
+// Every string here arrives from the hosts file, from reverse DNS or from
+// ping's stderr.  It reaches the page through textContent and class names
+// only -- never innerHTML, never a style string.
+var POLL_MS = 2000;
+var summary = document.getElementById('summary');
+var downWrap = document.getElementById('down-wrap');
+var downList = document.getElementById('down');
+var rowsEl = document.getElementById('rows');
+var eventsEl = document.getElementById('events');
+
+function glyphClass(ch) {
+  if (ch === '.' || (ch >= '0' && ch <= '4')) return 'g-ok';
+  if (ch === 'x' || (ch >= '5' && ch <= '9')) return 'g-late';
+  if (ch === 'X' || ch === '?') return 'g-bad';
+  if (ch === '>') return 'g-vslow';
+  if (ch === 'o') return 'g-quiet';
+  return 'g-none';
+}
+
+function strip(text) {
+  var box = document.createElement('span');
+  box.className = 'strip';
+  var run = '', runClass = null;
+  for (var i = 0; i < text.length; i++) {
+    var cls = glyphClass(text[i]);
+    if (cls !== runClass) {
+      if (run) { box.appendChild(span(run, runClass)); }
+      run = ''; runClass = cls;
+    }
+    run += text[i];
+  }
+  if (run) { box.appendChild(span(run, runClass)); }
+  return box;
+}
+
+function span(text, cls) {
+  var el = document.createElement('span');
+  if (cls) { el.className = cls; }
+  el.textContent = text;
+  return el;
+}
+
+function hostRow(r) {
+  var el = document.createElement('div');
+  el.className = 'row';
+  if (r.down) { el.classList.add('down'); }
+  if (r.paused) { el.classList.add('paused'); }
+  if (r.no_alarm) { el.classList.add('quiet'); }
+  el.appendChild(span(r.name, 'name'));
+  var stats = document.createElement('span');
+  stats.className = 'stats';
+  Object.keys(r.stats).forEach(function (k) {
+    var cell = document.createElement('span');
+    cell.appendChild(document.createTextNode(k + ' '));
+    var v = document.createElement('b');
+    v.textContent = r.stats[k];
+    cell.appendChild(v);
+    stats.appendChild(cell);
+  });
+  el.appendChild(stats);
+  el.appendChild(strip(r.history));
+  return el;
+}
+
+function sectionRow(r) {
+  var el = document.createElement('div');
+  el.className = 'row section lvl' + r.level;
+  el.appendChild(span(r.title, 'name'));
+  el.appendChild(span(r.badge.join(' '), 'badge'));
+  el.appendChild(strip(r.history));
+  return el;
+}
+
+function render(state) {
+  var up = 0, total = 0;
+  state.rows.forEach(function (r) {
+    if (r.kind === 'host') { total++; if (!r.down) { up++; } }
+  });
+  summary.classList.remove('stale');
+  summary.textContent = up + '/' + total + ' up' +
+    (state.down.length ? ' \\u2014 ' + state.down.length + ' down' : '') +
+    ' \\u2014 ' + new Date(state.time * 1000).toLocaleTimeString();
+
+  downWrap.hidden = state.down.length === 0;
+  downList.replaceChildren.apply(downList, state.down.map(function (d) {
+    var li = document.createElement('li');
+    li.appendChild(span(d.name, 'name'));
+    li.appendChild(span(d.error ? d.error : 'down ' + d.updown, 'since'));
+    return li;
+  }));
+
+  rowsEl.replaceChildren.apply(rowsEl, state.rows.map(function (r) {
+    return r.kind === 'section' ? sectionRow(r) : hostRow(r);
+  }));
+
+  eventsEl.replaceChildren.apply(eventsEl, state.events.slice(-120).map(
+    function (e) {
+      var d = document.createElement('div');
+      var t = e.text.toLowerCase();
+      if (t.indexOf('error:') !== -1) { d.className = 'error'; }
+      else if (t.indexOf('warning:') !== -1) { d.className = 'warn'; }
+      d.textContent = e.text;
+      return d;
+    }));
+}
+
+function poll() {
+  fetch('/api/state', { headers: { 'Accept': 'application/json' } })
+    .then(function (r) {
+      if (!r.ok) { throw new Error('HTTP ' + r.status); }
+      return r.json();
+    })
+    .then(render)
+    .catch(function (err) {
+      summary.classList.add('stale');
+      summary.textContent = 'not updating: ' + err.message;
+    })
+    .then(function () { window.setTimeout(poll, POLL_MS); });
+}
+
+poll();
+"""
+
+
 class Application:
     def __init__(self, entries, log_file=None, hosts_file=None, kiosk_mode=False):
         """Initialise the application from an ordered list of entry tuples.
@@ -6843,6 +7337,13 @@ class Application:
         self.mux_split = 'v'           # default mux split direction: v=below, h=right, window
         self.terminal_emulator = 'auto'  # X terminal emulator name ('auto' or binary)
         self.kiosk_mode = kiosk_mode   # set by --kiosk flag
+        # Web interface: settings persist, the listener does not.  A
+        # network socket should open because someone asked, not because a
+        # preference file was written.
+        self.web_listen = _WEB_DEFAULT_LISTEN
+        self.web_allow = ''
+        self._web_server = None
+        self._web_thread = None
         self.startup_select = None     # host name to pre-highlight at startup (--select)
         self.hosts_file = hosts_file   # path of the active hosts file (for :edit)
         self._monitoring_started = False  # set True once start_monitoring() is called
@@ -7209,6 +7710,10 @@ class Application:
                     f.write("# :log\n")
                 if self.multikey_timeout != 0:
                     f.write(f":set multikey-timeout {self.multikey_timeout}\n")
+                if self.web_listen != _WEB_DEFAULT_LISTEN:
+                    f.write(f":set web-listen {self.web_listen}\n")
+                if self.web_allow:
+                    f.write(f":set web-allow {self.web_allow}\n")
                 if self.late_grace != 1.0:
                     f.write(f":set late-grace {self.late_grace:g}\n")
                 for pattern in self.no_alarm_patterns:
@@ -9709,6 +10214,11 @@ class Application:
             (f"[A]utofold:{'on' if self.autofold else 'off'}", self.autofold),
             # Only worth a slot when it is not the default split.
             *([(f"[l]ayout:{self.layout}", True)] if self.layout != 'all' else []),
+            # A listening socket is not something to discover months later, so
+            # it holds a slot whenever it is open — and only then.
+            *([(f"web:{self._web_server.server_address[0]}:"
+                f"{self._web_server.server_address[1]}", True)]
+              if self._web_server is not None else []),
         ]
         # Add hint items from trie bindings (all modes, deduplicated by id)
         seen_hints = set()
@@ -11222,6 +11732,195 @@ class Application:
                     .replace('>', '\\u003e')
                     .replace('&', '\\u0026'))
         return text.encode('utf-8')
+
+    # ── web interface ────────────────────────────────────────────────────
+    def _web_allowed_hosts(self, host):
+        """The ``Host:`` values this server will answer to.
+
+        Pinning it is what stops DNS rebinding: a browser will resolve
+        attacker.example to 127.0.0.1 and then treat the reply as same-origin,
+        and binding to loopback does not help because the request comes *from*
+        the browser on this machine.
+
+        For a loopback bind the set below is exactly right.  A non-loopback
+        bind is reached by names this process cannot enumerate, which is one
+        more reason it stays refused until there is a credential to go with it.
+        """
+        names = {'localhost', '127.0.0.1', '::1', host.lower()}
+        try:
+            names.add(socket.gethostname().lower())
+            names.add(socket.getfqdn().lower())
+        except OSError:
+            pass
+        names.discard('')
+        return names
+
+    def _web_running(self):
+        return getattr(self, '_web_server', None) is not None
+
+    def _cmd_web(self, args=''):
+        """:web [start|stop|status] — serve the host list over HTTP.
+
+        With no argument, report.  The server runs on a thread inside this
+        process and reads the same live state the terminal draws from.
+
+        Read-only for now: it answers GET and refuses everything else, so a
+        viewer can watch but not touch.
+
+        Settings live in ':set web-listen' and ':set web-allow'.  They are
+        saved by ':save-config'; the server itself is not started by a saved
+        setting, because a network listener should appear because someone
+        asked for it, not because a preference file was written.
+        """
+        verb = args.strip().lower() or 'status'
+        if verb == 'status':
+            self._web_report()
+        elif verb == 'start':
+            self._web_start()
+        elif verb == 'stop':
+            self._web_stop()
+        else:
+            self.add_event('cmd',
+                           f"web: unknown argument '{verb}' — "
+                           "choices: start stop status")
+
+    def _web_report(self):
+        server = getattr(self, '_web_server', None)
+        if server is None:
+            self.add_event('web', f'web: not running (:set web-listen '
+                                  f'{self.web_listen})', level=LEVEL_NORMAL)
+            return
+        host, port = server.server_address[:2]
+        parts = [f'web: listening on {host}:{port}',
+                 f'{server.request_count} request(s)']
+        if server.last_client:
+            parts.append(f'last client {server.last_client}')
+        if self.web_allow:
+            parts.append(f'allow {self.web_allow}')
+        self.add_event('web', '; '.join(parts), level=LEVEL_NORMAL)
+
+    def _web_start(self):
+        """Bind the listener, or say exactly why not."""
+        if self._web_running():
+            self._web_report()
+            return
+        # Kiosk mode models the person at the console as the attacker, so an
+        # inbound socket may be declared by the trusted hosts file but never
+        # typed at the keyboard — the same rule ':probe-source' follows.
+        if self.kiosk_mode and not getattr(self, '_loading_file', False):
+            self.add_event('cmd',
+                           'web: not allowed interactively in kiosk mode — '
+                           'declare ":web start" in the hosts file')
+            return
+        try:
+            host, port = _web_parse_listen(self.web_listen)
+        except ValueError as exc:
+            self.add_event('cmd', f'web: bad web-listen: {exc}')
+            return
+        try:
+            allow_nets = _web_parse_allow(self.web_allow)
+        except ValueError as exc:
+            self.add_event('cmd', f'web: bad web-allow: {exc}')
+            return
+        if not _web_is_loopback(host):
+            # Until there is a password, a non-loopback bind would publish the
+            # whole fleet to anyone who can reach the port.  The address is
+            # accepted and remembered; only starting on it is refused.
+            self.add_event('cmd',
+                           f'web: refusing to listen on {host} — only '
+                           'loopback is supported so far; reach it with '
+                           f'"ssh -L {port}:localhost:{port} <this host>"')
+            return
+        # Port 0 asks the kernel to pick, and it picks an ephemeral one well
+        # above 1024 — so it is not the privileged case this rejects.
+        if self.kiosk_mode and 0 < port < 1024:
+            self.add_event('cmd',
+                           f'web: port {port} needs privileges the kiosk unit '
+                           'does not grant (NoNewPrivileges=yes); use 1024 or '
+                           'above')
+            return
+        try:
+            server = _WebServer((host, port), self, allow_nets,
+                                self._web_allowed_hosts(host))
+        except OSError as exc:
+            self.add_event('cmd', f'web: cannot listen on {host}:{port}: {exc}')
+            return
+        self._web_server = server
+        self._web_thread = _spawn(server.serve_forever, 'web')
+        bound_host, bound_port = server.server_address[:2]
+        self.add_event('web', f'web: listening on http://{bound_host}:'
+                              f'{bound_port}/ (read-only)', level=LEVEL_NORMAL)
+        if self.kiosk_mode:
+            self._kiosk_audit('web-start', f'{bound_host}:{bound_port}')
+
+    def _web_stop(self, quiet=False):
+        """Close the listener and let its thread finish.
+
+        Called on ':web stop' and from run()'s teardown: ':quit' used to leave
+        the socket open until the process died, which under 'Restart=always'
+        raced the next bind.
+        """
+        server = getattr(self, '_web_server', None)
+        if server is None:
+            if not quiet:
+                self.add_event('web', 'web: not running', level=LEVEL_NORMAL)
+            return
+        self._web_server = None
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception as exc:
+            if not quiet:
+                self.add_event('web', f'web: error while stopping: {exc}')
+        thread = getattr(self, '_web_thread', None)
+        if thread is not None:
+            thread.join(timeout=5)
+        self._web_thread = None
+        if not quiet:
+            self.add_event('web', 'web: stopped', level=LEVEL_NORMAL)
+
+    def _cmd_web_listen(self, args=''):
+        """:set web-listen <host:port> — where the web server binds."""
+        if self._handle_param_verb('web-listen', args):
+            return
+        value = args.strip()
+        try:
+            host, port = _web_parse_listen(value)
+        except ValueError as exc:
+            self.add_event('cmd', f'web-listen: {exc}')
+            return
+        self.web_listen = f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
+        if self._monitoring_started:
+            self.add_event('config', f'web-listen: {self.web_listen}')
+        if self._web_running():
+            # Rebind rather than leave the setting and the socket disagreeing.
+            self._web_stop(quiet=True)
+            self._web_start()
+
+    def _cmd_web_allow(self, args=''):
+        """:set web-allow <cidr>[,<cidr>…] — who may connect at all.
+
+        Checked against the peer address before authentication or routing, so
+        an address outside the list costs one comparison and learns nothing.
+        Empty means "whatever the bind address already allows".
+        """
+        if self._handle_param_verb('web-allow', args):
+            return
+        value = args.strip()
+        if value.lower() in ('none', 'any', '-'):
+            value = ''
+        try:
+            nets = _web_parse_allow(value)
+        except ValueError as exc:
+            self.add_event('cmd', f'web-allow: {exc}')
+            return
+        self.web_allow = ' '.join(str(n) for n in nets)
+        if self._monitoring_started:
+            self.add_event('config',
+                           f'web-allow: {self.web_allow or "any"}')
+        server = getattr(self, '_web_server', None)
+        if server is not None:
+            server.allow_nets = nets
 
     def _history_render_time(self):
         """Return ``(render_time, sync)`` — the right edge of a history strip.
@@ -16202,6 +16901,10 @@ class Application:
                         self._key_seq = []
 
         finally:
+            # Close the listener before the process goes: ':quit' used to
+            # leave it open until exit, and under systemd 'Restart=always'
+            # that raced the next bind.
+            self._web_stop(quiet=True)
             for monitor in self.monitors:
                 monitor.stop()
             self._stop_probe_readers()
@@ -16405,6 +17108,20 @@ def main(stdscr, args):
         app._dispatch_cmd(f':set ping-view {args.ping_view}')
     if args.sync_history:
         app._dispatch_cmd(f':set sync-history {args.sync_history}')
+
+    # SIGTERM is how systemd stops this (the kiosk unit is Restart=always).
+    # With no handler the process dies where it stands: daemon threads are cut
+    # mid-write and the web listener is never closed, so the restart races its
+    # own socket.  Setting the flag lets run()'s teardown do its job — the
+    # loop notices within one 100 ms tick.  SIGINT already arrives as
+    # KeyboardInterrupt and is handled in the loop.
+    def _on_term(_signum, _frame):
+        app.running = False
+
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except (ValueError, OSError):
+        pass        # not the main thread, or a platform without it
 
     app.run(stdscr)
 
