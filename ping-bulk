@@ -1031,7 +1031,8 @@ _HELP_CMDS_INTERACTIVE = [
     "  :fold close-healthy       fold sections with nothing to see  (:no-alarm = up)   (z[)",
     "  :fold close-unhealthy     fold sections where a host is unexpectedly down      (z])",
     "  :save-config              save current settings to config file",
-    "  :help \\[tab-number]       open help overlay; tab 1-6 or name  (:man alias)",
+    "  :help \\[tab-number]       open help overlay; tab number or name  (:man alias)",
+    "                            a 7th [Probes] tab appears when a :probe is declared",
     "  :q  :quit                 quit",
     "",
     "  :edit                     open hosts file in external editor; reloads on save",
@@ -6800,6 +6801,12 @@ class Application:
         # an ':edit' that changes the file has to restart them.
         self.probe_script = None
         self.probe_script_path = None
+        # The '--script' argument as written, before _probe_script_path()
+        # resolved it.  Kept for the Probes help tab: a relative path, or one
+        # reached through a symlinked hosts file, is shipped from somewhere the
+        # declaration does not name, and "which file is actually running" is
+        # the question that tab exists to answer.
+        self.probe_script_declared = None
         self.probe_interval = 60.0     # seconds between readings
         self.probe_retain = 1440       # samples kept per probe per host
         self._mux_from_binding = False  # True while executing commands from a key binding
@@ -10206,7 +10213,10 @@ class Application:
 
         # In rtt/scaled mode use multi-character cells; success mode uses 1 char per ping.
         hist_mode = self._history_mode_name()
-        if hist_mode == 'rtt':
+        view_probe = self._probe_def_for_label(hist_mode)
+        if view_probe is not None:
+            cell_width = self._probe_cell_width(view_probe)
+        elif hist_mode == 'rtt':
             cell_width = self._rtt_cell_width()
         else:
             cell_width = 1  # 'success' and 'scaled' both use one column per ping
@@ -10452,10 +10462,11 @@ class Application:
                                       self._stat_cell(monitor, 'Last'),
                                       self._stat_attr(monitor, 'Last', row_attr))
 
-            probe = self._probe_def_for_label(hist_mode)
+            probe = view_probe
             if probe is not None:
                 history = self._probe_history_string(
-                    monitor, probe, display_count, self.history_offset)
+                    monitor, probe, display_count, self.history_offset,
+                    cell_width)
             else:
                 history = monitor.get_history_string(
                     display_count, self.history_offset, hist_mode, cell_width,
@@ -10484,6 +10495,10 @@ class Application:
                         stdscr.addstr(row, col, cell, curses.color_pair(2) | curses.A_BOLD | row_attr)  # bright red — process error
                     elif content[0] == '>':
                         stdscr.addstr(row, col, cell, curses.color_pair(3) | row_attr)  # yellow — >100 ms
+                    elif probe is not None:
+                        stdscr.addstr(row, col, cell,
+                                      self._probe_strip_attr(
+                                          probe, int(content), row_attr))
                     else:
                         val = int(content)
                         if hist_mode == 'scaled':
@@ -10691,22 +10706,88 @@ class Application:
         """
         return monitor.alive is not True or monitor.error is not None
 
-    def _probe_history_string(self, monitor, probe, length, offset=0):
-        """Render one probe's series as a strip, newest sample on the right.
+    def _probe_cell_width(self, probe):
+        """Columns per sample in a probe strip: the reading, then one space.
 
-        One cell per sample, which is bucket-by-interval: probe readings already
-        arrive one per interval, so the strip covers ``length * interval`` of
-        real time instead of the ``length`` seconds a one-second bucket would
-        give.  Gaps are spaces rather than the previous value — a stalled probe
-        must not look like a healthy flat line.
+        Sized from the declared range the way :meth:`_rtt_cell_width` is sized
+        from the largest latency seen, so a cell shows the reading itself —
+        ``28`` — rather than a 0-9 bucket (``8``) the reader has to decode
+        against the range to get back to it.  Never below 2, so a probe strip
+        always takes the wide-cell path and one rule colours it.
+        """
+        if probe.vmax is not None:
+            digits = len(str(int(probe.vmax)))
+        else:
+            widest = 0.0
+            for m in self.monitors:
+                with m.lock:
+                    series = m.probes.get(probe.name)
+                    vals = [v for v in series.values if v is not None] if series else []
+                if vals:
+                    widest = max(widest, max(vals))
+            digits = len(str(int(widest)))
+        return max(2, digits + 1)
+
+    def _probe_history_string(self, monitor, probe, length, offset=0, cell_width=2):
+        """Render one probe's series as a strip, **newest sample on the left**.
+
+        Left is where the ping strip puts the newest sample, and ':set
+        ping-view' swaps one for the other in the same columns — so reading
+        them in opposite directions made a probe series appear to run backwards
+        against the bar it replaced.  This used to pad on the left and append
+        chronologically, which is right-to-left; nothing chose that, it was
+        simply the other convention.
+
+        One cell per sample, which is bucket-by-interval: probe readings
+        already arrive one per interval, so the strip covers ``length *
+        interval`` of real time instead of the ``length`` seconds a one-second
+        bucket would give.  Gaps are spaces rather than the previous value — a
+        stalled probe must not look like a healthy flat line.
+
+        The cell holds the reading itself, right-aligned in ``cell_width - 1``
+        with a trailing space, exactly as the ``rtt`` ping view draws a
+        latency.  The 0-9 bucket glyph (:func:`_probe_char`) survives only in
+        the details overlay, where a sparkline has one column per sample and
+        carries its own ``^ 38 min ago … now ^`` axis labels — that one reads
+        left to right because it is labelled, and because it sits among
+        ``Min / Max`` and ``Average`` rather than next to the ping bar.
         """
         with monitor.lock:
             series = monitor.probes.get(probe.name)
             values = list(series.values) if series else []
         if offset:
             values = values[:-offset] if offset < len(values) else []
-        cells = [_probe_char(v, probe.vmin, probe.vmax) for v in values[-length:]]
-        return ' ' * (length - len(cells)) + ''.join(cells)
+        recent = values[-length:]
+        recent.reverse()                      # newest first, i.e. leftmost
+        num_w = max(1, cell_width - 1)
+        cells = []
+        for v in recent:
+            if v is None:
+                cells.append(' ' * cell_width)
+            else:
+                capped = min(int(round(v)), 10 ** num_w - 1)
+                cells.append(f"{capped:>{num_w}} ")
+        return ''.join(cells) + ' ' * cell_width * (length - len(cells))
+
+    def _probe_strip_attr(self, probe, value, row_attr):
+        """Colour one probe strip cell by the probe's own --warn / --crit.
+
+        Not by where the digit sits in the range, which is what the shared
+        ping palette does: that maps '0'-'4' green and '5'-'9' yellow because
+        for latency a high number is a slow reply.  A probe is not latency —
+        28 of 32 satellites drew yellow for being *good* — so the strip now
+        judges a reading the way the column and the details overlay already
+        do.  A probe with no thresholds is therefore uncoloured rather than
+        wrong; the cell shows the number, which is the honest signal.
+
+        The comparison is against the value as drawn (the cell is rounded), so
+        a cell and its colour can never disagree with each other.
+        """
+        if probe.crit is not None and value >= probe.crit:
+            return curses.color_pair(2) | curses.A_BOLD | row_attr
+        if probe.warn is not None and value >= probe.warn:
+            return curses.color_pair(3) | row_attr
+        return curses.color_pair(1) | row_attr
 
     def _probe_overlay_lines(self, monitor, inner_w):
         """Build the details-overlay block for every probe declared on *monitor*.
@@ -12768,6 +12849,7 @@ class Application:
                 self.probe_source = None
                 self.probe_script = None
                 self.probe_script_path = None
+                self.probe_script_declared = None
                 self.add_event("probe", "probe-source: disabled")
                 return
             else:
@@ -12783,6 +12865,7 @@ class Application:
             self.add_event("cmd", "probe-source: missing --cmd or --script")
             return
         script = None
+        script_declared = script_path
         if script_path is not None:
             script_path = self._probe_script_path(script_path)
             if self.kiosk_mode:
@@ -12830,6 +12913,7 @@ class Application:
         self.probe_source = cmd
         self.probe_script = script
         self.probe_script_path = script_path
+        self.probe_script_declared = script_declared
         self.probe_interval = interval
         self.probe_hosts = hosts
         if self._monitoring_started:
@@ -14361,29 +14445,32 @@ class Application:
         """Unfold (expand) all sections."""
         self._fold_all(False)
 
-    @classmethod
-    def _resolve_help_tab(cls, arg):
+    def _resolve_help_tab(self, arg):
         """Resolve a tab number or name to a 0-based tab index, or None.
 
-        Tab *numbers* are 1-6 as printed in the tab bar and as bound to the
-        ``1``-``6`` overlay keys, so what the user sees is what they type.
+        Tab *numbers* are as printed in the tab bar and as bound to the
+        ``1``-``7`` overlay keys, so what the user sees is what they type.
         A case-insensitive unique prefix of a tab name also works, which is why
         ``:help bind`` and ``:help Bindings`` both reach the Bindings tab.
+
+        An instance method rather than a classmethod because the last tab is
+        conditional: 'Probes' exists only where a ':probe' was declared.
         """
         a = (arg or '').strip().lower()
         if not a:
             return None
+        names = self._tab_names()
         if a.isdigit():
             n = int(a)
-            return n - 1 if 1 <= n <= len(cls._TAB_NAMES) else None
-        hits = [i for i, name in enumerate(cls._TAB_NAMES)
+            return n - 1 if 1 <= n <= len(names) else None
+        hits = [i for i, name in enumerate(names)
                 if name.lower().startswith(a)]
         return hits[0] if len(hits) == 1 else None
 
     def _cmd_help(self, args=''):
         """Open the help overlay, or switch tab when it is already open.
 
-        *args* may be a tab number (1-6), a tab name or unique prefix, or
+        *args* may be a tab number, a tab name or unique prefix, or
         ``next``/``prev`` to cycle.  Opening resets the per-tab scroll offsets;
         switching tabs in an already-open overlay preserves them, so each tab
         keeps its position.  The overlay is drawn by _draw_help_overlay() and is
@@ -14395,21 +14482,21 @@ class Application:
 
         if a in ('next', 'prev'):
             step = 1 if a == 'next' else -1
-            tab = (self.help_tab + step) % len(self._TAB_NAMES)
+            tab = (self.help_tab + step) % len(self._tab_names())
         elif a:
             tab = self._resolve_help_tab(a)
             if tab is None:
                 self.add_event("cmd", f"help: unknown tab '{a}'; choices: "
-                               f"1-{len(self._TAB_NAMES)} or "
-                               f"{' '.join(n.split()[0].lower() for n in self._TAB_NAMES)}")
+                               f"1-{len(self._tab_names())} or "
+                               f"{' '.join(n.split()[0].lower() for n in self._tab_names())}")
                 return
         else:
             tab = 0 if not was_open else self.help_tab
 
         if not was_open:
             # Fresh open — start every tab at the top.
-            self._tab_scroll = [0] * len(self._TAB_NAMES)
-            self._tab_h_scroll = [0] * len(self._TAB_NAMES)
+            self._tab_scroll = [0] * len(self._tab_names())
+            self._tab_h_scroll = [0] * len(self._tab_names())
             self.help_open = True
             self.help_search_active = False
         self.help_tab = tab
@@ -14898,10 +14985,89 @@ class Application:
 
     _TAB_NAMES = ('Interactive', 'Hosts file', 'Example', 'Commands', 'Bindings', 'Settings')
 
+    def _tab_names(self):
+        """The tabs this session actually has.
+
+        'Probes' is appended only when a ':probe' is declared: the tab lists
+        what each probe reads and how it is shown, which is nothing to say on
+        the great majority of runs, and an always-present empty tab is a tab
+        everyone learns to skip.  Appended rather than inserted, so the numbers
+        of the six standing tabs -- which the '1'-'6' overlay keys and every
+        ':help <n>' in a hosts file depend on -- do not move.
+        """
+        if self.probe_defs:
+            return self._TAB_NAMES + ('Probes',)
+        return self._TAB_NAMES
+
+    def _build_probes_lines(self):
+        """The Probes tab: what each ':probe' reads and how it is shown.
+
+        A probe is the one thing in the overlay the program cannot describe in
+        advance — the names, units and thresholds come from the hosts file, so
+        without this tab the only way to recall what 'gpsoff' meant is to find
+        the file that declared it.
+        """
+        lines = ["  [bold:Custom probes]", ""]
+        if self.probe_source:
+            scope = ('every host' if self.probe_hosts == ['*']
+                     else ', '.join(self.probe_hosts))
+            if self.probe_script is not None:
+                lines.append(f"    script:   {self.probe_script_declared}"
+                             f"   [dim:(shipped — not installed on the hosts)]")
+                # The resolved path, whenever it is not what was typed: a
+                # relative path, or one found beside the *target* of a
+                # symlinked hosts file, is read from somewhere the declaration
+                # does not name.  That is exactly when "which file is actually
+                # running" is worth an answer.
+                if self.probe_script_path != self.probe_script_declared:
+                    lines.append(f"    file:     {self.probe_script_path}")
+                lines.append(f"    size:     {len(self.probe_script)} bytes,"
+                             f" needs base64 on the target")
+            else:
+                lines.append(f"    command:  {self.probe_source}"
+                             f"   [dim:(must already exist on the hosts)]")
+            lines += [f"    on:       {scope}",
+                      f"    interval: {self.probe_interval:g}s"
+                      f"    retain: {self.probe_retain}"]
+            if self.hosts_file:
+                lines.append(f"    declared: {self.hosts_file}")
+            lines.append("")
+        else:
+            lines += ["    [yellow:no :probe-source set — nothing is being read]", ""]
+
+        groups = [d for d in self.probe_defs.values() if d.is_group]
+        singles = [d for d in self.probe_defs.values() if not d.is_group]
+
+        lines.append("  [bold:Readings]")
+        for d in singles:
+            rng = (f"range {d.vmin:g}:{d.vmax:g}"
+                   if d.vmin is not None and d.vmax is not None else "no range")
+            th = ' '.join(filter(None, [
+                f"warn {d.warn:g}" if d.warn is not None else "",
+                f"crit {d.crit:g}" if d.crit is not None else ""])) or "no thresholds"
+            unit = f" {d.unit}" if d.unit else ""
+            lines.append(f"    {d.name:<12} column [bold:{d.label}]{unit}"
+                         f"   {rng}   {th}"
+                         + ("   on-fail give-up" if d.on_fail != 'retry' else ""))
+        if groups:
+            lines += ["", "  [bold:Combined columns]"]
+            for d in groups:
+                lines.append(f"    {d.name:<12} column [bold:{d.label}]"
+                             f"   = {' / '.join(d.members)}")
+        lines += ["", "  [bold:Showing one]",
+                  "    :set stats <name>       a column with the latest reading",
+                  "    :set ping-view <name>   the strip, newest sample leftmost",
+                  "    [Enter] on a host       current value, spread, sparkline",
+                  "",
+                  "    '-' means nothing read yet, 'err' that the read failed.",
+                  "    A probe never changes host status.",
+                  ""]
+        return lines
+
     def _build_tab_header_line(self):
         """Build the tab bar line for the top of the help overlay."""
         parts = []
-        for i, name in enumerate(self._TAB_NAMES):
+        for i, name in enumerate(self._tab_names()):
             if i == self.help_tab:
                 parts.append(f'[{i + 1}:tabactive {name}]')
             else:
@@ -14920,6 +15086,9 @@ class Application:
         """
         header = self._build_tab_header_line()
         header += ' [Tab]/[S-Tab] ↔ tab'
+
+        if self.help_tab == 6:  # Probes (only present when one is declared)
+            return [header, '-DIVIDER-'] + self._build_probes_lines()
 
         if self.help_tab == 5:  # Settings
             lines = self._build_settings_lines()

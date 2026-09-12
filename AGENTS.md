@@ -56,6 +56,40 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 22 (the probe strip reads like the ping strip)**: three things were
+  wrong with `:set ping-view <probe>`, all reported from one screen showing
+  twenty-eight satellites as a yellow `8`.
+  **The cell held a bucket, not the reading.** `_probe_char` maps a value onto
+  0-9 across `--range`, so `gpssat --range 0:32` drew `8` for 28 — a number the
+  reader has to decode against the range to get back to what was measured. The
+  cell is now sized from the range (`_probe_cell_width`, the same shape as
+  `_rtt_cell_width`) and holds the reading, exactly as the `rtt` view holds a
+  latency. The 0-9 glyph survives only in the details-overlay sparkline, which
+  is one column per sample and carries its own axis labels.
+  **The colour came from the ping palette.** The strip is painted by matching
+  the *character*: `'01234'` green, `'56789'` yellow, because for latency a
+  high number is a slow reply. Nothing about a probe reached that decision, so
+  28 of 32 satellites drew yellow for being **good**. Cells are now coloured by
+  the probe's own `--warn`/`--crit` (`_probe_strip_attr`), which is how its
+  column and the overlay already judge a reading; a probe with no thresholds is
+  uncoloured rather than wrong. The comparison is against the value *as drawn*
+  (the cell is rounded), so a cell and its colour cannot disagree.
+  **It ran backwards.** The ping strip puts the newest sample on the left
+  (measured: `'90 80 70 60 50 40 30 20 10 '`); the probe strip appended
+  chronologically and padded on the left, putting it on the right. `:set
+  ping-view` swaps one for the other **in the same columns**, so a probe series
+  appeared to run against the bar it replaced. Nothing chose that — the test
+  that pinned it was named `test_short_series_is_right_aligned` and its
+  docstring claimed "as the ping strip is", which was simply not true. The
+  overlay sparkline still reads left to right, deliberately: it is labelled
+  `^ 38 min ago … now ^` and sits among `Min / Max` and `Average`.
+  **A 7th `[Probes]` help tab** appears when a `:probe` is declared, listing
+  what each one reads — range, thresholds, unit, the column header it draws,
+  a group's members, and the script being shipped with the file it resolved to.
+  Those all come from the hosts file, so nothing else in the overlay can know
+  them. Appended, never inserted: the `1`-`6` overlay keys and every `:help <n>`
+  in a hosts file depend on the six standing numbers. `_resolve_help_tab` had
+  to stop being a `@classmethod` to see `probe_defs`.
 - **Phase 21 (several readings in one column)**: `:probe <name> --combine a,b,c`
   joins its members' latest readings with `/`, so `GPS s/off/sat` over
   `0/0/29` costs one header instead of three each wide enough to name

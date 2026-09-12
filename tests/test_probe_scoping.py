@@ -818,3 +818,103 @@ class TestStatsColumnsRoundTrip:
         app = self._app(pb, tmp_path, cfg)
         app._cmd_stats('last,avg,stdev')
         assert app._stats_custom_tokens() == ['last', 'avg', 'stdev']
+
+
+# ---------------------------------------------------------------------------
+# The Probes help tab
+# ---------------------------------------------------------------------------
+
+class TestProbesHelpTab:
+    """A probe is the one thing in the overlay the program cannot describe in
+    advance: the names, units and thresholds come from the hosts file."""
+
+    def test_absent_until_a_probe_is_declared(self, app):
+        """An always-present empty tab is a tab everyone learns to skip."""
+        assert 'Probes' not in app._tab_names()
+        assert app._resolve_help_tab('7') is None
+
+    def test_appears_once_one_is(self, app):
+        app._cmd_probe('gps')
+        assert app._tab_names()[-1] == 'Probes'
+        assert app._resolve_help_tab('7') == 6
+
+    def test_the_six_standing_tabs_do_not_move(self, app):
+        """The '1'-'6' overlay keys and every ':help <n>' in a hosts file
+        depend on those numbers, so the new tab is appended, not inserted."""
+        before = app._tab_names()
+        app._cmd_probe('gps')
+        assert app._tab_names()[:6] == before[:6]
+        assert app._resolve_help_tab('5') == 4        # still Bindings
+        assert app._tab_names()[4] == 'Bindings'
+
+    def test_reached_by_name_too(self, app):
+        app._cmd_probe('gps')
+        assert app._resolve_help_tab('probes') == 6
+        assert app._resolve_help_tab('prob') == 6
+
+    def test_it_lists_each_reading_with_its_declaration(self, app):
+        app._cmd_probe('gpssat --range 0:32')
+        app._cmd_probe('gps --unit s --range 0:5 --warn 2 --crit 4 --label GPS')
+        text = '\n'.join(app._build_probes_lines())
+        assert 'gpssat' in text and 'range 0:32' in text
+        assert 'no thresholds' in text          # gpssat declares none
+        assert 'warn 2' in text and 'crit 4' in text
+        assert 'GPS' in text                    # the column header it draws
+
+    def test_it_names_a_group_and_its_members(self, app):
+        app._cmd_probe("gpsall --combine gps,gpsoff --label 'GPS s/off'")
+        text = '\n'.join(app._build_probes_lines())
+        assert 'gps / gpsoff' in text
+
+    def test_it_says_when_nothing_is_being_read(self, app):
+        """':probe' without ':probe-source' declares a column nothing fills."""
+        app._cmd_probe('gps')
+        text = '\n'.join(app._build_probes_lines())
+        assert 'no :probe-source' in text
+
+    def test_it_shows_the_script_and_its_scope(self, app, tmp_path):
+        f = tmp_path / 'p.sh'
+        f.write_text('echo gps=0\n')
+        app._cmd_probe('gps')
+        app._cmd_probe_source(f'--script {f} --hosts *-comm-mod --interval 30')
+        text = '\n'.join(app._build_probes_lines())
+        assert 'shipped' in text
+        assert str(f) in text
+        assert '*-comm-mod' in text
+        assert '30s' in text
+
+    def test_a_relative_script_shows_the_file_it_resolved_to(self, pb, tmp_path):
+        """A relative path, or one found beside the target of a symlinked
+        hosts file, is read from somewhere the declaration does not name."""
+        (tmp_path / 'probe.sh').write_text('echo gps=0\n')
+        hosts = tmp_path / 'my.hosts'
+        hosts.write_text('10.0.0.1\n')
+        cfg = tmp_path / 'ping-bulk' / 'config'
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text('')
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application([('host', '10.0.0.1')], hosts_file=str(hosts))
+        app._monitoring_started = True
+        app._cmd_probe('gps')
+        app._cmd_probe_source('--script probe.sh')
+        text = '\n'.join(app._build_probes_lines())
+        assert 'script:   probe.sh' in text                  # as written
+        assert str(tmp_path / 'probe.sh') in text            # as resolved
+        assert str(hosts) in text                            # where declared
+
+    def test_an_absolute_script_is_not_shown_twice(self, app, tmp_path):
+        f = tmp_path / 'p.sh'
+        f.write_text('echo gps=0\n')
+        app._cmd_probe('gps')
+        app._cmd_probe_source(f'--script {f}')
+        text = '\n'.join(app._build_probes_lines())
+        assert text.count(str(f)) == 1
+        assert 'file:' not in text
+
+    def test_a_plain_command_says_it_must_already_be_there(self, app):
+        app._cmd_probe('gps')
+        app._cmd_probe_source('--cmd /usr/local/bin/pb-probe')
+        text = '\n'.join(app._build_probes_lines())
+        assert 'command:  /usr/local/bin/pb-probe' in text
+        assert 'must already exist' in text
+        assert 'shipped' not in text

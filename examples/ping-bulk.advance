@@ -102,7 +102,10 @@
 #   [Enter] on a host      -- current value, min/max/average and a sparkline
 #
 # '-' means nothing read yet, 'err' means the read or connection failed.
-# --range scales the strip; --warn/--crit colour every view; a probe never
+# --range sizes the strip cell, which holds the reading itself ('28', not a
+# 0-9 bucket) with the newest sample leftmost as the ping bar has it;
+# --warn/--crit colour every view, so a probe with no thresholds is
+# uncoloured rather than judged by the ping palette; a probe never
 # changes host status.  In kiosk mode probes may only be declared here, not
 # typed at the ':' prompt, and the command must be an unwritable script.
 # See doc/custom-probes.md for the design.

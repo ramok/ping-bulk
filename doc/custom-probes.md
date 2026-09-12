@@ -175,10 +175,32 @@ Chosen: **view mode** first — `:set ping-view <probe>` swaps the strip over to
 that value, and `[H]` cycles back to the ping modes.  The fixed-width strip
 column is not built yet; it is the remaining piece of this view.
 
-Strip cells are coloured by position in the declared range (0-4 green, 5-9
-yellow, out of range magenta), matching the `scaled` ping mode.  The column and
-the overlay colour by `--warn`/`--crit` instead, because there a single value is
-being judged rather than a shape being read.
+Two things about that first cut turned out to be wrong, and were corrected once
+a real probe was on screen:
+
+**The cell shows the reading, not a bucket of it.** A 0-9 glyph mirrors the
+`scaled` ping mode, but a latency bucket is read against a scale everybody
+knows, while a probe bucket has to be decoded against that probe's `--range`:
+`gpssat --range 0:32` drew `8` for twenty-eight satellites. The strip now sizes
+its cell from the range and prints the value, exactly as the `rtt` view prints a
+latency — `28`, at the cost of the columns the digits take. The 0-9 glyph
+survives in the overlay sparkline, which has one column per sample and its own
+axis labels.
+
+**Cells are coloured by `--warn`/`--crit`, like the column and the overlay.**
+Colouring by position in the range meant colouring by the shared ping palette,
+where `5`-`9` is yellow because for latency a high number is a slow reply. A
+probe is not latency: twenty-eight of thirty-two satellites drew yellow for
+being *good*. Judging the reading the way the other two views judge it makes a
+probe without thresholds uncoloured rather than wrong, which is the honest
+answer — the number is on screen either way.
+
+**The newest sample is on the left**, where the ping strip puts it. These two
+occupy the same columns and `:set ping-view` swaps one for the other, so
+opposite directions made a probe series appear to run backwards against the bar
+it replaced. The overlay sparkline still reads left to right, because it is
+labelled `^ 38 min ago … now ^` and sits among `Min / Max` and `Average` rather
+than next to the ping bar.
 
 ## View (c): details overlay
 

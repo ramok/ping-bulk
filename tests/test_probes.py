@@ -396,22 +396,35 @@ class TestProbeStrip:
         return app, m, app.probe_defs['temp']
 
     def test_one_cell_per_sample(self, wired):
+        """The cell holds the reading, not a 0-9 bucket of it."""
         app, m, probe = wired
-        assert app._probe_history_string(m, probe, 5) == '02579'
+        assert app._probe_history_string(m, probe, 5, 0, 4) == \
+            '100  75  50  25   0 '
 
-    def test_short_series_is_right_aligned(self, wired):
-        """Newest on the right, as the ping strip is."""
+    def test_the_newest_sample_is_leftmost(self, wired):
+        """As the ping strip is — ':set ping-view' swaps one for the other in
+        the same columns, so reading them in opposite directions made a probe
+        series appear to run backwards against the bar it replaced."""
         app, m, probe = wired
-        assert app._probe_history_string(m, probe, 8) == '   02579'
+        strip = app._probe_history_string(m, probe, 8, 0, 4)
+        assert strip.startswith('100 ')
+        assert strip.endswith(' ' * 12)      # the three unfilled cells, at the old end
 
     def test_offset_scrolls_back(self, wired):
         app, m, probe = wired
-        assert app._probe_history_string(m, probe, 3, offset=2).strip() == '025'
+        assert app._probe_history_string(m, probe, 3, 2, 4).split() == \
+            ['50', '25', '0']
 
     def test_no_series_is_blank(self, app, pb):
         app._cmd_probe('temp --range 0:100')
         assert app._probe_history_string(pb.PingMonitor('x'),
-                                         app.probe_defs['temp'], 4) == '    '
+                                         app.probe_defs['temp'], 4, 0, 3) == ' ' * 12
+
+    def test_the_cell_is_sized_from_the_declared_range(self, app, pb):
+        app._cmd_probe('sat --range 0:32')
+        app._cmd_probe('pct --range 0:100')
+        assert app._probe_cell_width(app.probe_defs['sat']) == 3   # '28 '
+        assert app._probe_cell_width(app.probe_defs['pct']) == 4   # '100 '
 
     def test_ping_view_selects_a_probe(self, wired):
         app, _, _ = wired

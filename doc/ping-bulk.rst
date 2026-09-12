@@ -815,9 +815,18 @@ Key bindings
 ``:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N] [--on-fail retry|give-up] [--label TEXT] [--combine A,B,C]``
     Declare how one key from ``:probe-source`` is displayed.  Keys with no
     declaration are ignored, so a single site-wide script can serve hosts
-    that show different subsets.  ``--range`` scales the history strip,
-    ``--warn``/``--crit`` colour the column and the overlay, and ``--unit``
-    labels both.  ``--label`` sets the column header, which otherwise is the
+    that show different subsets.  ``--range`` sizes the history-strip cell,
+    ``--warn``/``--crit`` colour every view, and ``--unit`` labels the column
+    and the overlay.
+
+    In the strip (``:set ping-view <name>``) a cell holds the **reading
+    itself**, right-aligned in a field sized from ``--range`` — ``28``, not a
+    0-9 bucket of it — the way the ``rtt`` view prints a latency, and the
+    **newest sample is leftmost**, as it is for ping.  Cells are coloured by
+    ``--warn``/``--crit`` like the column, so a probe with no thresholds is
+    uncoloured rather than judged by a latency palette.  The details overlay
+    keeps a one-column-per-sample sparkline, which reads left to right and
+    says so with ``^ 38 min ago … now ^``.  ``--label`` sets the column header, which otherwise is the
     name with its first letter capitalised — that suits ``temp`` and not an
     acronym, where ``gps`` would head a column ``Gps``.  The label is
     presentation only: ``:set stats`` and ``:set ping-view`` still take the
@@ -1356,11 +1365,17 @@ Help
     With no argument the *Interactive* tab is shown; ``?`` opens the
     *Bindings* tab instead.
 
-    *tab-number* is ``1``-``6`` exactly as printed in the tab bar and as
-    bound to the ``1``-``6`` overlay keys::
+    *tab-number* is exactly as printed in the tab bar and as bound to the
+    number keys in the overlay::
 
         1 Interactive   2 Hosts file   3 Example
         4 Commands      5 Bindings     6 Settings
+        7 Probes        (only when a ':probe' has been declared)
+
+    The *Probes* tab lists what each probe reads — its range, thresholds, unit
+    and the column header it draws — because those come from the hosts file and
+    nothing else in the overlay can know them.  It is appended rather than
+    inserted, so the six standing tabs keep their numbers.
 
     A tab name or any unique prefix works too, so ``:help bindings`` and
     ``:help bind`` both reach *Bindings*.  ``next`` and ``prev`` cycle.
