@@ -6851,6 +6851,8 @@ _WEB_SESSION_TTL = 12 * 3600.0      # a browser tab left open overnight
 _WEB_SESSION_MAX = 64               # bound the dict; oldest are dropped first
 _WEB_LOGIN_FAILS = 5                # per client, per window
 _WEB_LOGIN_WINDOW = 60.0
+_WEB_REFUSE_LOG_MAX = 5             # refusal events per client per window
+_WEB_REFUSE_CMD_CHARS = 200         # of the command text, in the report
 _WEB_PBKDF2_ROUNDS = 200_000
 _WEB_COOKIE = 'pb_session'
 
@@ -6979,6 +6981,24 @@ class _WebLoginGate:
     def clear(self, client):
         with self._lock:
             self._fails.pop(client, None)
+
+    def count_in_window(self, client):
+        """Record a hit for *client* and return how many are in the window.
+
+        One call, one hit — so a caller that asks twice does not count twice,
+        which is exactly the bug the first cut of the refusal throttle had: the
+        "further refusals not logged" line never appeared, because testing for
+        it consumed another slot.  Used to bound how loudly a refusal is
+        reported: the record matters, but an event per request is the very
+        flood the access log was stopped from creating (§9d), and it would
+        destroy the refusal records along with everything else.
+        """
+        now = time.monotonic()
+        with self._lock:
+            recent = [t for t in self._fails.get(client, ()) if now - t < self.window]
+            recent.append(now)
+            self._fails[client] = recent
+            return len(recent)
 
 
 # ── Web interface ────────────────────────────────────────────────────────────
@@ -7251,12 +7271,53 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
 
     def _queue(self, cmd, uid):
         app = self.server.app
+        client = self.client_address[0]
         allowed, reason = app._web_command_allowed(cmd)
         if not allowed:
+            # **Audited before the refusal is sent, not after it is skipped.**
+            # This used to 403 and return, so a session could walk the entire
+            # blocked surface — ':mux sh', ':source /etc/shadow', ':quit' —
+            # and leave nothing behind at all: no audit record, and an access
+            # line at LEVEL_DEBUG that the default log level hides.  A refusal
+            # is exactly the request worth keeping, because a legitimate user
+            # does not send one.  Failed *logins* were already recorded here;
+            # failed commands were not.
+            # **Bounded, because the record must not become the flood.**
+            # A refused command is worth an event — but an event per request,
+            # at LEVEL_NORMAL, is written to the ':log' file by design (§12),
+            # and a session can send them as fast as the socket allows:
+            # measured at 1072/s, which wipes the 10 000-entry deque in nine
+            # seconds and writes some 10 GB a day.  That would destroy the
+            # refusal records too.  The command text is capped for the same
+            # reason — the body limit is 64 KB, so one request could otherwise
+            # write a 60 KB line.  The syslog audit above is not throttled:
+            # it is the security record, and syslog does its own rate control.
+            shown = cmd[:_WEB_REFUSE_CMD_CHARS]
+            if len(cmd) > _WEB_REFUSE_CMD_CHARS:
+                shown += '…'
+            app._kiosk_audit('web-cmd-refused', shown, principal=client)
+            seen = self.server.refuse_log_gate.count_in_window(client)
+            if seen <= _WEB_REFUSE_LOG_MAX:
+                app.add_event('web',
+                              f'web: {client} was refused {shown!r} — {reason}',
+                              level=LEVEL_NORMAL)
+            elif seen == _WEB_REFUSE_LOG_MAX + 1:
+                app.add_event('web',
+                              f'web: {client} is being refused repeatedly — '
+                              f'further refusals not logged this minute',
+                              level=LEVEL_NORMAL)
             body = Application._web_json({'error': reason})
             self._send(403, body, 'application/json; charset=utf-8')
             return
-        client = self.client_address[0]
+        if not app._web_enqueue(cmd, uid=uid, client=client):
+            # Saying '202 queued' and then dropping it is the worst of the
+            # three options.  The deque evicts from the *left*, so a flood
+            # pushes out the operator's own click and the browser reports
+            # success for a command that never ran.
+            body = Application._web_json(
+                {'error': 'busy: the command queue is full, try again'})
+            self._send(503, body, 'application/json; charset=utf-8')
+            return
         # Audited whether or not kiosk mode is on: a command from off the
         # machine is worth a record even when the console is trusted.
         app._kiosk_audit('web-cmd', cmd, principal=client)
@@ -7264,7 +7325,6 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         # monitored is worth seeing without first turning the log up.
         app.add_event('web', f'web: {client} ran {cmd!r}',
                       level=LEVEL_NORMAL)
-        app._web_enqueue(cmd, uid=uid, client=client)
         self._send(202, b'{"queued":true}', 'application/json; charset=utf-8')
 
     def _do_login(self):
@@ -7454,6 +7514,9 @@ class _WebServer(http.server.ThreadingHTTPServer):
         self._csrf_key = secrets.token_bytes(32)
         self.sessions = {}
         self.login_gate = _WebLoginGate()
+        # Separate from login_gate: a refused *command* must not consume a
+        # login attempt, and a wrong password must not quieten the audit.
+        self.refuse_log_gate = _WebLoginGate()
         self.last_client = None
         self.request_count = 0
         self._active = 0
@@ -9799,7 +9862,7 @@ class Application:
         the way to fold such a group deliberately.
         """
         if not args:
-            self.add_event("cmd", "fold: missing action argument")
+            self._refuse("cmd", "fold: missing action argument")
             return
         args, if_hosts = self._strip_fold_flag(args, '--if-hosts')
         # close-other accepts an optional trailing pattern argument
@@ -9826,7 +9889,7 @@ class Application:
         action = fold_map.get(action, action)
         valid = {'za', 'zA', 'zo', 'zO', 'zc', 'zC', 'zR', 'zM', 'zr', 'zm', 'z[', 'z]', 'zx'}
         if action not in valid:
-            self.add_event("cmd", f"fold: unknown action '{args}'")
+            self._refuse("cmd", f"fold: unknown action '{args}'")
             return
         # The guard is only meaningful for the section-scoped actions.  Applied
         # to a global one it would cancel it outright — 'close-all --if-hosts'
@@ -9905,16 +9968,21 @@ class Application:
         wants: a toggle applied to a view that is two seconds old can do the
         exact opposite of what was asked for.
         """
+        # Validate before looking for a target: a bad value is a bad value
+        # whether or not anything is selected, and checking targets first made
+        # ':pause-selected yes' silent at the console — the one place the
+        # refusal is most likely to be typed.
+        want = args.strip().lower()
+        if want and want not in ('on', 'off'):
+            self._refuse('cmd', f"pause-selected: unknown value '{want}' "
+                                "— choices: on off")
+            return
         targets = self._get_pause_targets()
         if not targets:
             return
-        want = args.strip().lower()
-        if want in ('on', 'off'):
+        if want:
             for monitor in targets:
                 monitor.pause() if want == 'on' else monitor.unpause()
-        elif want:
-            self.add_event('cmd', f"pause-selected: unknown value '{want}' "
-                                  "— choices: on off")
         else:
             self._apply_pause_toggle(targets)
 
@@ -12792,8 +12860,17 @@ class Application:
         return None
 
     def _web_enqueue(self, cmd, uid=None, client=''):
-        """Hand a command to the main loop.  Called on the server thread."""
+        """Hand a command to the main loop.  Called on the server thread.
+
+        Returns False when the queue is full rather than silently discarding
+        the oldest entry, which is what ``deque(maxlen=…)`` does on its own.
+        The caller turns that into a 503, so the browser learns the command
+        did not run.
+        """
+        if len(self._web_queue) >= self._web_queue.maxlen:
+            return False
         self._web_queue.append({'cmd': cmd, 'uid': uid, 'client': client})
+        return True
 
     def _web_drain(self):
         """Run what the web server queued — on the main thread, one tick.
@@ -12872,9 +12949,9 @@ class Application:
         elif verb == 'stop':
             self._web_stop()
         else:
-            self.add_event('cmd',
-                           f"web: unknown argument '{verb}' — "
-                           "choices: start stop status")
+            self._refuse('cmd',
+                         f"web: unknown argument '{verb}' — "
+                         "choices: start stop status")
 
     def _web_report(self):
         server = getattr(self, '_web_server', None)
@@ -12915,7 +12992,7 @@ class Application:
         # inbound socket may be declared by the trusted hosts file but never
         # typed at the keyboard — the same rule ':probe-source' follows.
         if self.kiosk_mode and not getattr(self, '_loading_file', False):
-            self.add_event('cmd',
+            self._refuse('cmd',
                            'web: not allowed interactively in kiosk mode — '
                            'declare ":web start" in the hosts file')
             return
@@ -12929,24 +13006,24 @@ class Application:
         try:
             host, port = _web_parse_listen(self.web_listen)
         except ValueError as exc:
-            self.add_event('cmd', f'web: bad web-listen: {exc}')
+            self._refuse('cmd', f'web: bad web-listen: {exc}')
             return
         try:
             allow_nets = _web_parse_allow(self.web_allow)
         except ValueError as exc:
-            self.add_event('cmd', f'web: bad web-allow: {exc}')
+            self._refuse('cmd', f'web: bad web-allow: {exc}')
             return
         password_hash = None
         if self.web_password_file:
             try:
                 password_hash = _web_read_password_file(self.web_password_file)
             except ValueError as exc:
-                self.add_event('cmd', f'web: web-password-file: {exc}')
+                self._refuse('cmd', f'web: web-password-file: {exc}')
                 return
         if not _web_is_loopback(host) and password_hash is None:
             # A per-run token dies with the process, which is fine for a
             # tunnel and useless for a listener other machines come back to.
-            self.add_event('cmd',
+            self._refuse('cmd',
                            f'web: refusing to listen on {host} without a '
                            'password — set ":set web-password-file <path>" '
                            f'first, or bind loopback and use "ssh -L '
@@ -12955,12 +13032,12 @@ class Application:
         try:
             tls_context = self._web_tls_context()
         except ValueError as exc:
-            self.add_event('cmd', f'web: web-tls-cert: {exc}')
+            self._refuse('cmd', f'web: web-tls-cert: {exc}')
             return
         # Port 0 asks the kernel to pick, and it picks an ephemeral one well
         # above 1024 — so it is not the privileged case this rejects.
         if self.kiosk_mode and 0 < port < 1024:
-            self.add_event('cmd',
+            self._refuse('cmd',
                            f'web: port {port} needs privileges the kiosk unit '
                            'does not grant (NoNewPrivileges=yes); use 1024 or '
                            'above')
@@ -12971,7 +13048,7 @@ class Application:
                                 password_hash=password_hash,
                                 tls_context=tls_context)
         except OSError as exc:
-            self.add_event('cmd', f'web: cannot listen on {host}:{port}: {exc}')
+            self._refuse('cmd', f'web: cannot listen on {host}:{port}: {exc}')
             return
         self._web_server = server
         self._web_thread = _spawn(server.serve_forever, 'web')
@@ -13042,7 +13119,7 @@ class Application:
         try:
             host, port = _web_parse_listen(value)
         except ValueError as exc:
-            self.add_event('cmd', f'web-listen: {exc}')
+            self._refuse('cmd', f'web-listen: {exc}')
             return
         self.web_listen = f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
         if self._monitoring_started:
@@ -13070,11 +13147,21 @@ class Application:
             if self._monitoring_started:
                 self.add_event('config', 'web-password-file: none')
             return
+        # **The path is kept even when the file is unusable right now.**
+        # Validating here and refusing to store it meant a file whose mode had
+        # been relaxed — by an installer, a restore, a stray umask — silently
+        # dropped the setting, and the next ':save-config' wrote the config
+        # back *without* the line.  The operator then met "refusing to listen
+        # on 0.0.0.0 without a password — set ':set web-password-file'",
+        # naming the very setting they had set, with the path now gone for
+        # good.  A path is a path; whether it can be read is a question for
+        # the moment it is read, which is ':web start'.
         try:
             _web_read_password_file(value)
         except ValueError as exc:
-            self.add_event('cmd', f'web-password-file: {exc}')
-            return
+            self._refuse('cmd', f'web-password-file: {exc} — keeping the '
+                                f'path; ":web start" will refuse until it is '
+                                f'readable')
         self.web_password_file = value
         if self._monitoring_started:
             self.add_event('config', f'web-password-file: {value}')
@@ -13114,12 +13201,12 @@ class Application:
                            level=LEVEL_NORMAL)
             value = 'safe'
         if value not in _WEB_COMMAND_MODES:
-            self.add_event('cmd',
+            self._refuse('cmd',
                            f"web-commands: unknown value '{value}' — "
                            f"choices: {' '.join(_WEB_COMMAND_MODES)}")
             return
         if value != 'read-only' and self.kiosk_mode:
-            self.add_event('cmd',
+            self._refuse('cmd',
                            'web-commands: kiosk mode allows read-only only')
             return
         self.web_commands = value
@@ -13186,7 +13273,7 @@ class Application:
         try:
             nets = _web_parse_allow(value)
         except ValueError as exc:
-            self.add_event('cmd', f'web-allow: {exc}')
+            self._refuse('cmd', f'web-allow: {exc}')
             return
         self.web_allow = ' '.join(str(n) for n in nets)
         if self._monitoring_started:
@@ -14752,7 +14839,7 @@ class Application:
         if rest in ('--toggle', '-t'):
             monitor = self._selected_monitor()
             if monitor is None:
-                self.add_event("cmd", "no-alarm: no host selected")
+                self._refuse("cmd", "no-alarm: no host selected")
                 return
             name, alias = self._prog_match_names(monitor)
             # Persist the alias when there is one: it is the name shown, and it
@@ -14778,7 +14865,7 @@ class Application:
             if rest == flag or rest.startswith(flag + ' '):
                 names = rest[len(flag):].split()
                 if not names:
-                    self.add_event("cmd", f"no-alarm: {flag} needs a host")
+                    self._refuse("cmd", f"no-alarm: {flag} needs a host")
                     return
                 for name in names:
                     self.no_alarm_manual[name] = want
@@ -14795,7 +14882,7 @@ class Application:
                 rest = rest[len(flag):].strip()
                 break
         if not rest:
-            self.add_event("cmd", "no-alarm: missing host or glob")
+            self._refuse("cmd", "no-alarm: missing host or glob")
             return
         changed = []
         for pattern in rest.split():
@@ -14804,7 +14891,7 @@ class Application:
                     self.no_alarm_patterns.remove(pattern)
                     changed.append(pattern)
                 elif self._monitoring_started:
-                    self.add_event("cmd", f"no-alarm: no rule {pattern!r}")
+                    self._refuse("cmd", f"no-alarm: no rule {pattern!r}")
             elif pattern not in self.no_alarm_patterns:
                 self.no_alarm_patterns.append(pattern)
                 changed.append(pattern)
@@ -15783,7 +15870,7 @@ class Application:
             return
         modes_lower = [m.lower() for m in DNS_MODES]
         if args.lower() not in modes_lower:
-            self.add_event("cmd",
+            self._refuse("cmd",
                 f"dns: unknown mode '{args}' — choices: {' '.join(DNS_MODES)}")
             return
         self.dns_mode = modes_lower.index(args.lower())
@@ -15910,7 +15997,7 @@ class Application:
         if a in sorts:
             self.sort_by = a
         else:
-            self.add_event("cmd",
+            self._refuse("cmd",
                 f"sort: unknown mode '{args}' — choices: {' '.join(sorts)}")
 
     def _cmd_history(self, args=''):
@@ -15936,7 +16023,7 @@ class Application:
             self._history_probe = self.probe_defs[args].label
         else:
             choices = ' '.join(list(HISTORY_MODES) + list(self.probe_defs))
-            self.add_event("cmd",
+            self._refuse("cmd",
                 f"history: unknown mode '{args}' — choices: {choices}")
 
     def _cmd_layout(self, args=''):
@@ -15971,7 +16058,7 @@ class Application:
         if toggle:
             target = want or 'log'
             if target not in LAYOUTS:
-                self.add_event("cmd",
+                self._refuse("cmd",
                     f"layout: unknown mode '{rest}' — choices: {' '.join(LAYOUTS)}")
                 return
             # Already on the target — return to where we came from.  Falling
@@ -15979,7 +16066,7 @@ class Application:
             want = target if self.layout != target else (
                 self._layout_prev if self._layout_prev != target else 'all')
         elif want not in LAYOUTS:
-            self.add_event("cmd",
+            self._refuse("cmd",
                 f"layout: unknown mode '{rest}' — choices: {' '.join(LAYOUTS)}")
             return
 
@@ -16014,6 +16101,29 @@ class Application:
         self._status_msg = {'text': text, 'expires': time.time() + 3.0}
         if to_log:
             self.add_event("cmd", text)
+
+    def _refuse(self, category, text):
+        """Report a refusal so it is visible without turning the log up.
+
+        Category ``cmd`` is ``LEVEL_INFO`` and the default log level is
+        ``LEVEL_NORMAL``, so an event-only refusal says **nothing on screen**:
+        the command appears to do nothing and offers no reason.  This program
+        has shipped that bug three times now — ``:set stats`` losing every
+        column on restart (§8 Phase 19, reported as "my settings did not
+        survive a restart"), and the whole web surface, where ``:web start``
+        refusing to bind and every ``:set web-*`` rejection were both silent.
+        A real one, from a production config: ``:set web-listen 0.0.0.0:8088``
+        with no password file, where ``:web start`` did nothing and said
+        nothing, and the reason was only reachable at ``-vvv``.
+
+        The status bar carries it as well as the log, because the log may be
+        scrolled back, filtered, or simply below the fold.  Startup needs no
+        status bar — there is no screen yet — and ``add_event`` already
+        promotes a ``cmd`` event to ``LEVEL_NORMAL`` while a file is loading.
+        """
+        self.add_event(category, text, level=LEVEL_NORMAL)
+        if self._monitoring_started:
+            self._status_msg = {'text': text, 'expires': time.time() + 4.0}
 
     def _handle_param_verb(self, name, args):
         """Report or cycle the parameter *name*; True when that is all to do.
@@ -16123,7 +16233,7 @@ class Application:
         elif val == 'off':
             want_pause = False
         else:
-            self.add_event("cmd",
+            self._refuse("cmd",
                 f"pause: unknown value '{val}' — choices: on off cycle")
             return
         for m in self.monitors:
@@ -16262,7 +16372,7 @@ class Application:
         elif val == 'off':
             self.sync_history = False
         else:
-            self.add_event("cmd",
+            self._refuse("cmd",
                 f"sync-history: unknown value '{val}' — choices: on off cycle")
             return
         state = 'on' if self.sync_history else 'off'
@@ -16315,7 +16425,7 @@ class Application:
             self.autofold = False
             self._autofold_ts.clear()
         else:
-            self.add_event("cmd", f"autofold: unknown value '{val}'; choices: on off")
+            self._refuse("cmd", f"autofold: unknown value '{val}'; choices: on off")
             return
         state = 'on' if self.autofold else 'off'
         self.add_event("autofold", f"autofold {state}")

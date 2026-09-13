@@ -2147,8 +2147,14 @@ Web interface
     A file holding either a plain password or an already-derived
     ``pbkdf2_sha256$…`` verifier — the second form lets a deployment keep the
     plaintext out of the image entirely.  It must not be group- or
-    world-readable; ping-bulk refuses it otherwise, because the whole point
-    is that the local user cannot read it.
+    world-readable; ping-bulk refuses to start the listener otherwise,
+    because the whole point is that the local user cannot read it.
+
+    The file is checked when it is read, at ``:web start``.  Setting a path
+    that cannot be read right now says so and keeps the path, so a mode
+    relaxed by an installer or a restore costs a ``chmod`` rather than the
+    setting itself — including on a loopback bind, where the listener refuses
+    to start rather than quietly falling back to the sign-in link.
 
     The password is never stored in the config and never echoed.  Only the
     *path* is saved, so what it contains stays where you put it, under

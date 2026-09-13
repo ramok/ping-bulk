@@ -181,12 +181,64 @@ class TestThePasswordFile:
         with pytest.raises(ValueError, match='empty'):
             pb._web_read_password_file(_password_file(tmp_path, ''))
 
-    def test_setting_it_validates_immediately(self, pb, tmp_path):
-        """A bad path must fail when typed, not at the next ':web start'."""
+    def test_setting_it_reports_immediately_but_keeps_the_path(self, pb,
+                                                               tmp_path):
+        """Said at once, and the setting survives it.
+
+        Refusing to *store* an unusable path was worse than useless: a file
+        whose mode had been relaxed by an installer or a restore dropped the
+        setting silently, and the next ':save-config' wrote the config back
+        without the line.  The operator then met "refusing to listen on
+        0.0.0.0 without a password — set ':set web-password-file'", naming the
+        setting they had set, with the path gone for good.  Whether a file can
+        be read is a question for the moment it is read.
+        """
         app = _make_app(pb, tmp_path)
         app._dispatch_cmd(':set web-password-file /nonexistent/pw')
-        assert app.web_password_file == ''
+        assert app.web_password_file == '/nonexistent/pw'
         assert 'cannot read' in _events(app)
+
+    def test_an_unusable_file_still_stops_the_listener(self, pb, tmp_path):
+        """Validation moved to the point of use; it did not go away."""
+        import os
+        pw = tmp_path / 'web.pw'
+        pw.write_text('hunter2')
+        os.chmod(str(pw), 0o644)                 # group- and world-readable
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set web-listen 127.0.0.1:0')
+        app._dispatch_cmd(':set web-password-file ' + str(pw))
+        app._dispatch_cmd(':web start')
+        assert app._web_server is None
+        assert 'world-readable' in _events(app)
+        os.chmod(str(pw), 0o600)                 # and fixing it is enough
+        app._dispatch_cmd(':web start')
+        try:
+            assert app._web_server is not None, _events(app)
+        finally:
+            app._web_stop(quiet=True)
+
+    def test_the_path_survives_a_save_and_reload(self, pb, tmp_path):
+        """The round trip the old behaviour broke."""
+        import os
+        from unittest.mock import patch as _patch
+        pw = tmp_path / 'web.pw'
+        pw.write_text('hunter2')
+        os.chmod(str(pw), 0o600)
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set web-password-file ' + str(pw))
+        with _patch.object(pb, '_config_path', return_value=cfg):
+            app._dispatch_cmd(':save-config')
+        os.chmod(str(pw), 0o644)                 # something relaxes the mode
+        # Not _make_app: it truncates the config before constructing, and the
+        # whole point here is to start from the file that was just written.
+        with _patch.object(pb, '_config_path', return_value=cfg):
+            app2 = pb.Application([('host', '10.0.0.1')])
+        app2._monitoring_started = True
+        assert app2.web_password_file == str(pw)
+        with _patch.object(pb, '_config_path', return_value=cfg):
+            app2._dispatch_cmd(':save-config')
+        assert 'web-password-file' in open(cfg).read()
 
 
 # ===========================================================================

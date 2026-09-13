@@ -753,6 +753,80 @@ that `%h`/`%r` are *not* expanded, because `_handle_cmd_key` calls
 checked rather than assumed, and it is why no second expansion path had to be
 written; the council had flagged one as a thing that would drift.
 
+### A refusal nobody can see
+
+`_refuse()` reports at `LEVEL_NORMAL` **and** puts the text on the status bar.
+Category `cmd` is `LEVEL_INFO` and the default log level is `LEVEL_NORMAL`, so
+an event-only refusal says nothing at all on screen: the command appears to do
+nothing and offers no reason.
+
+**This is the third time.** `:set stats` refusing a whole line silently was
+Phase 19, reported as "my settings did not survive a restart" (§8). The web
+surface then reintroduced it in five places at once — `:web start`, every
+`:set web-*`, refused web commands, queue overflow, and a dropped
+`web-password-file`. It was found in production: a config holding `:set
+web-listen 0.0.0.0:8088` with no password file, where `:web start` did nothing,
+said nothing, and the explanation was reachable only by restarting at `-vvv`.
+`tests/test_web_silence.py` has a structural guard that fails if a new web
+handler reports a refusal the quiet way.
+
+Four separate silences, and each needed its own fix:
+
+- **`_queue` sent its 403 before the audit**, so a session could walk the whole
+  blocked surface — `:mux sh`, `:source /etc/shadow`, `:quit` — and leave
+  nothing behind: no audit record, and an access line at `LEVEL_DEBUG` that the
+  default level hides. A refusal is the request most worth keeping, because a
+  legitimate user does not send one. Failed *logins* were already recorded;
+  failed commands were not.
+- **The write queue answered `202 queued` and dropped the command.**
+  `deque(maxlen=…)` evicts from the **left**, so a flood pushes out the
+  operator's own click while the browser reports success. `_web_enqueue`
+  returns False when full and the handler sends 503.
+- **An unusable `web-password-file` dropped the setting**, and the next
+  `:save-config` wrote the config back without the line — so the operator met
+  "refusing to listen on 0.0.0.0 without a password", naming the setting they
+  had set, with the path gone for good. A path is a path; whether it can be
+  read is a question for the moment it is read, which is `:web start`. It is
+  reported at once and kept.
+- **The allowlisted commands were left out of the first pass** and are
+  precisely the ones a browser can reach: `:pause-selected yes`, `:dns bogus`,
+  `:layout bogus` and a dozen more refused in silence. Sixteen sites in
+  `_WEB_SAFE_COMMANDS` handlers now go through `_refuse` too — which improves
+  the terminal as much as the browser, since these are typed at the `:` line
+  far more often than they are posted.
+- The rest were `add_event('cmd', …)` and are now `_refuse`.
+
+**The record must not become the flood.** Reporting every refusal at
+`LEVEL_NORMAL` put it in the `:log` file by design (§12), and a session can
+send refusals as fast as the socket allows: measured at 1072/s, which wipes the
+10 000-entry deque in nine seconds and writes some 10 GB a day — destroying the
+refusal records along with everything else, which is the exact bug this fix was
+meant to close, inverted. `refuse_log_gate` reports the first
+`_WEB_REFUSE_LOG_MAX` per client per minute and then one line saying it has
+stopped; the command text is capped at `_WEB_REFUSE_CMD_CHARS`, because the
+body limit is 64 KB and one request could otherwise write a 60 KB line. **The
+syslog audit is deliberately not throttled** — it is the security record, and
+syslog does its own rate control. The gate is separate from `login_gate`: a
+refused command must not spend a login attempt, and a wrong password must not
+quieten the audit.
+
+`count_in_window` returns the count rather than a boolean because the first cut
+asked the gate twice — once for "may I log?" and once for "may I say I have
+stopped?" — and the second question consumed another slot, so the
+stopped-reporting line never appeared at all.
+
+**Not every `add_event('cmd', …)` is a refusal.** A mechanical conversion
+turned `:layout`'s *success* report into one, which took over the status bar
+and blanked the `layout:log` indicator the layout tests assert on. The
+distinguishing mark is a `return` immediately after; the three that legitimately
+carry on are checked by hand and named in `tests/test_web_silence.py`.
+
+**A guard that matches one quoting style guards nothing.** The structural test
+looked for `add_event('cmd'` while this file uses `add_event("cmd"` 136 times
+to 1, so a new handler written in the house style would have sailed past it. It
+now matches both and keys on the function *name* (`_web_*`, `_cmd_web*`) rather
+than a hardcoded list, and has its own regression test.
+
 ### Parity with the terminal
 
 **Two silent wrong readings, found by putting the two views side by side.**
