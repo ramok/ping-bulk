@@ -15,6 +15,7 @@ import json
 import itertools
 import math
 import os
+import tempfile
 import re
 import secrets
 import select
@@ -2131,6 +2132,37 @@ def _evaluate_if_condition_logged(condition_str, entries):
     if warning:
         entries.append(('warn', warning))
     return _evaluate_if_condition(condition_str)
+
+
+def _write_file_atomically(path, text):
+    """Replace *path* with *text*, or leave it exactly as it was.
+
+    ``open(path, 'w')`` truncates before the first byte is written, so any
+    failure after that point — a full disk, a permission change, an encoding
+    error — destroys the file it was saving.  For a config that is months of
+    somebody's preferences, a failed save that empties it is far worse than a
+    failed save that does nothing.  **This is not hypothetical**: a config was
+    emptied exactly this way during development.
+
+    Writes a sibling temp file (same directory, so ``os.replace`` is atomic on
+    one filesystem), flushes and fsyncs it, then renames over the target.  The
+    temp file is removed if anything goes wrong.
+    """
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix='.tmp-', suffix='~')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _config_path():
@@ -5073,7 +5105,13 @@ class _HostsParser:
         """
         self.variables['SCRIPT_DIR'] = os.path.dirname(os.path.abspath(filename))
         self.variables['SCRIPT_FILE'] = os.path.basename(filename)
-        with open(filename) as f:
+        # UTF-8, not the process locale: a hosts file carries '°C' in a
+        # ':probe --unit', an accented '## label', a '→' in a ':title'.  Under
+        # LC_ALL=C the shipped examples/ping-bulk.advance died on its own
+        # degree sign with a raw UnicodeDecodeError — the top-level guards
+        # catch OSError, and a decode failure is a ValueError.  'replace' so
+        # one bad byte costs one character rather than the whole file.
+        with open(filename, encoding='utf-8', errors='replace') as f:
             return self.parse(f.read())
 
     def parse(self, src):
@@ -8510,7 +8548,7 @@ class Application:
         """
         path = _config_path()
         try:
-            with open(path) as f:
+            with open(path, encoding='utf-8', errors='replace') as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith('#'):
@@ -8518,8 +8556,105 @@ class Application:
                     if not line.startswith(':'):
                         continue  # silently ignore non-command lines
                     self._dispatch_cmd(line)
-        except OSError:
-            pass  # missing or unreadable config file is not an error
+        except Exception:
+            pass  # missing, unreadable, or undecodable: not worth a crash
+
+    def _config_text(self):
+        """Render the config file exactly as :meth:`_save_config` would write it.
+
+        Split from the writing because the write is atomic: the whole text
+        has to exist before anything touches the file on disk.
+        """
+        out = []
+        out.append(f"# {_PROG_NAME} configuration\n")
+        out.append(f":set dns {DNS_MODES[self.dns_mode]}\n")
+        if self.stats_custom is not None:
+            custom_str = ','.join(self._stats_custom_tokens())
+            out.append(f":set stats {custom_str}\n")
+        else:
+            out.append(f":set stats {STATS_MODES[self.stats_mode]}\n")
+        out.append(f":set sort {self.sort_by}\n")
+        out.append(f":set ping-view {HISTORY_MODES[self.history_mode]}\n")
+        if self.layout != 'all':
+            out.append(f":layout {self.layout}\n")
+        out.append(f":set log-size {self.log_size}\n")
+        out.append(f":set history-size {self.history_size}\n")
+        out.append(f":set sync-history {'on' if self.sync_history else 'off'}\n")
+        out.append(f":set mux-split {self.mux_split}\n")
+        label = self._LOGLEVEL_LABELS.get(self.loglevel, 'normal')
+        out.append(f":set log-level {label}\n")
+        if self.terminal_emulator != 'auto':
+            out.append(f":set terminal {self.terminal_emulator}\n")
+        if self.log_file:
+            out.append(f":log {self.log_file}\n")
+        else:
+            out.append("# :log\n")
+        if self.multikey_timeout != 0:
+            out.append(f":set multikey-timeout {self.multikey_timeout}\n")
+        if self.web_listen != _WEB_DEFAULT_LISTEN:
+            out.append(f":set web-listen {self.web_listen}\n")
+        if self.web_allow:
+            out.append(f":set web-allow {self.web_allow}\n")
+        # The path, never the password: what it contains stays where
+        # the operator put it, under permissions they chose.
+        if self.web_password_file:
+            out.append(f":set web-password-file {self.web_password_file}\n")
+        if self.web_commands != 'safe':
+            out.append(f":set web-commands {self.web_commands}\n")
+        if self.web_hosts:
+            out.append(f":set web-hosts {self.web_hosts}\n")
+        if self.web_tls_cert:
+            out.append(f":set web-tls-cert {self.web_tls_cert}\n")
+        if self.web_tls_key:
+            out.append(f":set web-tls-key {self.web_tls_key}\n")
+        if self.late_grace != 1.0:
+            out.append(f":set late-grace {self.late_grace:g}\n")
+        for pattern in self.no_alarm_patterns:
+            out.append(f":no-alarm {pattern}\n")
+        # Per-host decisions from 'o', written as the flags that
+        # reconstruct them.  '--remove' would not do: it deletes a
+        # glob for every host it covers, and cannot say "off for this
+        # one" at all.
+        for name, want in self.no_alarm_manual.items():
+            flag = '--mark' if want else '--unmark'
+            out.append(f":no-alarm {flag} {name}\n")
+        for pattern, os_name in self.relay_os_rules:
+            out.append(f":relay-os {pattern} {os_name}\n")
+        if _ssh_connect_rate != _SSH_CONNECT_RATE_DEFAULT:
+            out.append(f":set ssh-connect-rate {_ssh_connect_rate:g}\n")
+        if _ssh_monitor_flags() != _SSH_MONITOR_OPTIONS_DEFAULT:
+            # shlex.join, not quote(join): quoting the whole string
+            # makes it one argv element when read back, which ssh
+            # rejects.  join quotes only the tokens that need it.
+            opts = shlex.join(_ssh_monitor_flags())
+            out.append(f":set ssh-options {opts if opts else 'none'}\n")
+        # Per-program option rules
+        for prog, rules in self.prog_options.items():
+            for pattern, opts in rules:
+                if opts is None:
+                    out.append(f":prog-options {prog} {pattern} --disable\n")
+                else:
+                    out.append(f":prog-options {prog} {pattern} {opts}\n")
+        # User key bindings (only non-default, all modes)
+        user_bindings = [(keys, b) for keys, b in self._key_trie
+                         if b.origin == 'user']
+        if user_bindings or self._unbound_defaults:
+            out.append("# Key bindings\n")
+            for notation in sorted(self._unbound_defaults):
+                out.append(f":unbind-key {notation}\n")
+            for keys, b in user_bindings:
+                cmds = ' \\; '.join(b.commands)
+                suffix = '...' if b.edit_mode else ''
+                desc_flag = f' --desc "{b.desc}"' if b.desc else ''
+                hint_flag = f' --hint "{b.hint}"' if b.hint else ''
+                if b.mode and b.mode != 'normal':
+                    out.append(f":bind-key --mode {b.mode}{desc_flag}{hint_flag}"
+                            f" {b.key_notation} {cmds}{suffix}\n")
+                else:
+                    ctx_str = _format_context(b.context)
+                    out.append(f":bind-key{desc_flag}{hint_flag}"
+                            f" {ctx_str}{b.key_notation} {cmds}{suffix}\n")
+        return ''.join(out)
 
     def _save_config(self):
         """Write current settings to the XDG config file, creating dirs as needed.
@@ -8530,98 +8665,10 @@ class Application:
         Returns True on success, False on failure (error is also logged to events).
         """
         path = _config_path()
+        text = self._config_text()
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, 'w') as f:
-                f.write(f"# {_PROG_NAME} configuration\n")
-                f.write(f":set dns {DNS_MODES[self.dns_mode]}\n")
-                if self.stats_custom is not None:
-                    custom_str = ','.join(self._stats_custom_tokens())
-                    f.write(f":set stats {custom_str}\n")
-                else:
-                    f.write(f":set stats {STATS_MODES[self.stats_mode]}\n")
-                f.write(f":set sort {self.sort_by}\n")
-                f.write(f":set ping-view {HISTORY_MODES[self.history_mode]}\n")
-                if self.layout != 'all':
-                    f.write(f":layout {self.layout}\n")
-                f.write(f":set log-size {self.log_size}\n")
-                f.write(f":set history-size {self.history_size}\n")
-                f.write(f":set sync-history {'on' if self.sync_history else 'off'}\n")
-                f.write(f":set mux-split {self.mux_split}\n")
-                label = self._LOGLEVEL_LABELS.get(self.loglevel, 'normal')
-                f.write(f":set log-level {label}\n")
-                if self.terminal_emulator != 'auto':
-                    f.write(f":set terminal {self.terminal_emulator}\n")
-                if self.log_file:
-                    f.write(f":log {self.log_file}\n")
-                else:
-                    f.write("# :log\n")
-                if self.multikey_timeout != 0:
-                    f.write(f":set multikey-timeout {self.multikey_timeout}\n")
-                if self.web_listen != _WEB_DEFAULT_LISTEN:
-                    f.write(f":set web-listen {self.web_listen}\n")
-                if self.web_allow:
-                    f.write(f":set web-allow {self.web_allow}\n")
-                # The path, never the password: what it contains stays where
-                # the operator put it, under permissions they chose.
-                if self.web_password_file:
-                    f.write(f":set web-password-file {self.web_password_file}\n")
-                if self.web_commands != 'safe':
-                    f.write(f":set web-commands {self.web_commands}\n")
-                if self.web_hosts:
-                    f.write(f":set web-hosts {self.web_hosts}\n")
-                if self.web_tls_cert:
-                    f.write(f":set web-tls-cert {self.web_tls_cert}\n")
-                if self.web_tls_key:
-                    f.write(f":set web-tls-key {self.web_tls_key}\n")
-                if self.late_grace != 1.0:
-                    f.write(f":set late-grace {self.late_grace:g}\n")
-                for pattern in self.no_alarm_patterns:
-                    f.write(f":no-alarm {pattern}\n")
-                # Per-host decisions from 'o', written as the flags that
-                # reconstruct them.  '--remove' would not do: it deletes a
-                # glob for every host it covers, and cannot say "off for this
-                # one" at all.
-                for name, want in self.no_alarm_manual.items():
-                    flag = '--mark' if want else '--unmark'
-                    f.write(f":no-alarm {flag} {name}\n")
-                for pattern, os_name in self.relay_os_rules:
-                    f.write(f":relay-os {pattern} {os_name}\n")
-                if _ssh_connect_rate != _SSH_CONNECT_RATE_DEFAULT:
-                    f.write(f":set ssh-connect-rate {_ssh_connect_rate:g}\n")
-                if _ssh_monitor_flags() != _SSH_MONITOR_OPTIONS_DEFAULT:
-                    # shlex.join, not quote(join): quoting the whole string
-                    # makes it one argv element when read back, which ssh
-                    # rejects.  join quotes only the tokens that need it.
-                    opts = shlex.join(_ssh_monitor_flags())
-                    f.write(f":set ssh-options {opts if opts else 'none'}\n")
-                # Per-program option rules
-                for prog, rules in self.prog_options.items():
-                    for pattern, opts in rules:
-                        if opts is None:
-                            f.write(f":prog-options {prog} {pattern} --disable\n")
-                        else:
-                            f.write(f":prog-options {prog} {pattern} {opts}\n")
-                # User key bindings (only non-default, all modes)
-                user_bindings = [(keys, b) for keys, b in self._key_trie
-                                 if b.origin == 'user']
-                if user_bindings or self._unbound_defaults:
-                    f.write("# Key bindings\n")
-                    for notation in sorted(self._unbound_defaults):
-                        f.write(f":unbind-key {notation}\n")
-                    for keys, b in user_bindings:
-                        cmds = ' \\; '.join(b.commands)
-                        suffix = '...' if b.edit_mode else ''
-                        desc_flag = f' --desc "{b.desc}"' if b.desc else ''
-                        hint_flag = f' --hint "{b.hint}"' if b.hint else ''
-                        if b.mode and b.mode != 'normal':
-                            f.write(f":bind-key --mode {b.mode}{desc_flag}{hint_flag}"
-                                    f" {b.key_notation} {cmds}{suffix}\n")
-                        else:
-                            ctx_str = _format_context(b.context)
-                            f.write(f":bind-key{desc_flag}{hint_flag}"
-                                    f" {ctx_str}{b.key_notation} {cmds}{suffix}\n")
-        except OSError as e:
+            _write_file_atomically(path, text)
+        except Exception as e:
             self.add_event("config", f"error saving config: {e}")
             return False
         return True
@@ -8632,22 +8679,24 @@ class Application:
         Silently ignores errors (e.g. read-only filesystem or no home directory)
         so a failed write never prevents the app from starting.
         """
-        path = _config_path()
+        lines = [
+            f"# {_PROG_NAME} configuration\n",
+            "# Generated on first run — edit as needed.\n",
+            "#\n",
+            f"# :set dns off            # choices: {' | '.join(DNS_MODES)}\n",
+            f"# :set stats off          # choices: {' | '.join(STATS_MODES)}\n",
+            "# :set sort none          # choices: none | name | status | latency\n",
+            f"# :set ping-view success  # choices: {' | '.join(HISTORY_MODES)}\n",
+            "# :set log-size 10000     # event log max lines\n",
+            "# :set history-size 86400 # per-host ping history depth (default 24 h at 1 ping/s)\n",
+            "# :log                    # path to stream event log; leave blank to disable\n",
+        ]
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, 'w') as f:
-                f.write(f"# {_PROG_NAME} configuration\n")
-                f.write("# Generated on first run — edit as needed.\n")
-                f.write("#\n")
-                f.write(f"# :set dns off            # choices: {' | '.join(DNS_MODES)}\n")
-                f.write(f"# :set stats off          # choices: {' | '.join(STATS_MODES)}\n")
-                f.write( "# :set sort none          # choices: none | name | status | latency\n")
-                f.write(f"# :set ping-view success  # choices: {' | '.join(HISTORY_MODES)}\n")
-                f.write( "# :set log-size 10000     # event log max lines\n")
-                f.write( "# :set history-size 86400 # per-host ping history depth (default 24 h at 1 ping/s)\n")
-                f.write( "# :log                    # path to stream event log; leave blank to disable\n")
-        except OSError:
-            pass  # silently ignore — e.g. read-only filesystem or missing home directory
+            _write_file_atomically(_config_path(), ''.join(lines))
+        except Exception:
+            # Exception, not OSError: an encoding failure is a ValueError and
+            # would otherwise escape __init__ and stop the program starting.
+            pass  # read-only filesystem, missing home directory, odd locale
 
     def _load_cmd_history(self):
         """Load command history from the XDG state file, silently ignoring errors.
@@ -8659,11 +8708,11 @@ class Application:
         _HISTORY_MAXLEN = 500
         path = _history_path()
         try:
-            with open(path) as f:
+            with open(path, encoding='utf-8', errors='replace') as f:
                 lines = [l.rstrip('\n') for l in f if l.strip()]
             self.cmd_history = lines[-_HISTORY_MAXLEN:]
-        except OSError:
-            pass  # missing file is fine
+        except Exception:
+            pass  # missing, unreadable, or undecodable file is fine
 
     def _save_cmd_history(self):
         """Persist self.cmd_history to the XDG state file, creating dirs as needed.
@@ -8675,11 +8724,11 @@ class Application:
         path = _history_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, 'w') as f:
+            with open(path, 'w', encoding='utf-8') as f:
                 for line in self.cmd_history[-_HISTORY_MAXLEN:]:
                     f.write(line + '\n')
-        except OSError:
-            pass  # silently ignore — e.g. read-only filesystem
+        except Exception:
+            pass  # read-only filesystem, or a locale that cannot encode it
 
     def _get_completions(self, text):
         """Return a sorted list of completion candidates for the current cmd-line text.

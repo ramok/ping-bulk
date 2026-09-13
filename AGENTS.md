@@ -258,6 +258,24 @@ The repository is structured to keep the core application as a single deployable
   `:log` with no argument now answers "broken, or just quiet?" — path, lines
   written this session, file size, and the last write error with its time.
 
+  **The same bug was still in the config path, and there it was fatal.**
+  `_create_default_config` writes `# Generated on first run — edit as needed.`
+  and runs from `Application.__init__`, so under `LC_ALL=C` a machine with no
+  config yet could not start ping-bulk at all — the `UnicodeEncodeError` left
+  the constructor. Reproduced with `LC_ALL=C PYTHONUTF8=0
+  PYTHONCOERCECLOCALE=0` against a fresh `XDG_CONFIG_HOME`; Python 3.7+ coerces
+  a bare `LC_ALL=C` to UTF-8, so all three are needed to see it. The fix is the
+  one above applied to **every** file this program writes for itself — the
+  config and the command history, six handles — each opened as explicit UTF-8
+  and each guarded with `except Exception`. Reads take `errors='replace'`, so a
+  config hand-edited in another encoding degrades to a visible replacement
+  character instead of costing the user their settings.
+
+  The lesson that keeps recurring: **`except OSError` around a write of
+  program-authored text is a bug**, because the interesting failure is an
+  encoding one and that is a `ValueError`. If you add a file this program
+  writes, name the encoding and catch `Exception`.
+
   **Sync mode was hiding losses**, reported as "why does sync show fewer X?".
   Two causes, both fixed: a bucket held the *last* sample written to it, so an
   `X` vanished under a reply that shared its second (now `_worse_hist_sample`,

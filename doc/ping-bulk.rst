@@ -2568,6 +2568,11 @@ A skeleton file with commented defaults is created on first run.
 Use ``:save-config`` to write the current settings, or edit the file
 directly.
 
+The file is read and written as UTF-8 regardless of the locale ping-bulk
+was started with, so a hostname or a path that is not ASCII survives a
+save and reload.  A file that cannot be read — wrong encoding, bad
+permissions — is skipped rather than allowed to stop the program.
+
 Recognised settings
 -------------------
 

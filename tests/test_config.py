@@ -243,6 +243,167 @@ class TestCreateDefaultConfig:
                     f"Default config has an active (non-commented) line: {line!r}"
                 )
 
+    def test_a_first_run_survives_an_ascii_locale(self, pb, tmp_path):
+        """The em dash in the banner used to stop the program starting.
+
+        ':set stats' had this exact bug in the log file (AGENTS.md §8): under
+        LC_ALL=C an em dash raises UnicodeEncodeError, which is a ValueError
+        and walks straight past 'except OSError'.  Here it ran from __init__,
+        so a fresh machine with no LANG= could not start ping-bulk at all —
+        a systemd unit without an explicit locale is enough.
+        """
+        import locale as _locale
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        real_open = open
+
+        def ascii_open(path, mode='r', **kw):
+            """Refuse to encode non-ASCII, the way an ASCII locale would."""
+            if 'b' not in mode and 'encoding' not in kw:
+                kw['encoding'] = 'ascii'
+            return real_open(path, mode, **kw)
+
+        import builtins
+        with patch.object(builtins, 'open', ascii_open):
+            app = make_app(pb, cfg, config_text=None)
+        assert app is not None
+        assert os.path.exists(cfg)
+
+    def test_no_new_file_when_config_exists(self, pb, tmp_path):
+        """If the config file already exists it must not be overwritten."""
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        original = '# my custom config\ndns = ip\n'
+        make_app(pb, cfg, config_text=original)
+        # Second run — file already exists
+        make_app(pb, cfg, config_text=None)  # config_text=None → file stays as-is from prev run
+        # Actually in this flow make_app with config_text=None just doesn't write,
+        # so the file from the first make_app call is still there.
+        with open(cfg) as f:
+            content = f.read()
+        assert 'my custom config' in content, (
+            "Existing config file was overwritten by _create_default_config()"
+        )
+
+
+# ===========================================================================
+# TestSaveConfig
+# ===========================================================================
+
+class TestFilesAreReadAsUtf8NotAsTheLocale:
+    """A hosts file carries '°C', '→' and accented labels.
+
+    Under LC_ALL=C the shipped examples/ping-bulk.advance died on its own
+    degree sign: the top-level guards catch OSError, and a decode failure is a
+    ValueError, so it escaped as a raw traceback.
+    """
+
+    def test_a_hosts_file_with_non_ascii_parses(self, pb, tmp_path):
+        f = tmp_path / 'hosts'
+        f.write_text('## Zürich — café\n10.0.0.1 ## café-sw1\n', encoding='utf-8')
+        entries = pb.parse_hosts_file(str(f))
+        assert any('café-sw1' in str(e) for e in entries), entries
+
+    def test_it_does_not_depend_on_the_process_locale(self, pb, tmp_path):
+        """Simulate an ASCII locale by making open() default to ascii."""
+        import builtins
+        f = tmp_path / 'hosts'
+        f.write_text('10.0.0.1 ## café-sw1\n', encoding='utf-8')
+        real_open = builtins.open
+
+        def ascii_open(path, mode='r', **kw):
+            if 'b' not in mode and 'encoding' not in kw:
+                kw['encoding'] = 'ascii'
+            return real_open(path, mode, **kw)
+
+        with patch.object(builtins, 'open', ascii_open):
+            entries = pb.parse_hosts_file(str(f))
+        assert entries, 'the parser died on a non-ASCII label'
+
+    def test_the_shipped_example_parses_under_an_ascii_locale(self, pb):
+        """The repository's own example was the reproduction."""
+        import builtins
+        import os.path
+        example = os.path.join(os.path.dirname(pb.__file__),
+                               'examples', 'ping-bulk.advance')
+        if not os.path.exists(example):
+            pytest.skip('example not present')
+        real_open = builtins.open
+
+        def ascii_open(path, mode='r', **kw):
+            if 'b' not in mode and 'encoding' not in kw:
+                kw['encoding'] = 'ascii'
+            return real_open(path, mode, **kw)
+
+        with patch.object(builtins, 'open', ascii_open):
+            entries = pb.parse_hosts_file(example)
+        assert entries
+
+
+class TestAFailedSaveKeepsTheOldFile:
+    """``open(path, 'w')`` truncates before the first byte is written.
+
+    A save that fails after that point leaves nothing — which is far worse
+    than a save that does nothing, for a file holding months of somebody's
+    preferences.  It happened during development: a real config was emptied.
+    """
+
+    def test_the_previous_config_survives_a_failed_write(self, pb, tmp_path):
+        cfgdir = tmp_path / 'ping-bulk'
+        cfgdir.mkdir()
+        cfg = cfgdir / 'config'
+        cfg.write_text('# precious\n:set sort latency\n', encoding='utf-8')
+        original = cfg.read_text(encoding='utf-8')
+        app = make_app(pb, str(cfg), config_text=None)
+        with patch.object(pb, '_write_file_atomically',
+                          side_effect=OSError('disk full')), \
+             patch.object(pb, '_config_path', return_value=str(cfg)):
+            assert app._save_config() is False
+        assert cfg.read_text(encoding='utf-8') == original
+
+    def test_it_really_is_atomic_not_just_guarded(self, pb, tmp_path):
+        """Fail inside the write itself, not at the call."""
+        cfg = tmp_path / 'cfg'
+        cfg.write_text('original\n', encoding='utf-8')
+        real_replace = os.replace
+        with patch.object(os, 'replace',
+                          side_effect=OSError('rename failed')):
+            with pytest.raises(OSError):
+                pb._write_file_atomically(str(cfg), 'new content\n')
+        assert cfg.read_text(encoding='utf-8') == 'original\n'
+        # and no temp file is left behind
+        assert [f.name for f in tmp_path.iterdir()] == ['cfg']
+
+    def test_a_successful_write_replaces_the_content(self, pb, tmp_path):
+        cfg = tmp_path / 'cfg'
+        cfg.write_text('old\n', encoding='utf-8')
+        pb._write_file_atomically(str(cfg), 'new\n')
+        assert cfg.read_text(encoding='utf-8') == 'new\n'
+        assert [f.name for f in tmp_path.iterdir()] == ['cfg']
+
+    def test_a_first_run_survives_an_ascii_locale(self, pb, tmp_path):
+        """The em dash in the banner used to stop the program starting.
+
+        ':set stats' had this exact bug in the log file (AGENTS.md §8): under
+        LC_ALL=C an em dash raises UnicodeEncodeError, which is a ValueError
+        and walks straight past 'except OSError'.  Here it ran from __init__,
+        so a fresh machine with no LANG= could not start ping-bulk at all —
+        a systemd unit without an explicit locale is enough.
+        """
+        import locale as _locale
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        real_open = open
+
+        def ascii_open(path, mode='r', **kw):
+            """Refuse to encode non-ASCII, the way an ASCII locale would."""
+            if 'b' not in mode and 'encoding' not in kw:
+                kw['encoding'] = 'ascii'
+            return real_open(path, mode, **kw)
+
+        import builtins
+        with patch.object(builtins, 'open', ascii_open):
+            app = make_app(pb, cfg, config_text=None)
+        assert app is not None
+        assert os.path.exists(cfg)
+
     def test_no_new_file_when_config_exists(self, pb, tmp_path):
         """If the config file already exists it must not be overwritten."""
         cfg = str(tmp_path / 'ping-bulk' / 'config')
