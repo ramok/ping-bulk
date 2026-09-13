@@ -674,6 +674,29 @@ commands are audited whether or not kiosk mode is on, and logged at
 `LEVEL_NORMAL` — someone off this machine changing what is monitored should be
 visible without first turning the log up.
 
+**`full` ships, gated.** The council reviewing this design was unanimous
+against exposing a full command line over HTTP, and the mechanism is
+concrete: outside kiosk mode `:mux` has no whitelist, so a browser session
+that can run commands can run `:mux sh`. It is here because it was asked for,
+with every gate the review argued for:
+
+- opt-in only (`:set web-commands full`), and switching it on logs a warning
+  that names the consequence, every time;
+- refused in kiosk mode outright;
+- refused on a non-loopback bind without TLS — checked both at `:web start`
+  and when the setting changes on a *running* listener, so the setting cannot
+  outrun the binding;
+- `:edit` is refused even here, and for a technical reason rather than a
+  policy one: it opens an editor on the console's terminal, the main loop
+  would block until somebody there closed it, and the requester cannot see
+  or type into it. `_WEB_NEVER_COMMANDS` exists for that shape of thing.
+
+**A web command behaves exactly like one typed at the `:` line** — including
+that `%h`/`%r` are *not* expanded, because `_handle_cmd_key` calls
+`_dispatch_cmd` directly and only `_execute_binding` expands. That was
+checked rather than assumed, and it is why no second expansion path had to be
+written; the council had flagged one as a thing that would drift.
+
 **Kiosk mode: declared, never typed.** `:web start` is refused at the console
 and allowed while `_loading_file` is set — the rule `:probe-source` already
 follows. Starting is audited. A port below 1024 is refused with the reason

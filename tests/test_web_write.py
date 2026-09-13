@@ -37,6 +37,13 @@ BASE = """### group
 """
 
 
+def _password_file(tmp_path, text='hunter2', mode=0o600):
+    path = tmp_path / 'webpw'
+    path.write_text(text)
+    os.chmod(path, mode)
+    return str(path)
+
+
 def _make_app(pb, tmp_path, content=BASE, kiosk=False):
     cfg = str(tmp_path / 'ping-bulk' / 'config')
     os.makedirs(os.path.dirname(cfg), exist_ok=True)
@@ -295,7 +302,9 @@ class TestTheCsrfToken:
 
 class TestTheSafeSet:
 
-    REFUSED = [':mux sh', ':term', ':edit', ':source /etc/passwd',
+    # ':edit' is absent on purpose: it is refused for a stronger reason and
+    # in every mode, so it has its own test (TestFullMode).
+    REFUSED = [':mux sh', ':term', ':source /etc/passwd',
                ':log /tmp/x', ':save /tmp/x', ':save-config', ':quit',
                ':bind-key x :mux sh', ':probe-source --cmd id',
                ':remote-ping root@relay 10.0.0.9', ':ping 10.0.0.9',
@@ -424,3 +433,126 @@ class TestItIsAudited:
         app, c = served
         c.action(_uid(app, '10.0.0.1'), 'pause')
         assert "127.0.0.1 ran ':pause-selected on'" in _events(app)
+
+
+# ===========================================================================
+# 'full': everything the keyboard can do, and what that costs
+# ===========================================================================
+
+class TestFullMode:
+    """Opt-in, never in kiosk, and never in the clear off loopback.
+
+    The council that reviewed this design was unanimous against exposing a
+    full command line at all, and the mechanism is concrete: outside kiosk
+    mode ':mux' has no command whitelist, so a browser session that can run
+    commands can run ':mux sh'.  It ships because it was asked for, gated so
+    that nothing reaches it by accident, and it says so out loud every time
+    it is switched on.
+    """
+
+    def _full(self, app):
+        app._dispatch_cmd(':set web-commands full')
+        assert app.web_commands == 'full', _events(app)
+
+    def test_safe_points_at_the_way_out(self, served):
+        _app, c = served
+        assert b'web-commands full' in c.command(':mux sh')[1]
+
+    def test_full_allows_what_safe_refuses(self, served):
+        app, c = served
+        self._full(app)
+        for cmd in (':mux sh', ':source /dev/null', ':set late-grace 2',
+                    ':bind-key x :seen', ':log /tmp/pb-test.log'):
+            assert c.command(cmd)[0] == 202, cmd
+        app._web_queue.clear()
+
+    def test_edit_is_refused_even_in_full(self, served):
+        """Not policy: it runs an editor on a terminal the requester cannot see.
+
+        The main loop would block until somebody at the console closed it.
+        """
+        app, c = served
+        self._full(app)
+        status, body = c.command(':edit')
+        assert status == 403
+        assert b'cannot work over HTTP' in body
+        assert len(app._web_queue) == 0
+
+    def test_switching_it_on_says_what_it_means(self, served):
+        app, _c = served
+        self._full(app)
+        text = _events(app)
+        assert 'warning:' in text
+        assert 'any command this program can' in text
+        assert 'shell' in text
+
+    def test_kiosk_refuses_it(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path, kiosk=True)
+        app._dispatch_cmd(':set web-commands full')
+        assert app.web_commands == 'read-only'
+        assert 'kiosk mode allows read-only only' in _events(app)
+
+    def test_the_page_shows_a_command_box_only_in_full(self, served):
+        app, c = served
+        assert c.state()['commands'] == 'safe'
+        self._full(app)
+        assert c.state()['commands'] == 'full'
+
+    def test_it_is_saved(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set web-commands full')
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        with patch.object(pb, '_config_path', return_value=cfg):
+            app._dispatch_cmd(':save-config')
+        assert ':set web-commands full' in open(cfg).read()
+
+
+class TestFullNeedsTlsOffLoopback:
+    """Every command, and the password that authorised it, in clear."""
+
+    def test_the_rule(self, pb):
+        assert pb.Application._web_full_allowed_here('127.0.0.1', False)[0]
+        assert pb.Application._web_full_allowed_here('::1', False)[0]
+        assert pb.Application._web_full_allowed_here('10.0.0.5', True)[0]
+        ok, why = pb.Application._web_full_allowed_here('10.0.0.5', False)
+        assert not ok
+        assert 'without TLS' in why
+        assert 'ssh -L' in why
+
+    def test_starting_is_refused(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(f':set web-password-file '
+                          f'{_password_file(tmp_path)}')
+        app._dispatch_cmd(':set web-commands full')
+        app._dispatch_cmd(':set web-listen 10.255.255.254:8765')
+        app._dispatch_cmd(':web start')
+        assert app._web_server is None
+        assert 'without TLS' in _events(app)
+
+    def test_enabling_it_on_a_running_cleartext_listener_is_refused(
+            self, pb, tmp_path):
+        """The setting must not be able to outrun the binding."""
+        import socket as _s
+        probe = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
+        probe.connect(('10.255.255.255', 1))
+        addr = probe.getsockname()[0]
+        probe.close()
+        if pb._web_is_loopback(addr):
+            pytest.skip('no non-loopback address on this machine')
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(f':set web-password-file '
+                          f'{_password_file(tmp_path)}')
+        app._dispatch_cmd(f':set web-listen {addr}:0')
+        app._dispatch_cmd(':web start')
+        try:
+            assert app._web_server is not None, _events(app)
+            app._dispatch_cmd(':set web-commands full')
+            assert app.web_commands == 'safe', 'must not have switched'
+            assert 'without TLS' in _events(app)
+        finally:
+            app._web_stop(quiet=True)
+
+    def test_loopback_does_not_need_it(self, served):
+        app, _c = served
+        app._dispatch_cmd(':set web-commands full')
+        assert app.web_commands == 'full'

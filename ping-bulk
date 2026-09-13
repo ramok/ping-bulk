@@ -371,7 +371,7 @@ LAYOUTS = ['all', 'ping', 'log']
 # What the web interface may change.  Here rather than with the rest of
 # the web code because SET_PARAMS and the help text it builds are both
 # evaluated at import, long before that block.
-_WEB_COMMAND_MODES = ('read-only', 'safe')
+_WEB_COMMAND_MODES = ('read-only', 'safe', 'full')
 
 class SetParam:
     """Descriptor for a single ':set' sub-command parameter.
@@ -1193,7 +1193,8 @@ _HELP_BINDINGS = [
     "  :web \\[start|stop|status]   serve the host list over HTTP, read-only  (no arg reports)",
     "  :set web-listen <host:port> where it binds (default 127.0.0.1:8765; loopback only)",
     "  :set web-allow <cidr>,...   client addresses allowed to connect (default any)",
-    "  :set web-commands <mode>    read-only | safe (what the browser may change)",
+    "  :set web-commands <mode>    read-only | safe | full (what the browser may change;",
+    "                            full means any command, including a shell -- see the manual)",
     "  :set web-password-file <f>  file with the web password (mode 600); needed off loopback",
     "  :set web-hosts <name>,...   extra 'Host:' names the web interface answers to",
     "  :set web-tls-cert <file>    serve HTTPS (:set web-tls-key too, if separate)",
@@ -6805,6 +6806,11 @@ _WEB_SAFE_COMMANDS = frozenset({
     'dns', 'stats', 'sort', 'ping-view', 'history', 'hist',
     'sync-history', 'autofold', 'layout', 'select',
 })
+# Refused even in 'full', and not as policy.  ':edit' runs an interactive
+# editor on the *console's* terminal: the main loop would block until someone
+# sitting there closed it, and the person who asked could not see or type into
+# it.  There is no sensible thing for it to do over a request.
+_WEB_NEVER_COMMANDS = frozenset({'edit'})
 _WEB_QUEUE_MAX = 64
 
 _WEB_SESSION_TTL = 12 * 3600.0      # a browser tab left open overnight
@@ -7442,6 +7448,15 @@ _WEB_HTML = """<!DOCTYPE html>
     <span id="login-error" class="login-error"></span>
   </form>
 </section>
+<section id="cmd-wrap" hidden>
+  <h2>Command</h2>
+  <form id="cmdform">
+    <input id="cmd" type="text" autocomplete="off" spellcheck="false"
+           placeholder=":pause on" aria-label="command">
+    <button type="submit">Run</button>
+    <span id="cmd-note" class="login-error"></span>
+  </form>
+</section>
 <section id="down-wrap" hidden>
   <h2>Down now</h2>
   <ul id="down"></ul>
@@ -7477,7 +7492,14 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
      color: var(--dim); margin: 24px 0 8px; font-weight: 600; }
 .summary { color: var(--dim); font-size: 13px; }
 .summary.stale { color: var(--slow); }
-#login { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#login, #cmdform { display: flex; gap: 8px; align-items: center;
+                   flex-wrap: wrap; }
+#cmdform input { flex: 1 1 20em; font-family: ui-monospace, monospace; }
+#cmdform input, #cmdform button {
+  font-size: inherit; padding: 6px 10px; border-radius: 3px;
+  border: 1px solid var(--line); background: #1b1e26; color: var(--fg);
+}
+#cmdform button { cursor: pointer; border-color: var(--dim); }
 #login input, #login button {
   font: inherit; padding: 6px 10px; border-radius: 3px;
   border: 1px solid var(--line); background: #1b1e26; color: var(--fg);
@@ -7553,6 +7575,27 @@ var passwordEl = document.getElementById('password');
 var loginError = document.getElementById('login-error');
 var csrf = '';
 var canWrite = false;
+var cmdWrap = document.getElementById('cmd-wrap');
+var cmdForm = document.getElementById('cmdform');
+var cmdInput = document.getElementById('cmd');
+var cmdNote = document.getElementById('cmd-note');
+
+cmdForm.addEventListener('submit', function (ev) {
+  ev.preventDefault();
+  var text = cmdInput.value.trim();
+  if (!text) { return; }
+  cmdNote.textContent = '';
+  fetch('/api/cmd', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-PB-Token': csrf },
+    body: JSON.stringify({ cmd: text })
+  }).then(function (r) {
+    if (r.ok) { cmdInput.value = ''; window.setTimeout(poll, 150); return; }
+    return r.json().then(function (j) {
+      cmdNote.textContent = j.error || ('HTTP ' + r.status);
+    }, function () { cmdNote.textContent = 'HTTP ' + r.status; });
+  }).catch(function (err) { cmdNote.textContent = err.message; });
+});
 
 function glyphClass(ch) {
   if (ch === '.' || (ch >= '0' && ch <= '4')) return 'g-ok';
@@ -7651,6 +7694,7 @@ function sectionRow(r) {
 function render(state) {
   csrf = state.csrf || '';
   canWrite = state.commands && state.commands !== 'read-only';
+  cmdWrap.hidden = state.commands !== 'full';
   var up = 0, total = 0;
   state.rows.forEach(function (r) {
     if (r.kind === 'host') { total++; if (!r.down) { up++; } }
@@ -12393,8 +12437,14 @@ class Application:
         name = cmd.strip().lstrip(':').split()[0].lower() if cmd.strip() else ''
         if not name:
             return False, 'empty command'
+        if name in _WEB_NEVER_COMMANDS:
+            return False, (f"'{name}' cannot work over HTTP — it runs an "
+                           'editor on the console, which nobody here can see')
+        if self.web_commands == 'full':
+            return True, ''
         if name not in _WEB_SAFE_COMMANDS:
-            return False, f"'{name}' is not in the safe set"
+            return False, (f"'{name}' is not in the safe set "
+                           '(:set web-commands full to allow everything)')
         return True, ''
 
     def _cmd_web(self, args=''):
@@ -12500,6 +12550,11 @@ class Application:
                            'does not grant (NoNewPrivileges=yes); use 1024 or '
                            'above')
             return
+        if self.web_commands == 'full':
+            ok, why = self._web_full_allowed_here(host, tls_context is not None)
+            if not ok:
+                self.add_event('cmd', f'web: {why}')
+                return
         try:
             server = _WebServer((host, port), self, allow_nets,
                                 self._web_allowed_hosts(host),
@@ -12627,9 +12682,40 @@ class Application:
             self.add_event('cmd',
                            'web-commands: kiosk mode allows read-only only')
             return
+        server = getattr(self, '_web_server', None)
+        if value == 'full' and server is not None:
+            ok, why = self._web_full_allowed_here(
+                server.server_address[0], server.is_tls)
+            if not ok:
+                self.add_event('cmd', f'web-commands: {why}')
+                return
         self.web_commands = value
         if self._monitoring_started:
             self.add_event('config', f'web-commands: {value}')
+        if value == 'full':
+            # Said plainly, every time, because it is not obvious from the
+            # word 'full': outside kiosk mode ':mux' has no whitelist, so a
+            # browser session that can run commands can run ':mux sh'.
+            self.add_event('warn',
+                           'warning: web-commands full lets anyone who can '
+                           'log in to the web interface run any command this '
+                           f'program can, including a shell as '
+                           f'{os.environ.get("USER") or os.getuid()}')
+
+    @staticmethod
+    def _web_full_allowed_here(host, is_tls):
+        """(ok, reason) for running 'full' on this binding.
+
+        Off loopback and in the clear, every command — and the password that
+        authorised it — crosses the network for anyone on the path to read and
+        to replay.  That is not a warning-sized problem when the commands in
+        question include a shell.
+        """
+        if _web_is_loopback(host) or is_tls:
+            return True, ''
+        return False, ('full is refused on ' + host + ' without TLS — set '
+                       '":set web-tls-cert", or bind loopback and use '
+                       '"ssh -L"')
 
     def _cmd_web_hosts(self, args=''):
         """:set web-hosts <name>[,<name>…] — extra Host: names to answer to.

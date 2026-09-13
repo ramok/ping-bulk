@@ -2081,7 +2081,7 @@ Web interface
     Changing the address while the server is running rebinds it, so the
     setting and the socket cannot disagree.
 
-``:set web-commands read-only | safe``
+``:set web-commands read-only | safe | full``
     What a browser may change.  Default ``safe``; in kiosk mode it is
     ``read-only`` and cannot be changed.
 
@@ -2112,6 +2112,23 @@ Web interface
     from ``/api/state``.  A page on another site can make your browser send a
     request here, but it cannot add a header of our choosing without a
     preflight, and this server answers no preflight at all.
+
+    ``full`` adds a command box to the page that runs anything the ``:``
+    line runs — **which includes a shell.**  Outside kiosk mode ``:mux`` has
+    no command whitelist, so ``:mux sh`` starts one as the user ping-bulk is
+    running as.  Switching it on says so, every time.  It is refused in
+    kiosk mode outright, and refused on a non-loopback address without TLS,
+    where every command and the password that authorised it would cross the
+    network in clear.
+
+    ``:edit`` is refused in ``full`` as well, and not as policy: it opens an
+    editor on the *console's* terminal, so the main loop would block until
+    somebody sitting there closed a window the requester cannot see.
+
+    A command from the browser behaves exactly like one typed at the ``:``
+    line, including that ``%h``/``%r`` are **not** expanded — those belong to
+    key bindings.  ``:mux`` and ``:term`` do run, but the pane opens on the
+    console, not in the browser.
 
 ``:set web-allow <cidr>[,<cidr>…] | any``
     Client addresses permitted to connect.  Checked against the peer address
