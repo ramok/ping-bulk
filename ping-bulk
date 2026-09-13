@@ -7794,26 +7794,24 @@ function detailText(d) {
   return out.join('\\n');
 }
 
-function glyphClass(ch) {
-  if (ch === '.' || (ch >= '0' && ch <= '4')) return 'g-ok';
-  if (ch === 'x' || (ch >= '5' && ch <= '9')) return 'g-late';
-  if (ch === 'X' || ch === '?') return 'g-bad';
-  if (ch === '>') return 'g-vslow';
-  if (ch === 'o') return 'g-quiet';
-  return 'g-none';
-}
-
-function strip(text) {
+// The server decides the colour of every cell, because the client cannot:
+// a wide cell holds a reading, and what counts as slow for it is in a ':probe'
+// declaration the browser never sees.  Classifying one character at a time
+// against the ping palette -- which is what this used to do -- split a reading
+// in half and judged a sensor by a latency scale.
+function strip(text, classes, cellWidth) {
   var box = document.createElement('span');
   box.className = 'strip';
+  var w = cellWidth > 1 ? cellWidth : 1;
   var run = '', runClass = null;
-  for (var i = 0; i < text.length; i++) {
-    var cls = glyphClass(text[i]);
+  for (var i = 0, cell = 0; i < text.length; i += w, cell++) {
+    var chunk = text.substr(i, w);
+    var cls = (classes && classes[cell]) || 'g-none';
     if (cls !== runClass) {
       if (run) { box.appendChild(span(run, runClass)); }
       run = ''; runClass = cls;
     }
-    run += text[i];
+    run += chunk;
   }
   if (run) { box.appendChild(span(run, runClass)); }
   return box;
@@ -7847,7 +7845,7 @@ function button(label, cls, uid, verb) {
   return b;
 }
 
-function hostRow(r) {
+function hostRow(r, cellWidth) {
   var el = document.createElement('div');
   el.className = 'row';
   if (r.down) { el.classList.add('down'); }
@@ -7884,16 +7882,16 @@ function hostRow(r) {
     stats.appendChild(cell);
   });
   el.appendChild(stats);
-  el.appendChild(strip(r.history));
+  el.appendChild(strip(r.history, r.hist_class, cellWidth));
   return el;
 }
 
-function sectionRow(r) {
+function sectionRow(r, cellWidth) {
   var el = document.createElement('div');
   el.className = 'row section lvl' + r.level;
   el.appendChild(span(r.title, 'name'));
   el.appendChild(span(r.badge.join(' '), 'badge'));
-  el.appendChild(strip(r.history));
+  el.appendChild(strip(r.history, r.hist_class, cellWidth));
   return el;
 }
 
@@ -7926,7 +7924,9 @@ function render(state) {
     return r.kind === 'host' && r.name.toLowerCase().indexOf(needle) !== -1;
   });
   rowsEl.replaceChildren.apply(rowsEl, shown.map(function (r) {
-    return r.kind === 'section' ? sectionRow(r) : hostRow(r);
+    return r.kind === 'section'
+      ? sectionRow(r, state.view.cell_width)
+      : hostRow(r, state.view.cell_width);
   }));
 
   eventsEl.replaceChildren.apply(eventsEl, state.events.slice(-120).map(
@@ -10188,7 +10188,7 @@ class Application:
                 self._mux_from_binding = False
                 self._mux_relay_prefix = None
 
-    def _relay_prefix_for(self, used_vars):
+    def _relay_prefix_for(self, used_vars, entry=None):
         """Return ['ssh', '-t', ...relay] to run a command where the host lives.
 
         A host behind a relay is reachable *only* from that relay — that is why
@@ -10208,15 +10208,22 @@ class Application:
 
         ``-t`` is always added: these are interactive terminal tools, and their
         UI needs a tty on the far side.
+
+        *entry* names the host the command is aimed at.  Without it this read
+        the cursor, so a preview built for one host was wrapped in a *different*
+        host's relay — ``ssh -t relay1 ssh router-a`` for a router that needs no
+        relay at all, whenever the console happened to be sitting on a relayed
+        row.
         """
         if not used_vars or used_vars & {'d', 'J'}:
             return []
         if not used_vars & {'h', 'i', 'r'}:
             return []
-        entry = (self.entries[self.highlighted_index]
-                 if self.highlighted_index is not None
-                 and 0 <= self.highlighted_index < len(self.entries)
-                 else None)
+        if entry is None:
+            entry = (self.entries[self.highlighted_index]
+                     if self.highlighted_index is not None
+                     and 0 <= self.highlighted_index < len(self.entries)
+                     else None)
         if not isinstance(entry, SshPingMonitor):
             return []
         prefix = ['ssh', '-t']
@@ -10279,7 +10286,7 @@ class Application:
                 return ''
         return self._COND_RE.sub(replace_cond, s)
 
-    def _expand_binding_commands(self, commands, used=None):
+    def _expand_binding_commands(self, commands, used=None, entry=None):
         """Expand %vars in a list of command strings.
 
         Returns ``(expanded_commands, warning_or_None)``.
@@ -10289,8 +10296,12 @@ class Application:
         referenced.  ``_execute_binding`` uses that to decide whether a command
         is aimed at the selected host and whether it already handles the host's
         relay itself — see :meth:`_relay_prefix_for`.
+
+        Pass *entry* to expand against a host other than the selected one.  A
+        keypress means "the host under the cursor"; a request that names a host
+        does not, and must not be answered from a cursor somebody else moves.
         """
-        ctx = self._binding_context()
+        ctx = self._binding_context(entry)
         try:
             expanded = [self._expand_conditional(c, ctx, used)
                         for c in commands]
@@ -10300,8 +10311,8 @@ class Application:
         except _BindingVarMissing as e:
             return (commands, str(e))
 
-    def _binding_context(self):
-        """Build the variable context dict from current selection.
+    def _binding_context(self, entry=None):
+        """Build the variable context dict for *entry*, or for the selection.
 
         Keys and their meaning:
           h  — entry.host (display name, always set for Monitor entries)
@@ -10327,9 +10338,8 @@ class Application:
                         else e.host)
 
         ctx = {}
-        entry = None
-        if (self.highlighted_index is not None and
-                0 <= self.highlighted_index < len(self.entries)):
+        if entry is None and (self.highlighted_index is not None and
+                              0 <= self.highlighted_index < len(self.entries)):
             entry = self.entries[self.highlighted_index]
         if isinstance(entry, Monitor):
             ctx['h'] = entry.host
@@ -10358,9 +10368,19 @@ class Application:
                 ctx['r'] = _entry_r(entry)
         elif isinstance(entry, SectionLabel):
             ctx['s'] = entry.title
-        # %H / %R — all hosts in the section containing the selection
-        if entry is not None:
-            section_entries = self._monitors_in_section(self.highlighted_index)
+        # %H / %R — all hosts in the section containing *entry*.  Found by
+        # index, so an explicitly named entry has to be located: it is not
+        # necessarily the one under the cursor, and on a fresh run the cursor
+        # is None.
+        idx = self.highlighted_index
+        if entry is not None and (idx is None or idx >= len(self.entries)
+                                  or self.entries[idx] is not entry):
+            try:
+                idx = self.entries.index(entry)
+            except ValueError:
+                idx = None
+        if entry is not None and idx is not None:
+            section_entries = self._monitors_in_section(idx)
             if section_entries:
                 ctx['H'] = [e.host for e in section_entries]
                 ctx['R'] = [_entry_r(e) for e in section_entries]
@@ -12070,17 +12090,26 @@ class Application:
         against the range to get back to it.  Never below 2, so a probe strip
         always takes the wide-cell path and one rule colours it.
         """
-        if probe.vmax is not None:
-            digits = len(str(int(probe.vmax)))
+        # Both ends of the range, because a reading can be negative and the
+        # minus sign costs a column: ':probe rssi --range -100:0' (dBm, and
+        # ordinary for a radio) sized itself from vmax=0 to one digit, so
+        # '-58' was written into a two-column cell and every cell after it in
+        # the row shifted left.  Temperature and clock drift are the same
+        # shape.
+        if probe.vmax is not None or probe.vmin is not None:
+            ends = [v for v in (probe.vmax, probe.vmin) if v is not None]
+            digits = max(len(str(int(v))) for v in ends)
         else:
             widest = 0.0
+            narrowest = 0.0
             for m in self.monitors:
                 with m.lock:
                     series = m.probes.get(probe.name)
                     vals = [v for v in series.values if v is not None] if series else []
                 if vals:
                     widest = max(widest, max(vals))
-            digits = len(str(int(widest)))
+                    narrowest = min(narrowest, min(vals))
+            digits = max(len(str(int(widest))), len(str(int(narrowest))))
         return max(2, digits + 1)
 
     def _probe_history_string(self, monitor, probe, length, offset=0, cell_width=2):
@@ -12120,7 +12149,14 @@ class Application:
             if v is None:
                 cells.append(' ' * cell_width)
             else:
-                capped = min(int(round(v)), 10 ** num_w - 1)
+                # Two-sided, and the invariant the whole strip rests on: a
+                # cell wider than num_w shifts every cell after it, so the
+                # grid the reader (and _history_cell_classes) slices by stops
+                # lining up with the samples.  The low bound leaves room for
+                # the sign; at num_w == 1 nothing negative fits at all.
+                hi = 10 ** num_w - 1
+                lo = -(10 ** (num_w - 1) - 1) if num_w > 1 else 0
+                capped = max(lo, min(int(round(v)), hi))
                 cells.append(f"{capped:>{num_w}} ")
         return ''.join(cells) + ' ' * cell_width * (length - len(cells))
 
@@ -12143,6 +12179,82 @@ class Application:
         if probe.warn is not None and value >= probe.warn:
             return curses.color_pair(3) | row_attr
         return curses.color_pair(1) | row_attr
+
+    def _probe_strip_class(self, probe, value):
+        """The browser's twin of :meth:`_probe_strip_attr`.  Same branches.
+
+        Beside it, and in the same order, because the two must agree about
+        every reading: a colour pair is for a terminal and a class name is for
+        a browser, so translating the attribute back would be the wrong
+        direction.  Note this mirrors the *code*, which paints a probe with no
+        thresholds green — its own docstring says "uncoloured", and the code
+        is what the screen shows.
+        """
+        if probe.crit is not None and value >= probe.crit:
+            return 'g-bad'
+        if probe.warn is not None and value >= probe.warn:
+            return 'g-late'
+        return 'g-ok'
+
+    def _history_cell_classes(self, history, cell_width, probe, hist_mode):
+        """One class per cell of *history*, judged the way draw_hosts judges it.
+
+        The client used to classify one *character* at a time against the ping
+        palette — '0'-'4' green, '5'-'9' yellow — which is right only for the
+        one-column modes.  A wide cell holds a **reading**, so per character it
+        split numbers in half: '49 ' drew green-then-yellow where the terminal
+        paints the cell green, '120 ' drew entirely green where the terminal
+        paints it yellow, and a probe reading of 82 against ``--warn 60
+        --crit 80`` drew '8' yellow and '2' green where the terminal paints the
+        cell red.  That is the Phase 22 bug — a probe coloured by a latency
+        palette — reappearing in the browser.
+
+        Judging here rather than in the client also means there is exactly one
+        implementation of the rule, next to the one the terminal uses.
+        """
+        classes = []
+        if cell_width > 1:
+            for i in range(0, len(history), cell_width):
+                cell = history[i:i + cell_width]
+                content = cell[:cell_width - 1].lstrip()
+                if not content:
+                    classes.append('g-none')
+                elif content[0] in '_o':
+                    classes.append('g-quiet')
+                elif content[0] in 'X?':
+                    classes.append('g-bad')
+                elif content[0] == '>':
+                    classes.append('g-late')
+                else:
+                    # A cell that will not parse is uncoloured rather than
+                    # fatal.  draw_hosts raises here and loses one frame; this
+                    # runs per poll on the server thread, where raising is a
+                    # 500 and an event for every browser, every two seconds.
+                    try:
+                        val = int(content)
+                    except ValueError:
+                        classes.append('g-none')
+                        continue
+                    if probe is not None:
+                        classes.append(self._probe_strip_class(probe, val))
+                    else:
+                        limit = 5 if hist_mode == 'scaled' else 50
+                        classes.append('g-ok' if val < limit else 'g-late')
+            return classes
+        for char in history:
+            if char in 'X?':
+                classes.append('g-bad')
+            elif char == '.' or char in '01234':
+                classes.append('g-ok')
+            elif char == 'x' or char in '56789':
+                classes.append('g-late')
+            elif char == '>':
+                classes.append('g-vslow')
+            elif char in '_o':
+                classes.append('g-quiet')
+            else:
+                classes.append('g-none')
+        return classes
 
     def _probe_overlay_lines(self, monitor, inner_w):
         """Build the details-overlay block for every probe declared on *monitor*.
@@ -12264,14 +12376,23 @@ class Application:
 
         Rendered from the binding itself rather than rebuilt, so a rebound 'c'
         is previewed accurately and the two cannot disagree.
+
+        **Resolved and expanded against *monitor*, never against the cursor.**
+        Both steps used to read ``highlighted_index``, so every host in the
+        browser was shown the console's command — ``GET /api/host/<uid>``
+        answered ``ssh router-a`` for every uid while the cursor sat on
+        router-a, and answered "disabled" for all of them on a fresh run, where
+        the cursor is None. That is the same shared-cursor mistake the write
+        path avoids by addressing hosts by uid (§9d): a viewer must not be told
+        to connect somewhere a person at the keyboard chose for them.
         """
-        binding, _ = self._key_trie.resolve(
-            _parse_key_notation('c'), set(self._binding_context().keys()))
+        ctx_keys = set(self._binding_context(monitor).keys())
+        binding, _ = self._key_trie.resolve(_parse_key_notation('c'), ctx_keys)
         if binding is None:
             return None
         used = set()
-        commands, warning = self._expand_binding_commands(binding.commands,
-                                                          used=used)
+        commands, warning = self._expand_binding_commands(
+            binding.commands, used=used, entry=monitor)
         if warning:
             return None
         return self._preview_commands(commands, used, monitor)
@@ -12288,7 +12409,7 @@ class Application:
         as typed; the 'Connect:' line drops it and shows the command alone.
         """
         previews = []
-        relay = self._relay_prefix_for(used)
+        relay = self._relay_prefix_for(used, entry)
         for cmd in commands:
             body = cmd[1:] if cmd.startswith(':') else cmd
             parts = body.split(None, 1)
@@ -13099,7 +13220,10 @@ class Application:
         views cannot disagree — the stats columns are driven by ``STAT_NAMES``
         and ``_compute_stat`` exactly as the terminal's are, and the history
         strip is the same string ``get_history_string`` gives ``draw_hosts``.
-        Colour is left to the client: it receives the glyphs and maps them.
+        Each strip also carries ``hist_class``, one class per cell, decided by
+        ``_history_cell_classes`` — the client cannot judge a cell itself,
+        because a wide cell holds a reading whose thresholds live in a
+        ``:probe`` declaration the browser has never seen.
 
         **Threading.** This runs on a reader thread, so it obeys the rules in
         AGENTS.md: events come from ``_events_snapshot()`` and are filtered
@@ -13152,6 +13276,8 @@ class Application:
                     'folded': bool(entry.folded),
                     'badge': [seg for seg, _pair in badge],
                     'history': hist,
+                    'hist_class': self._history_cell_classes(
+                        hist, cell_width, view_probe, mode),
                 })
                 continue
             if not isinstance(entry, Monitor):
@@ -13193,6 +13319,8 @@ class Application:
                         history_len, self.history_offset, mode, cell_width,
                         sync=sync, end_time=render_time)),
             }
+            row['hist_class'] = self._history_cell_classes(
+                row['history'], cell_width, view_probe, mode)
             rows.append(row)
             # 'What is broken right now' — the first question a viewer has, so
             # it is answered in the payload rather than left to the client to

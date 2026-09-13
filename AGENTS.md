@@ -802,6 +802,51 @@ passed throughout. The guard that catches the next one parses both function
 bodies for the column names they name and asserts `_stat_attr`'s set is a
 subset of `_stat_class`'s; nine tests now fail if either branch is removed.
 
+**The strip is coloured by the server, one class per cell.** The client
+classified one *character* at a time against the ping palette — `'0'`-`'4'`
+green, `'5'`-`'9'` yellow — which is right for the one-column modes and wrong
+for every wide cell, because a wide cell holds a **reading**. Measured against
+a real `_web_state()` at `cell_width` 3, four of seven cells disagreed with the
+screen beside them: `'49 '` split green-then-yellow where the terminal paints
+the cell green, `120 ms` drew entirely green where the terminal paints it
+yellow, and the fastest reply on the screen, `7 ms`, drew yellow. With `:set
+ping-view <probe>` it was worse and it was familiar: a reading of `82` against
+`--warn 60 --crit 80` drew `8` yellow and `2` green where the terminal paints
+the cell **red** — Phase 22's "the colour came from the ping palette" (§8),
+reappearing in the browser, in the commit whose subject said the two views now
+agreed about colour.
+
+The client cannot do this job: what counts as slow for a cell lives in a
+`:probe` declaration it has never seen, and `_probe_strip_attr` had no web twin
+at all. `_history_cell_classes` now decides every cell, mirroring both branches
+of `draw_hosts`'s strip loop, and `_probe_strip_class` sits beside
+`_probe_strip_attr` under the same rule as `_stat_class`. `glyphClass` is gone,
+so there is one implementation of the rule rather than two that drift.
+
+**`connect` is resolved and expanded against the host that was asked for.**
+`_connect_preview(monitor)` passed its argument only to the relay wrapping; the
+`%h`/`%r`/`%j` substitution came from `_binding_context()`, which takes no
+argument and reads `self.entries[self.highlighted_index]`. So every host in the
+browser was shown the *console's* command — `GET /api/host/<uid>` answered `ssh
+router-a` for every uid while the cursor sat on router-a — and on a fresh run,
+where `highlighted_index` is None, every host showed `Connect: disabled`.
+`_relay_prefix_for` read the same cursor, so a plain host came back wrapped in
+an unrelated relay: `ssh -t relay1 ssh router-a`.
+
+This is §9d's own rule broken on the read side. The write path addresses hosts
+by uid precisely because that cursor is shared with whoever is at the console —
+the party kiosk mode exists to distrust — and a viewer being told which machine
+to ssh into is exactly the instruction you do not want a stranger choosing.
+`_binding_context`, `_expand_binding_commands` and `_relay_prefix_for` all take
+an optional entry now; a keypress still means "the host under the cursor",
+because that is what a keypress means.
+
+**The guard for it was tautological**: the test asserted
+`d['connect'] == app._connect_preview(m)` against a function that *is*
+`_connect_preview`, so it could not fail. What catches this is asking whether
+the answer changes when the cursor moves, which `tests/test_web_parity.py`
+does for every cursor position including None.
+
 **Filtering is client-side.** `:filter` would move the terminal's view and
 every other viewer's; one person searching should not drag anybody else's
 screen with them. A test asserts the client never posts `:filter`.
