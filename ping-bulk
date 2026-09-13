@@ -6769,30 +6769,45 @@ def _kiosk_ssh_flags() -> list:
     return flags
 
 
-# Dangerous -o option names that could be used for code execution
+# Dangerous -o option names that could be used for code execution.
+# Every entry must be lowercase: _kiosk_ssh_option_key() lowercases before
+# looking one up, so a mixed-case entry here can never match.
 _KIOSK_SSH_BLOCKLIST = frozenset([
     'proxycommand', 'localcommand', 'permitlocalcommand',
-    'proxyuseFdpass', 'controlmaster', 'remoteforward', 'localforward',
-    'dynamicforward',
+    'proxyusefdpass', 'controlmaster', 'remoteforward', 'localforward',
+    'dynamicforward', 'knownhostscommand', 'pkcs11provider',
 ])
+
+
+def _kiosk_ssh_option_key(text: str) -> str:
+    """The keyword out of one -o argument, spelled as it was written.
+
+    ssh(1) takes -o "in the format used in the configuration file", and
+    ssh_config(5) separates a keyword from its argument with whitespace,
+    '=', or both, ignoring any around them.  So 'ProxyCommand /bin/sh' and
+    ' ProxyCommand = /bin/sh' name the same option as 'ProxyCommand=/bin/sh',
+    and a check that only understands '=' reads the whole string as the
+    keyword and matches nothing.
+    """
+    return re.split(r'[\s=]', text.strip(), maxsplit=1)[0]
 
 
 def _kiosk_validate_ssh_args(ssh_args: list) -> str | None:
     """Return an error message if *ssh_args* contain blocked options for kiosk mode.
 
-    Checks for -o <Key>=... options whose Key is in the blocklist.
+    Checks the keyword of every -o option against the blocklist.
     Returns None if everything is acceptable.
     """
     i = 0
     while i < len(ssh_args):
         arg = ssh_args[i]
         key = None
-        if arg.startswith('-o') and '=' in arg:
-            # Inline form: -oKey=value
-            key = arg[2:].split('=', 1)[0]
+        if arg.startswith('-o') and len(arg) > 2:
+            # Inline form: -oKey=value, -oKey value
+            key = _kiosk_ssh_option_key(arg[2:])
         elif arg == '-o' and i + 1 < len(ssh_args):
-            # Spaced form: -o Key=value
-            key = ssh_args[i + 1].split('=', 1)[0]
+            # Separate form: -o Key=value, -o "Key value"
+            key = _kiosk_ssh_option_key(ssh_args[i + 1])
         if key and key.lower() in _KIOSK_SSH_BLOCKLIST:
             return f"kiosk mode: SSH option '{key}' is not allowed"
         i += 1

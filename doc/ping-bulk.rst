@@ -112,12 +112,13 @@ OPTIONS
     Start in kiosk mode.  Designed for unattended physical consoles
     (e.g. ``/dev/tty1``).  When not already inside tmux, the process
     relaunches itself in a hardened tmux session using
-    ``/etc/ping-bulk/kiosk.tmux.conf``.  Quit is disabled (systemd
-    ``Restart=always`` handles lifecycle), SSH keys are isolated from
-    ``~/.ssh/``, arbitrary commands are blocked, the editor is
-    restricted (``rnano``/``rvim``), and every command dispatch is
-    logged to syslog.  See ``kiosk/README.md`` for full setup
-    instructions and the security model.
+    ``/etc/ping-bulk/kiosk.tmux.conf``.  Quitting is not prevented, but
+    ``Restart=always`` in the systemd unit brings the console straight
+    back.  SSH keys are isolated from ``~/.ssh/``, arbitrary commands
+    are blocked, the editor is restricted (``rnano``/``rvim``), and
+    every command dispatch is logged to syslog.  See
+    ``kiosk/README.md`` for full setup instructions and the security
+    model.
 
 ``--help-full``
     Print the complete built-in manual — every hotkey, ``:command``,
@@ -2250,8 +2251,11 @@ Security features in kiosk mode:
   to ignore ``~/.ssh/`` entirely.
 - If ``/etc/ping-bulk/id_ed25519`` exists it is used as the sole
   identity file (``-i /etc/ping-bulk/id_ed25519``).
-- SSH ``ProxyCommand``, ``LocalCommand``, ``RemoteForward``, and related
-  options are blocked to prevent shell escapes via SSH.
+- The SSH options that run a command or load code — ``ProxyCommand``,
+  ``LocalCommand``, ``PermitLocalCommand``, ``KnownHostsCommand``,
+  ``PKCS11Provider`` — and the forwarding options are rejected wherever
+  ``-o`` is accepted, in every spelling ssh itself takes
+  (``Key=value``, ``Key value``, and the run-together ``-oKey=value``).
 - ``:mux`` only allows ``ssh`` and ``login`` as commands.
 - ``:bind-key --if-sh`` is blocked (arbitrary shell execution).
 - ``:log`` and ``:source`` paths are restricted to ``/tmp/``,

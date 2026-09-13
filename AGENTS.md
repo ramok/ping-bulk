@@ -10,7 +10,7 @@ The repository is structured to keep the core application as a single deployable
 - **`tests/`**: Contains the test suite for the application. The tests use `pytest` and mock various functionalities (like `ping` output or SSH execution) to ensure reliability without needing actual network access.
 - **`examples/`**: Provides sample hosts files demonstrating various configuration directives (e.g., brace expansion, SSH monitoring, static DNS overrides) that `ping-bulk` supports.
 - **`doc/`**: Contains project documentation in reStructuredText format (`ping-bulk.rst`), a `Makefile` to build man pages (`ping-bulk.1`), and an HTML version. It relies on `docutils` for building the documentation.
-- **`contrib/`**: Contains additional supplementary files, such as systemd service units for running ping-bulk as a continuous background monitor.
+- **`kiosk/`**: Contains the unattended-console deployment: a systemd template unit (`ping-bulk-kiosk@.service`), the hardened tmux configuration it launches, and `README.md` documenting the kiosk security model.
 
 ## 3. Technology Stack & Requirements
 - **Language**: Python 3.8+
@@ -1021,6 +1021,50 @@ Saying `no` explicitly also stops the ping connections racing for a
 option in `:set ssh-options` overrides all of it — ssh takes the *first* value
 of a repeated option and these are placed first, so an explicit choice would
 otherwise be silently ignored.
+
+### The kiosk blocklist is the only guard on `:set ssh-options`
+
+`_cmd_ssh_options` is **not** one of the commands kiosk mode refuses at the
+console — it is typeable at the `:` line, by design, and
+`_kiosk_validate_ssh_args` is the whole of its protection. Two things make
+that load-bearing rather than defence in depth:
+
+- `_ssh_monitor_flags()` is placed **before** `_kiosk_ssh_flags()` in
+  `ProbeReader`'s argv, and ssh keeps the *first* value of a repeated option
+  (the same rule §9a relies on for `ProxyJump`). So an option smuggled in
+  there **beats** the `ProxyCommand=none` that is supposed to isolate it —
+  measured: `-o 'ProxyCommand /bin/evilsh' -o ProxyCommand=none` resolves to
+  the injected one, and reversing the order reverses the winner. The clock
+  probe prepends no kiosk flags at all.
+- ssh takes `-o` "in the format used in the configuration file", and
+  ssh_config(5) separates a keyword from its argument with whitespace, `=`,
+  or both, ignoring any around them. A check that only understood `=` read
+  `'ProxyCommand /bin/sh'` as one keyword and matched nothing, so **three
+  spellings walked straight past it** — all verified against OpenSSH 10.0p2
+  with `-G`, which resolves options without connecting:
+
+  | `-o` argument | before | now |
+  | ------------------------- | ------- | ------- |
+  | `ProxyCommand=/bin/sh`    | blocked | blocked |
+  | `ProxyCommand /bin/sh`    | **accepted** | blocked |
+  | ` ProxyCommand = /bin/sh` | **accepted** | blocked |
+  | `-oProxyCommand /bin/sh`  | **accepted** | blocked |
+
+`_kiosk_ssh_option_key()` is the single place that takes a keyword out of an
+argument, and it keeps the spelling the user typed so the refusal names it
+back to them.
+
+**Two options were missing outright**, and neither is covered by any
+prepended isolation flag, so argv order does not save those: `KnownHostsCommand`
+— confirmed to actually run its argument, `-o 'KnownHostsCommand=/bin/sh -c
+"touch …"'` created the file on a real connection attempt — and
+`PKCS11Provider`, which `dlopen()`s an attacker-named `.so` into the ssh
+client. `Match exec` is the other obvious vector and is **not** one: OpenSSH
+10 answers `Host directive not supported as a command-line option`.
+
+**A mixed-case entry in the set is dead code**, since the lookup lowercases;
+`proxyuseFdpass` sat there unable to match anything. `tests/test_kiosk_ssh_blocklist.py`
+asserts the whole set is lowercase, which is what catches the next one.
 
 ## 10. Key Binding System
 
