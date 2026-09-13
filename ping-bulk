@@ -7748,7 +7748,7 @@ function detailText(d) {
     out.push('Recent events:');
     d.events.slice(-20).forEach(function (line) { out.push('  ' + line); });
   }
-  return out.join('\n');
+  return out.join('\\n');
 }
 
 cmdForm.addEventListener('submit', function (ev) {
