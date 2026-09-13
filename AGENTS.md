@@ -628,6 +628,52 @@ password and every reading then cross the network in clear. For anything
 beyond a small trusted network, bind loopback and put a real reverse proxy in
 front — that advice has not changed.
 
+### Writes
+
+`:set web-commands read-only | safe`, default `safe`, forced to `read-only`
+under kiosk — and that is the *default* there, not something corrected later
+at `:web start`, because the default and what `:set` will accept have to
+agree. `:web start` forces it again anyway, for a config written before kiosk
+was switched on.
+
+**Commands are addressed by uid, never by row index or by the cursor.** The
+`:edit` reload rebuilds `entries`, and the page is showing a picture up to two
+seconds old, so "pause row 7" can arrive after row 7 has become a different
+host. Worse, `highlighted_index` is one cursor shared with whoever is at the
+console — the party kiosk mode exists to distrust — so a command meaning "the
+selected host" could be *steered* between the click and the tick.
+
+**Nothing from a request touches state.** The server thread appends to a
+bounded deque; `_web_drain()` runs at the top of the main loop's tick, moves
+the cursor to the named host, dispatches, and restores the cursor in a
+`finally`. Inside one tick nothing else can interleave. Going through
+`_dispatch_cmd` is not incidental: that is where validation happens and where
+the audit record is written.
+
+**`_WEB_SAFE_COMMANDS` is an allowlist**, so a command added to this program
+later must be considered before a browser can run it rather than being exposed
+until somebody notices. A test asserts the set is a strict subset of
+`CMD_REGISTRY` and that the dangerous names are absent.
+
+**Host actions are explicit verbs (`pause`/`resume`), not a toggle.** A toggle
+applied to a two-second-old view does the opposite of what was clicked.
+`:pause-selected` gained `on`/`off` for this; bare still toggles, which is what
+the `p` key wants.
+
+**CSRF: `X-PB-Token`, derived not stored.** The session cookie is `HttpOnly`,
+so the page cannot read it to prove a request came from itself. The token is
+`hmac(per-run key, session id)`, handed out in `/api/state` — bound to the
+session, so one lifted from another is useless, and nothing extra to store or
+expire. The header alone would already suffice (a cross-origin page cannot set
+it without a preflight this server never answers); binding it to the session
+is the cheap second half.
+
+**`_kiosk_audit` gained a `principal`.** It recorded the local user for both
+sides, and "who did this" is the question an audit log exists to answer. Web
+commands are audited whether or not kiosk mode is on, and logged at
+`LEVEL_NORMAL` — someone off this machine changing what is monitored should be
+visible without first turning the log up.
+
 **Kiosk mode: declared, never typed.** `:web start` is refused at the console
 and allowed while `_loading_file` is set — the rule `:probe-source` already
 follows. Starting is audited. A port below 1024 is refused with the reason

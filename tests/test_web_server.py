@@ -162,12 +162,16 @@ class TestItServes:
 
 class TestRefusals:
 
-    def test_post_is_refused_while_the_server_is_read_only(self, served):
-        """The read-only promise has to be true, not merely intended."""
+    def test_post_reaches_no_path_that_is_not_a_write_endpoint(self, served):
+        """Only the three write paths answer POST; everything else is 404.
+
+        What a browser may *change* is a separate question, decided by
+        ':set web-commands' and the safe allowlist — see test_web_write.py.
+        """
         _app, c = served
-        status, _h, body = c.get('/api/state', method='POST', data=b'{}')
-        assert status == 405
-        assert b'read-only' in body
+        for path in ('/api/state', '/', '/static/app.js', '/nope'):
+            status, _h, _body = c.get(path, method='POST', data=b'{}')
+            assert status == 404, path
 
     def test_a_foreign_host_header_is_refused(self, served):
         """DNS rebinding: binding to loopback does not stop a browser."""

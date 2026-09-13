@@ -2044,8 +2044,8 @@ Web interface
     Serve the host list over HTTP, on a thread inside this process reading the
     same live state the terminal draws from.  With no argument, report.
 
-    **Read-only.**  It answers ``GET``, plus ``POST /api/login``, and
-    refuses everything else — so a viewer can watch but not touch.
+    Each host row carries **pause/resume** and **quiet/alarm** buttons, and
+    what they do is governed by ``:set web-commands``.
 
     Starting it prints a URL with a one-time token in it::
 
@@ -2080,6 +2080,38 @@ Web interface
 
     Changing the address while the server is running rebinds it, so the
     setting and the socket cannot disagree.
+
+``:set web-commands read-only | safe``
+    What a browser may change.  Default ``safe``; in kiosk mode it is
+    ``read-only`` and cannot be changed.
+
+    ``safe`` is an allowlist of commands that touch nothing but ping-bulk's
+    own state: pause, ``:no-alarm``, folding, the display filter, clearing the
+    log, and the display settings.  Everything that reaches the operating
+    system is absent from it **by construction** — ``:mux`` and ``:term``
+    spawn processes, ``:edit`` runs an editor on the console's terminal,
+    ``:source``/``:log``/``:save`` touch arbitrary paths, ``:set`` could
+    rewrite the SSH options every monitor uses, and ``:web`` could switch off
+    the very checks that let the request in.  It is an allowlist rather than a
+    blocklist so that a command added to ping-bulk later has to be considered
+    before a browser can run it.
+
+    A command from the browser is **addressed by host, never by row number**.
+    The list is rebuilt whenever the hosts file is reloaded, and the page is
+    showing a picture up to two seconds old, so a request that meant "pause
+    row 7" could otherwise arrive after row 7 had become a different host.
+
+    Writes are also never applied by the server thread.  They are queued and
+    run by the main loop at the start of its next tick, through the same
+    ``:command`` path the keyboard uses — which is where validation happens
+    and where the audit record is written.  Every one of them goes to syslog
+    with the client's address, whether or not kiosk mode is on, and is shown
+    in the event log.
+
+    Each write must carry an ``X-PB-Token`` header whose value the page gets
+    from ``/api/state``.  A page on another site can make your browser send a
+    request here, but it cannot add a header of our choosing without a
+    preflight, and this server answers no preflight at all.
 
 ``:set web-allow <cidr>[,<cidr>…] | any``
     Client addresses permitted to connect.  Checked against the peer address

@@ -368,6 +368,11 @@ DNS_MODES = ['off', 'hostname', 'ip', 'name+ip', 'ip+name']
 # long enough to squeeze it out entirely.
 LAYOUTS = ['all', 'ping', 'log']
 
+# What the web interface may change.  Here rather than with the rest of
+# the web code because SET_PARAMS and the help text it builds are both
+# evaluated at import, long before that block.
+_WEB_COMMAND_MODES = ('read-only', 'safe')
+
 class SetParam:
     """Descriptor for a single ':set' sub-command parameter.
 
@@ -474,6 +479,9 @@ SET_PARAMS = [
     SetParam('web-allow', '_cmd_web_allow', '<cidr>[,<cidr>]|any',
              'client addresses allowed to reach the web interface',
              getter=lambda app: app.web_allow or 'any'),
+    SetParam('web-commands', '_cmd_web_commands', list(_WEB_COMMAND_MODES),
+             'what the web interface may change (kiosk forces read-only)',
+             getter=lambda app: app.web_commands),
     SetParam('web-password-file', '_cmd_web_password_file', '<path>|none',
              'file holding the web password (mode 600; plain or pbkdf2)',
              getter=lambda app: app.web_password_file or 'none'),
@@ -1185,6 +1193,7 @@ _HELP_BINDINGS = [
     "  :web \\[start|stop|status]   serve the host list over HTTP, read-only  (no arg reports)",
     "  :set web-listen <host:port> where it binds (default 127.0.0.1:8765; loopback only)",
     "  :set web-allow <cidr>,...   client addresses allowed to connect (default any)",
+    "  :set web-commands <mode>    read-only | safe (what the browser may change)",
     "  :set web-password-file <f>  file with the web password (mode 600); needed off loopback",
     "  :set web-hosts <name>,...   extra 'Host:' names the web interface answers to",
     "  :set web-tls-cert <file>    serve HTTPS (:set web-tls-key too, if separate)",
@@ -6054,8 +6063,8 @@ CMD_REGISTRY = [
            '<left|right>',        'scroll active overlay horizontally'),
     CmdDef(['close'],            '_cmd_close',       None,
            '',                    'close the currently open overlay'),
-    CmdDef(['pause-selected'],   '_cmd_pause_selected', None,
-           '',                    'toggle pause on highlighted host/section'),
+    CmdDef(['pause-selected'],   '_cmd_pause_selected', ['on', 'off'],
+           '[on|off]',            'pause the highlighted host/section; no arg toggles'),
 ]
 
 # Flat name/alias → CmdDef lookup used by _dispatch_cmd and _get_completions.
@@ -6783,6 +6792,21 @@ def _kiosk_validate_ssh_args(ssh_args: list) -> str | None:
 # writable by the service and readable by the console user, and that user is
 # precisely who kiosk mode is guarding against.  /etc/<prog>/ is not.
 
+# Commands a browser may run in 'safe' mode.  An allowlist, not a blocklist:
+# a command added later has to be considered before it is exposed, rather
+# than exposed until somebody notices.  Everything that reaches the operating
+# system is absent by construction — :mux and :term spawn processes, :edit
+# runs an editor on the console tty, :source and :log and :save touch
+# arbitrary paths, :set could rewrite the ssh options every monitor uses, and
+# :web could turn off the very checks that let the request in.
+_WEB_SAFE_COMMANDS = frozenset({
+    'pause', 'pause-selected', 'no-alarm', 'clear', 'seen',
+    'fold', 'fold-all', 'unfold-all', 'filter',
+    'dns', 'stats', 'sort', 'ping-view', 'history', 'hist',
+    'sync-history', 'autofold', 'layout', 'select',
+})
+_WEB_QUEUE_MAX = 64
+
 _WEB_SESSION_TTL = 12 * 3600.0      # a browser tab left open overnight
 _WEB_SESSION_MAX = 64               # bound the dict; oldest are dropped first
 _WEB_LOGIN_FAILS = 5                # per client, per window
@@ -7079,6 +7103,85 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError) as exc:
             raise ValueError(f'bad JSON: {exc}') from None
 
+    def _write_gate(self):
+        """(ok, response) for a request that intends to change something.
+
+        The custom header is the CSRF control.  A page on another site can
+        make the browser send a *simple* request to this origin, but it
+        cannot add a header of our choosing without a preflight — and this
+        server answers no CORS preflight at all, so there is nothing for it
+        to succeed against.  The value is derived from the session, so it is
+        also useless when lifted from somebody else's.
+        """
+        if not self._authenticated():
+            return False, (401, b'{"error":"login required"}')
+        sid = self._cookie(_WEB_COOKIE)
+        want = self.server.csrf_for(sid)
+        got = self.headers.get('X-PB-Token') or ''
+        if not hmac.compare_digest(want, got):
+            return False, (403, b'{"error":"missing or wrong X-PB-Token"}')
+        return True, None
+
+    def _do_command(self):
+        ok, refusal = self._write_gate()
+        if not ok:
+            self._send(refusal[0], refusal[1],
+                       'application/json; charset=utf-8')
+            return
+        try:
+            payload = self._read_json_body()
+            cmd = str(payload.get('cmd', '')).strip()
+            uid = payload.get('uid') or None
+        except ValueError as exc:
+            self._send(400, f'{exc}\n'.encode('utf-8'))
+            return
+        self._queue(cmd, uid)
+
+    def _do_host_action(self, path):
+        """POST /api/host/<uid>/<verb> — the buttons on a row.
+
+        Explicit verbs rather than a toggle: the page is showing a state up
+        to two seconds old, and a toggle applied to that can do the opposite
+        of what was clicked.
+        """
+        ok, refusal = self._write_gate()
+        if not ok:
+            self._send(refusal[0], refusal[1],
+                       'application/json; charset=utf-8')
+            return
+        parts = path.strip('/').split('/')
+        if len(parts) != 4:
+            self._send(404, b'no such path\n')
+            return
+        uid, verb = parts[2], parts[3]
+        commands = {
+            'pause':    ':pause-selected on',
+            'resume':   ':pause-selected off',
+            'no-alarm': ':no-alarm --toggle',
+        }
+        if verb not in commands:
+            self._send(404, b'no such action\n')
+            return
+        self._queue(commands[verb], uid)
+
+    def _queue(self, cmd, uid):
+        app = self.server.app
+        allowed, reason = app._web_command_allowed(cmd)
+        if not allowed:
+            body = Application._web_json({'error': reason})
+            self._send(403, body, 'application/json; charset=utf-8')
+            return
+        client = self.client_address[0]
+        # Audited whether or not kiosk mode is on: a command from off the
+        # machine is worth a record even when the console is trusted.
+        app._kiosk_audit('web-cmd', cmd, principal=client)
+        # Normal level, not info: somebody off this machine changing what is
+        # monitored is worth seeing without first turning the log up.
+        app.add_event('web', f'web: {client} ran {cmd!r}',
+                      level=LEVEL_NORMAL)
+        app._web_enqueue(cmd, uid=uid, client=client)
+        self._send(202, b'{"queued":true}', 'application/json; charset=utf-8')
+
     def _do_login(self):
         client = self.client_address[0]
         gate = self.server.login_gate
@@ -7157,10 +7260,12 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             if self.command == 'POST':
                 if path == '/api/login':
                     self._do_login()
+                elif path == '/api/cmd':
+                    self._do_command()
+                elif path.startswith('/api/host/'):
+                    self._do_host_action(path)
                 else:
-                    # Writes arrive in a later phase; refusing now keeps the
-                    # read-only promise true rather than merely intended.
-                    self._send(405, b'read-only\n')
+                    self._send(404, b'no such path\n')
                 return
 
             # The page and its assets carry no data, so they are served
@@ -7190,8 +7295,11 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                     self._send(401, b'{"error":"login required"}',
                                'application/json; charset=utf-8')
                     return
-                body = Application._web_json(app._web_state())
-                self._send(200, body, 'application/json; charset=utf-8')
+                state = app._web_state()
+                state['csrf'] = self.server.csrf_for(self._cookie(_WEB_COOKIE))
+                state['commands'] = app.web_commands
+                self._send(200, Application._web_json(state),
+                           'application/json; charset=utf-8')
             else:
                 self._send(404, b'no such path\n')
         except (BrokenPipeError, ConnectionResetError, socket.timeout):
@@ -7232,6 +7340,11 @@ class _WebServer(http.server.ThreadingHTTPServer):
         # Regenerated every start, never written down.  ':web start' prints it
         # as a whole URL, so the loopback case needs no setup at all.
         self.token = secrets.token_urlsafe(24)
+        # The session cookie is HttpOnly, so the page cannot read it to prove
+        # a request came from itself.  Deriving the CSRF token from the
+        # session id under a per-run key gives the page something it *can*
+        # hold, tied to that session, with nothing extra to store or expire.
+        self._csrf_key = secrets.token_bytes(32)
         self.sessions = {}
         self.login_gate = _WebLoginGate()
         self.last_client = None
@@ -7253,6 +7366,10 @@ class _WebServer(http.server.ThreadingHTTPServer):
                 del self.sessions[min(self.sessions, key=self.sessions.get)]
             self.sessions[sid] = now + _WEB_SESSION_TTL
         return sid
+
+    def csrf_for(self, sid):
+        return hmac.new(self._csrf_key, sid.encode('utf-8'),
+                        'sha256').hexdigest()[:32]
 
     def session_valid(self, sid):
         if not sid:
@@ -7390,6 +7507,16 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
          font-size: 12px; letter-spacing: 0; white-space: pre;
          overflow-x: auto; flex: 0 1 auto; }
 .badge { color: var(--dim); font-size: 12px; }
+.acts { display: flex; gap: 4px; }
+.acts button {
+  font: inherit; font-size: 12px; padding: 2px 8px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 3px;
+  background: #1b1e26; color: var(--dim);
+}
+.acts button:hover { color: var(--fg); border-color: var(--dim); }
+.acts button[disabled] { opacity: .4; cursor: default; }
+.row.paused .acts button.pause { color: var(--slow); }
+.row.quiet .acts button.quiet { color: var(--quiet); }
 .g-ok { color: var(--ok); }
 .g-late { color: var(--slow); }
 .g-bad { color: var(--bad); }
@@ -7424,6 +7551,8 @@ var loginWrap = document.getElementById('login-wrap');
 var loginForm = document.getElementById('login');
 var passwordEl = document.getElementById('password');
 var loginError = document.getElementById('login-error');
+var csrf = '';
+var canWrite = false;
 
 function glyphClass(ch) {
   if (ch === '.' || (ch >= '0' && ch <= '4')) return 'g-ok';
@@ -7457,6 +7586,27 @@ function span(text, cls) {
   return el;
 }
 
+function act(uid, verb) {
+  // The custom header is what a page on another site cannot send without a
+  // preflight this server never answers.
+  fetch('/api/host/' + encodeURIComponent(uid) + '/' + verb, {
+    method: 'POST',
+    headers: { 'X-PB-Token': csrf }
+  }).then(function (r) {
+    if (!r.ok) { summary.textContent = 'refused: HTTP ' + r.status; }
+    window.setTimeout(poll, 150);
+  });
+}
+
+function button(label, cls, uid, verb) {
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls;
+  b.textContent = label;
+  b.addEventListener('click', function () { act(uid, verb); });
+  return b;
+}
+
 function hostRow(r) {
   var el = document.createElement('div');
   el.className = 'row';
@@ -7464,6 +7614,16 @@ function hostRow(r) {
   if (r.paused) { el.classList.add('paused'); }
   if (r.no_alarm) { el.classList.add('quiet'); }
   el.appendChild(span(r.name, 'name'));
+  if (canWrite) {
+    var acts = document.createElement('span');
+    acts.className = 'acts';
+    acts.appendChild(r.paused
+      ? button('resume', 'pause', r.uid, 'resume')
+      : button('pause', 'pause', r.uid, 'pause'));
+    acts.appendChild(button(r.no_alarm ? 'alarm' : 'quiet', 'quiet',
+                            r.uid, 'no-alarm'));
+    el.appendChild(acts);
+  }
   var stats = document.createElement('span');
   stats.className = 'stats';
   Object.keys(r.stats).forEach(function (k) {
@@ -7489,6 +7649,8 @@ function sectionRow(r) {
 }
 
 function render(state) {
+  csrf = state.csrf || '';
+  canWrite = state.commands && state.commands !== 'read-only';
   var up = 0, total = 0;
   state.rows.forEach(function (r) {
     if (r.kind === 'host') { total++; if (!r.down) { up++; } }
@@ -7693,6 +7855,14 @@ class Application:
         self.web_tls_key = ''
         self._web_server = None
         self._web_thread = None
+        # Read-only from the start under kiosk, not corrected later at
+        # ':web start': the default is the value ':set web-commands'
+        # refuses to change there, and those two must agree.
+        self.web_commands = 'read-only' if kiosk_mode else 'safe'
+        # Writes from the server thread land here and are run by the main
+        # loop.  Bounded: a client that could enqueue without limit would be
+        # able to grow this without limit.
+        self._web_queue = deque(maxlen=_WEB_QUEUE_MAX)
         self.startup_select = None     # host name to pre-highlight at startup (--select)
         self.hosts_file = hosts_file   # path of the active hosts file (for :edit)
         self._monitoring_started = False  # set True once start_monitoring() is called
@@ -8067,6 +8237,8 @@ class Application:
                 # the operator put it, under permissions they chose.
                 if self.web_password_file:
                     f.write(f":set web-password-file {self.web_password_file}\n")
+                if self.web_commands != 'safe':
+                    f.write(f":set web-commands {self.web_commands}\n")
                 if self.web_hosts:
                     f.write(f":set web-hosts {self.web_hosts}\n")
                 if self.web_tls_cert:
@@ -9460,8 +9632,25 @@ class Application:
             self.add_event("cmd", f"scroll: unknown target '{target}' (use ping-history or event-history)")
 
     def _cmd_pause_selected(self, args=''):
-        """Toggle pause on highlighted host/section."""
-        self._apply_pause_toggle(self._get_pause_targets())
+        """Pause or resume the highlighted host or section.
+
+        No argument toggles, which is what the 'p' key wants.  'on' and 'off'
+        say it outright, which is what anything driving this from outside
+        wants: a toggle applied to a view that is two seconds old can do the
+        exact opposite of what was asked for.
+        """
+        targets = self._get_pause_targets()
+        if not targets:
+            return
+        want = args.strip().lower()
+        if want in ('on', 'off'):
+            for monitor in targets:
+                monitor.pause() if want == 'on' else monitor.unpause()
+        elif want:
+            self.add_event('cmd', f"pause-selected: unknown value '{want}' "
+                                  "— choices: on off")
+        else:
+            self._apply_pause_toggle(targets)
 
     def _cmd_multikey_timeout(self, args=''):
         """Set the multi-key sequence timeout in ms: :set multikey-timeout <n>."""
@@ -12142,6 +12331,72 @@ class Application:
     def _web_running(self):
         return getattr(self, '_web_server', None) is not None
 
+    def _web_index_for_uid(self, uid):
+        """Row index for a uid, or None when that row is gone."""
+        for i, entry in enumerate(self.entries):
+            if getattr(entry, 'uid', None) == uid:
+                return i
+        return None
+
+    def _web_enqueue(self, cmd, uid=None, client=''):
+        """Hand a command to the main loop.  Called on the server thread."""
+        self._web_queue.append({'cmd': cmd, 'uid': uid, 'client': client})
+
+    def _web_drain(self):
+        """Run what the web server queued — on the main thread, one tick.
+
+        Nothing from a request touches application state directly.  A command
+        arrives as (uid, text) and is executed here: the cursor is moved to
+        the named host, the command goes through ``_dispatch_cmd`` like any
+        other, and the cursor is put back.
+
+        **Addressing by uid rather than by row index, or by "whatever is
+        selected", is the whole point.**  An ':edit' reload renumbers rows, so
+        a queued "pause row 7" could land on a different host three seconds
+        after the browser read the list; and ``highlighted_index`` is shared
+        with whoever is at the console, who in kiosk mode is the party this
+        program does not trust.  Moving and restoring the cursor inside one
+        tick means neither can interleave.
+
+        Going through ``_dispatch_cmd`` is also not incidental: it is where
+        validation happens and where the audit record is written.
+        """
+        while True:
+            try:
+                item = self._web_queue.popleft()
+            except IndexError:
+                return
+            saved = self.highlighted_index
+            try:
+                if item['uid'] is not None:
+                    index = self._web_index_for_uid(item['uid'])
+                    if index is None:
+                        self.add_event('web',
+                                       f"web: {item['cmd']!r} skipped — that "
+                                       'host is no longer in the list',
+                                       level=LEVEL_NORMAL)
+                        continue
+                    self.highlighted_index = index
+                self._dispatch_cmd(item['cmd'])
+            except Exception as exc:
+                self.add_event('web',
+                               f"error: web command {item['cmd']!r} failed: "
+                               f'{type(exc).__name__}: {exc}',
+                               level=LEVEL_NORMAL)
+            finally:
+                self.highlighted_index = saved
+
+    def _web_command_allowed(self, cmd):
+        """(ok, reason) for a command text arriving over HTTP."""
+        if self.web_commands == 'read-only':
+            return False, 'the web interface is read-only (:set web-commands safe)'
+        name = cmd.strip().lstrip(':').split()[0].lower() if cmd.strip() else ''
+        if not name:
+            return False, 'empty command'
+        if name not in _WEB_SAFE_COMMANDS:
+            return False, f"'{name}' is not in the safe set"
+        return True, ''
+
     def _cmd_web(self, args=''):
         """:web [start|stop|status] — serve the host list over HTTP.
 
@@ -12178,7 +12433,8 @@ class Application:
         parts = [f'web: listening on '
                  f'{"https" if server.is_tls else "http"}://{host}:{port}/',
                  f'{server.request_count} request(s)',
-                 'password login' if server.password_hash else 'token only']
+                 'password login' if server.password_hash else 'token only',
+                 f'commands: {self.web_commands}']
         if server.last_client:
             parts.append(f'last client {server.last_client}')
         if self.web_allow:
@@ -12198,6 +12454,13 @@ class Application:
                            'web: not allowed interactively in kiosk mode — '
                            'declare ":web start" in the hosts file')
             return
+        if self.kiosk_mode and self.web_commands != 'read-only':
+            # Belt as well as braces: ':set web-commands' already refuses in
+            # kiosk mode, but a config written before kiosk was switched on
+            # would otherwise arrive here with writes enabled.
+            self.web_commands = 'read-only'
+            self.add_event('web', 'web: kiosk mode — forcing read-only',
+                           level=LEVEL_NORMAL)
         try:
             host, port = _web_parse_listen(self.web_listen)
         except ValueError as exc:
@@ -12338,6 +12601,35 @@ class Application:
         self.web_password_file = value
         if self._monitoring_started:
             self.add_event('config', f'web-password-file: {value}')
+
+    def _cmd_web_commands(self, args=''):
+        """:set web-commands read-only|safe — what a browser may change.
+
+        'safe' is an allowlist of commands that touch nothing but ping-bulk's
+        own state: pause, no-alarm, fold, filter, clear the log, and the
+        display settings.  Everything that reaches the operating system is
+        absent from it by construction.
+
+        In kiosk mode this is forced to 'read-only'.  The twenty-one kiosk
+        guards exist because the console user is not trusted; a write path
+        arriving over the network runs at the same privileges and would go
+        around all of them.
+        """
+        if self._handle_param_verb('web-commands', args):
+            return
+        value = args.strip().lower()
+        if value not in _WEB_COMMAND_MODES:
+            self.add_event('cmd',
+                           f"web-commands: unknown value '{value}' — "
+                           f"choices: {' '.join(_WEB_COMMAND_MODES)}")
+            return
+        if value != 'read-only' and self.kiosk_mode:
+            self.add_event('cmd',
+                           'web-commands: kiosk mode allows read-only only')
+            return
+        self.web_commands = value
+        if self._monitoring_started:
+            self.add_event('config', f'web-commands: {value}')
 
     def _cmd_web_hosts(self, args=''):
         """:set web-hosts <name>[,<name>…] — extra Host: names to answer to.
@@ -14764,10 +15056,16 @@ class Application:
             f"edit: reloaded {hosts_file} — {kept} host(s) kept running, "
             f"{len(fresh)} restarted")
 
-    def _kiosk_audit(self, action: str, detail: str = '') -> None:
-        """Write one audit record to syslog when kiosk mode is active.
+    def _kiosk_audit(self, action: str, detail: str = '',
+                     principal: str = '') -> None:
+        """Write one audit record to syslog.
 
         Records the executing user, action name, and optional detail string.
+
+        *principal* names a requester who is not the local user — a web
+        client's address.  Without it the record would say the service
+        account for both, and "who did this" is the question an audit log
+        exists to answer.
         Uses LOG_NOTICE priority so the record lands in most syslog targets
         (e.g. ``/var/log/syslog``) without flooding ``/var/log/auth.log``.
 
@@ -14777,6 +15075,8 @@ class Application:
         try:
             user = os.environ.get('USER') or os.environ.get('LOGNAME') or str(os.getuid())
             msg = f"kiosk_audit: user={user} action={action}"
+            if principal:
+                msg += f" from={principal}"
             if detail:
                 msg += f" detail={detail!r}"
             _syslog.openlog(_PROG_NAME, _syslog.LOG_PID, _syslog.LOG_DAEMON)
@@ -17148,6 +17448,10 @@ class Application:
 
         try:
             while self.running:
+                # Before anything is drawn: a web request queued a moment ago
+                # should be visible in this frame, not the next one.
+                if self._web_queue:
+                    self._web_drain()
                 stdscr.erase()
                 height, width = stdscr.getmaxyx()
 
