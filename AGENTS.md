@@ -538,8 +538,11 @@ that engine is *stateless*; here the engine **is** the statistics owner
 needs privileges, so a split would move the whole stats layer across a
 boundary and buy nothing.
 
-**Read-only, and the code says so rather than merely intending it:** `do_POST`
-returns 405. Writes arrive in a later phase.
+**What it will answer to is decided in one place**, `_handle`: GET serves the
+page, the assets, `/api/state` and `/api/host/<uid>`; POST reaches only
+`/api/login`, `/api/cmd` and `/api/host/<uid>/<verb>`, and any other path is a
+404. What a write may then *do* is a separate question, answered by
+`:set web-commands` and the safe allowlist below.
 
 Each control below answers a specific way it could go wrong.
 
@@ -547,9 +550,10 @@ Each control below answers a specific way it could go wrong.
   browser: a page the operator visits can resolve a name of its own choosing
   to `127.0.0.1` and treat the reply as same-origin (DNS rebinding), because
   the request comes *from* the browser on this machine. Anything outside
-  `_web_allowed_hosts()` gets 421. This is also why a non-loopback bind is
-  refused for now — the names it would be reached by cannot be enumerated
-  from here.
+  `_web_allowed_hosts()` gets 421. A loopback bind needs no configuration for
+  this; a listener reached by some other name must declare it with
+  `:set web-hosts`, because the alternative — inferring the set — is the same
+  as not checking.
 - **The client allowlist is checked before routing**, so an address outside
   `:set web-allow` learns nothing about which paths exist.
 - **CSP `default-src 'none'; script-src 'self'`**, with no inline script and
@@ -696,6 +700,59 @@ that `%h`/`%r` are *not* expanded, because `_handle_cmd_key` calls
 `_dispatch_cmd` directly and only `_execute_binding` expands. That was
 checked rather than assumed, and it is why no second expansion path had to be
 written; the council had flagged one as a thing that would drift.
+
+### Parity with the terminal
+
+**Two silent wrong readings, found by putting the two views side by side.**
+Neither failed loudly — a blank cell and an empty strip are what a host with
+no data looks like, so the browser quietly disagreed with the screen beside
+it:
+
+- a `:probe` column read `-` in the web while the terminal showed the
+  reading. `_compute_stat` is a pure function over one monitor and knows
+  nothing about the app's `:probe` declarations; `_stat_cell` is the
+  dispatcher that does.
+- with `:set ping-view <probe>` the strip came back blank, because a probe
+  series is not one of the `HISTORY_MODES` `get_history_string` understands.
+  `draw_hosts` asks `_probe_def_for_label` first and calls
+  `_probe_history_string`; the serializer now asks the same three questions in
+  the same order, including `_probe_cell_width` / `_rtt_cell_width` — a probe
+  cell holds the reading, so it is wider than one column, and the client is
+  told the width rather than guessing.
+
+**`_details_data(monitor)`** is the one snapshot the overlay and
+`/api/host/<uid>` both format from. The overlay used to read it inline in
+*two* lock acquisitions, which made it the only host view with no accessor.
+Durations come out as seconds rather than the `time.monotonic()` stamps they
+derive from — those mean nothing outside this process. `_connect_preview` and
+`_host_event_lines` stay outside the lock deliberately: they reach other state
+and holding a monitor lock across them would invite a deadlock for no gain.
+The refactor was verified by capturing every overlay line before and after,
+for an up host, a down relayed host and an errored one: identical.
+
+**`_event_class` and `_stat_class` are twins of the `*_attr` functions**, and
+sit next to them so neither can be changed without seeing the other. Colour
+pairs are chosen for a terminal and a browser wants a name; translating the
+attribute back would be the wrong direction. The client previously guessed the
+event colour by looking for `error:` in the text, which knew nothing about the
+level or the category, and had no way at all to judge a probe reading.
+`_stat_class` mirrors `_probe_attr`'s rank exactly, including a `--combine`
+group taking its worst member and "nothing read yet" ranking above "fine".
+
+**A twin is only as good as the proof that it is one.** The first cut mirrored
+five of `_stat_attr`'s seven branches; `Last` and `Drift`/`RTime` fell through
+to no class. That is not a corner: `STATS_MODES[0]` is `off`, which the
+serializer maps to a single `Last` column, so **every row in the browser had an
+uncoloured latency cell** while the terminal coloured it three ways — red
+included, for "no reply". The test that looked like coverage compared the
+*keys* of `stat_class` against the keys of `stats` and never a value, so it
+passed throughout. The guard that catches the next one parses both function
+bodies for the column names they name and asserts `_stat_attr`'s set is a
+subset of `_stat_class`'s; nine tests now fail if either branch is removed.
+
+**Filtering is client-side.** `:filter` would move the terminal's view and
+every other viewer's; one person searching should not drag anybody else's
+screen with them. A test asserts the client never posts `:filter`.
 
 **Kiosk mode: declared, never typed.** `:web start` is refused at the console
 and allowed while `_loading_file` is set — the rule `:probe-source` already

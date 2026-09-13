@@ -529,3 +529,114 @@ class TestPersistence:
         assert app._status_msg['text'] == f'web-listen {app.web_listen}'
         app._dispatch_cmd(':set web-allow')
         assert app._status_msg['text'] == 'web-allow any'
+
+
+# ===========================================================================
+# The per-host details endpoint
+# ===========================================================================
+
+class TestTheDetailsEndpoint:
+    """GET /api/host/<uid> — the overlay's figures, for one host."""
+
+    def _uid(self, c):
+        state = json.loads(c.get('/api/state')[2])
+        return next(r['uid'] for r in state['rows'] if r['kind'] == 'host')
+
+    def test_it_needs_a_session(self, served):
+        _app, c = served
+        status, _h, body = c.get('/api/host/anything')
+        assert status == 401
+        assert b'login required' in body
+
+    def test_it_returns_the_same_figures_the_overlay_shows(self, served):
+        app, c = served
+        c.sign_in()
+        uid = self._uid(c)
+        status, _h, body = c.get(f'/api/host/{uid}')
+        assert status == 200
+        detail = json.loads(body)
+        monitor = next(m for m in app.monitors if m.uid == uid)
+        expected = app._details_data(monitor)
+        for key in ('name', 'host', 'cmd', 'tx', 'rx', 'xx', 'alive'):
+            assert detail[key] == expected[key], key
+
+    def test_an_unknown_host_is_404_not_an_error(self, served):
+        _app, c = served
+        c.sign_in()
+        status, _h, body = c.get('/api/host/nosuchuid')
+        assert status == 404
+        assert b'no such host' in body
+
+    def test_a_section_uid_is_not_a_host(self, pb, tmp_path):
+        """Sections have uids too; asking for one must not half-work."""
+        app = _make_app(pb, tmp_path, '### group\n10.0.0.1\n')
+        app._dispatch_cmd(':set web-listen 127.0.0.1:0')
+        app._dispatch_cmd(':web start')
+        try:
+            c = Client(app).sign_in()
+            section = next(e for e in app.entries
+                           if isinstance(e, pb.SectionLabel))
+            assert c.get(f'/api/host/{section.uid}')[0] == 404
+        finally:
+            app._web_stop(quiet=True)
+
+    def test_it_carries_the_probe_blocks(self, pb, tmp_path):
+        """The overlay's own rendered sparkline, not a second implementation."""
+        import time as _t
+        app = _make_app(pb, tmp_path,
+                        ":probe-source --cmd 'echo t=1'\n"
+                        ':probe t --range 0:100\n10.0.0.1\n')
+        monitor = app.monitors[0]
+        with monitor.lock:
+            series = monitor.probes.setdefault('t', pb.ProbeSeries(10))
+            series.add(42.0, _t.time())
+            series.state = 'ok'
+        app._dispatch_cmd(':set web-listen 127.0.0.1:0')
+        app._dispatch_cmd(':web start')
+        try:
+            c = Client(app).sign_in()
+            detail = json.loads(c.get(f'/api/host/{monitor.uid}')[2])
+            assert detail['probes'] == app._probe_overlay_lines(monitor, 60)
+            assert any('42' in line for line in detail['probes'])
+        finally:
+            app._web_stop(quiet=True)
+
+    def test_a_hostile_name_stays_inert(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path,
+                        '10.0.0.1 ## </script><img src=x onerror=alert(1)>\n')
+        app._dispatch_cmd(':set web-listen 127.0.0.1:0')
+        app._dispatch_cmd(':web start')
+        try:
+            c = Client(app).sign_in()
+            status, _h, body = c.get(f'/api/host/{app.monitors[0].uid}')
+            assert status == 200
+            assert b'<' not in body and b'>' not in body
+            assert '<img' in json.loads(body)['name']
+        finally:
+            app._web_stop(quiet=True)
+
+
+class TestThePageCanShowIt:
+    """Structure the client needs, asserted where it cannot silently rot."""
+
+    def test_the_page_has_a_filter_and_a_details_panel(self, pb):
+        html = pb._WEB_HTML
+        assert 'id="filter"' in html
+        assert 'id="detail-wrap"' in html
+
+    def test_filtering_is_client_side(self, pb):
+        """':filter' would move the terminal's view and every other viewer's.
+
+        One person searching should not drag anybody else's screen with them.
+        """
+        js = '\n'.join(line for line in pb._WEB_JS.splitlines()
+                       if not line.lstrip().startswith('//'))
+        assert "'/api/cmd'" in js, 'the command box still posts'
+        assert ':filter' not in js
+        assert 'filterEl.value' in js
+
+    def test_the_page_still_has_no_inline_script(self, pb):
+        html = pb._WEB_HTML
+        assert '<script>' not in html
+        assert 'onclick=' not in html and 'onerror=' not in html
+        assert 'addEventListener' in pb._WEB_JS

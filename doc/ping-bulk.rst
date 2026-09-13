@@ -2060,6 +2060,22 @@ Web interface
     sections, stats columns and history strips, then the event log.  It polls
     once every two seconds and collapses to a single column on a phone.
 
+    Click a row for the same figures the ``Enter`` overlay shows in the
+    terminal — command, connect line, uptime, packet and latency statistics,
+    remote clock, probe sparklines and that host's recent events.  Both are
+    rendered from one snapshot, so they cannot report a host differently.
+
+    The box above the list filters it **in the browser**.  ``/`` focuses it
+    and ``Esc`` clears it, as in the terminal — but unlike ``:filter`` it
+    moves nobody else's screen, which matters when two people are looking at
+    once.
+
+    Columns follow ``:set stats``, including ``:probe`` columns, and the
+    strip follows ``:set ping-view``, including a probe series.  Every cell is
+    coloured by the terminal's own verdict rather than by anything the page
+    infers: a probe reading is judged by its ``--warn`` and ``--crit``, which
+    only ping-bulk knows.
+
     While the server is running the status bar carries a ``web:<host>:<port>``
     slot, so a listening socket is not something to discover months later.
     ``:web status`` adds the request count and the address of the last client.

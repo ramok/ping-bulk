@@ -6350,6 +6350,26 @@ def _event_color_attr(entry: 'EventEntry') -> int:
     return curses.color_pair(3)       # yellow (warnings are normal-level non-errors)
 
 
+def _event_class(entry: 'EventEntry') -> str:
+    """The class name for an event line, mirroring _event_color_attr.
+
+    A twin rather than a translation of the curses attribute: colour pairs are
+    chosen for a terminal, and a browser wants a name.  Keeping the two next to
+    each other is what stops them answering differently about one line — the
+    client used to guess by looking for 'error:' in the text, which had no idea
+    about the level or the category.
+    """
+    if entry.level >= LEVEL_DEBUG:
+        return 'dim'
+    if entry.level != LEVEL_NORMAL:
+        return ''
+    parts = entry.text.split('   ', 2)
+    msg = parts[2].lstrip() if len(parts) >= 3 else ''
+    if entry.category == 'save' or msg.startswith('error:'):
+        return 'error'
+    return 'warn'
+
+
 def _resolve_mux_backend(preference: str = None) -> 'TerminalBackend | None':
     """Return the TerminalBackend to use, or None if none is available.
 
@@ -7296,6 +7316,19 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             elif path == '/static/app.js':
                 self._send(200, _WEB_JS.encode('utf-8'),
                            'application/javascript; charset=utf-8')
+            elif path.startswith('/api/host/'):
+                if not self._authenticated():
+                    self._send(401, b'{"error":"login required"}',
+                               'application/json; charset=utf-8')
+                    return
+                uid = path[len('/api/host/'):].strip('/')
+                detail = app._web_host_detail(uid)
+                if detail is None:
+                    self._send(404, b'{"error":"no such host"}',
+                               'application/json; charset=utf-8')
+                    return
+                self._send(200, Application._web_json(detail),
+                           'application/json; charset=utf-8')
             elif path == '/api/state':
                 if not self._authenticated():
                     self._send(401, b'{"error":"login required"}',
@@ -7463,7 +7496,13 @@ _WEB_HTML = """<!DOCTYPE html>
 </section>
 <section>
   <h2>Hosts</h2>
+  <input id="filter" type="search" autocomplete="off" spellcheck="false"
+         placeholder="filter hosts  ( / )" aria-label="filter hosts">
   <div id="rows" class="rows"></div>
+</section>
+<section id="detail-wrap" hidden>
+  <h2>Details <button type="button" id="detail-close">close</button></h2>
+  <pre id="detail" class="detail"></pre>
 </section>
 <section>
   <h2>Events</h2>
@@ -7516,8 +7555,13 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
        padding: 5px 8px; background: #171a21; border-radius: 3px; }
 .row.section { background: none; padding: 12px 0 2px; font-weight: 600; }
 .row.section .name { color: var(--dim); }
+/* Section nesting is not limited to three in the hosts file, so neither is
+   the indent here; level 1 needs none. */
 .row.lvl2 { padding-left: 16px; }
 .row.lvl3 { padding-left: 32px; }
+.row.lvl4 { padding-left: 48px; }
+.row.lvl5 { padding-left: 64px; }
+.row.lvl6 { padding-left: 80px; }
 .row .name { flex: 1 1 12em; min-width: 0; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
 .row.down .name { color: var(--bad); }
@@ -7545,12 +7589,31 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .g-vslow { color: var(--vslow); }
 .g-quiet { color: var(--quiet); }
 .g-none { color: var(--line); }
+#filter { width: 100%; margin-bottom: 6px; font: inherit; padding: 6px 10px;
+          border-radius: 3px; border: 1px solid var(--line);
+          background: #1b1e26; color: var(--fg); }
+.row.host { cursor: pointer; }
+.row.host:hover { background: #1e222b; }
+.row.sel { outline: 1px solid var(--dim); }
+#detail-close { font: inherit; font-size: 12px; margin-left: 8px;
+                padding: 1px 8px; cursor: pointer; border-radius: 3px;
+                border: 1px solid var(--line); background: #1b1e26;
+                color: var(--dim); }
+.detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: 12px; white-space: pre-wrap; word-break: break-word;
+          background: #171a21; padding: 10px; border-radius: 3px; margin: 0; }
+.stats .warn b { color: var(--slow); }
+.stats .error b { color: var(--bad); }
+.stats .stale b { color: var(--quiet); }
+.stats .ok b { color: var(--ok); }
+.stats .vslow b { color: var(--vslow); }
 .events { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 12px; white-space: pre-wrap; word-break: break-word;
           color: var(--dim); display: flex; flex-direction: column-reverse; }
 .events div { padding: 1px 0; }
 .events .warn { color: var(--slow); }
 .events .error { color: var(--bad); }
+.events .dim { opacity: .55; }
 @media (max-width: 600px) {
   .row { flex-wrap: wrap; }
   .row .name { flex-basis: 100%; }
@@ -7579,6 +7642,99 @@ var cmdWrap = document.getElementById('cmd-wrap');
 var cmdForm = document.getElementById('cmdform');
 var cmdInput = document.getElementById('cmd');
 var cmdNote = document.getElementById('cmd-note');
+var filterEl = document.getElementById('filter');
+var detailWrap = document.getElementById('detail-wrap');
+var detailEl = document.getElementById('detail');
+var selectedUid = '';
+var lastState = null;
+
+document.getElementById('detail-close').addEventListener('click', function () {
+  selectedUid = '';
+  detailWrap.hidden = true;
+  if (lastState) { render(lastState); }
+});
+
+filterEl.addEventListener('input', function () {
+  if (lastState) { render(lastState); }
+});
+
+// '/' focuses the filter and Escape clears it -- the two the terminal uses.
+document.addEventListener('keydown', function (ev) {
+  if (ev.key === '/' && document.activeElement !== filterEl
+      && document.activeElement !== cmdInput
+      && document.activeElement !== passwordEl) {
+    ev.preventDefault();
+    filterEl.focus();
+    filterEl.select();
+  } else if (ev.key === 'Escape') {
+    if (document.activeElement === filterEl && filterEl.value) {
+      filterEl.value = '';
+      if (lastState) { render(lastState); }
+    } else if (selectedUid) {
+      selectedUid = '';
+      detailWrap.hidden = true;
+      if (lastState) { render(lastState); }
+    }
+  }
+});
+
+function showDetail(uid) {
+  selectedUid = uid;
+  fetch('/api/host/' + encodeURIComponent(uid))
+    .then(function (r) {
+      if (!r.ok) { throw new Error('HTTP ' + r.status); }
+      return r.json();
+    })
+    .then(function (d) {
+      detailWrap.hidden = false;
+      detailEl.textContent = detailText(d);
+    })
+    .catch(function (err) {
+      detailWrap.hidden = false;
+      detailEl.textContent = 'could not load details: ' + err.message;
+    });
+}
+
+function num(v, unit) {
+  return v === null || v === undefined ? '-' : v.toFixed(2) + (unit || '');
+}
+
+function detailText(d) {
+  var out = [];
+  out.push('Host:    ' + d.name);
+  if (d.ip && d.ip !== d.name) { out.push('Address: ' + d.ip); }
+  out.push('Cmd:     ' + (d.cmd || '-'));
+  out.push('Connect: ' + (d.connect === null ? 'disabled' : d.connect));
+  out.push('');
+  out.push('Status:  ' + (d.error ? 'ERROR'
+    : d.alive === true ? 'UP' : d.alive === false ? 'DOWN' : 'UNKNOWN'));
+  if (d.error) { out.push('Error:   ' + d.error); }
+  if (d.uptime !== null) { out.push('Uptime:  ' + Math.round(d.uptime) + 's'); }
+  if (d.downtime !== null) {
+    out.push('Downtime: ' + Math.round(d.downtime) + 's');
+  }
+  out.push('');
+  out.push('Packets: TX ' + d.tx + '   RX ' + d.rx + '   XX ' + d.xx +
+           '   loss ' + (d.loss_pct === null ? '-' : d.loss_pct.toFixed(2) + '%'));
+  out.push('Latency: min ' + num(d.lat_min) + '  max ' + num(d.lat_max) +
+           '  avg ' + num(d.lat_avg) + '  stdev ' + num(d.lat_stdev));
+  if (d.clock_offset_ms !== null && d.clock_offset_ms !== undefined) {
+    out.push('Clock:   offset ' + (d.clock_offset_ms / 1000).toFixed(1) + 's' +
+             (d.clock_age === null ? '' : '  (probed ' + d.clock_age + 's ago)'));
+  } else if (d.clock_state === 'no-remote-time') {
+    out.push('Clock:   not available');
+  }
+  if (d.probes && d.probes.length) {
+    out.push('');
+    d.probes.forEach(function (line) { out.push(line); });
+  }
+  if (d.events && d.events.length) {
+    out.push('');
+    out.push('Recent events:');
+    d.events.slice(-20).forEach(function (line) { out.push('  ' + line); });
+  }
+  return out.join('\n');
+}
 
 cmdForm.addEventListener('submit', function (ev) {
   ev.preventDefault();
@@ -7656,6 +7812,12 @@ function hostRow(r) {
   if (r.down) { el.classList.add('down'); }
   if (r.paused) { el.classList.add('paused'); }
   if (r.no_alarm) { el.classList.add('quiet'); }
+  el.classList.add('host');
+  if (r.uid === selectedUid) { el.classList.add('sel'); }
+  el.addEventListener('click', function (ev) {
+    if (ev.target.tagName === 'BUTTON') { return; }
+    showDetail(r.uid);
+  });
   el.appendChild(span(r.name, 'name'));
   if (canWrite) {
     var acts = document.createElement('span');
@@ -7671,6 +7833,9 @@ function hostRow(r) {
   stats.className = 'stats';
   Object.keys(r.stats).forEach(function (k) {
     var cell = document.createElement('span');
+    // The server's own verdict, not a guess from the text: a probe reading is
+    // judged by its --warn and --crit, which only ping-bulk knows.
+    cell.className = (r.stat_class && r.stat_class[k]) || '';
     cell.appendChild(document.createTextNode(k + ' '));
     var v = document.createElement('b');
     v.textContent = r.stats[k];
@@ -7692,6 +7857,7 @@ function sectionRow(r) {
 }
 
 function render(state) {
+  lastState = state;
   csrf = state.csrf || '';
   canWrite = state.commands && state.commands !== 'read-only';
   cmdWrap.hidden = state.commands !== 'full';
@@ -7712,16 +7878,21 @@ function render(state) {
     return li;
   }));
 
-  rowsEl.replaceChildren.apply(rowsEl, state.rows.map(function (r) {
+  // Filtering happens here rather than through ':filter', which would change
+  // what the terminal shows as well -- one person searching should not move
+  // anybody else's screen.
+  var needle = filterEl.value.trim().toLowerCase();
+  var shown = !needle ? state.rows : state.rows.filter(function (r) {
+    return r.kind === 'host' && r.name.toLowerCase().indexOf(needle) !== -1;
+  });
+  rowsEl.replaceChildren.apply(rowsEl, shown.map(function (r) {
     return r.kind === 'section' ? sectionRow(r) : hostRow(r);
   }));
 
   eventsEl.replaceChildren.apply(eventsEl, state.events.slice(-120).map(
     function (e) {
       var d = document.createElement('div');
-      var t = e.text.toLowerCase();
-      if (t.indexOf('error:') !== -1) { d.className = 'error'; }
-      else if (t.indexOf('warning:') !== -1) { d.className = 'warn'; }
+      d.className = e.cls || '';
       d.textContent = e.text;
       return d;
     }));
@@ -12184,6 +12355,51 @@ class Application:
             return self.stale_attr | row_attr
         return curses.color_pair(1) | row_attr
 
+    def _stat_class(self, monitor, cname):
+        """The class name for one stats cell, mirroring :meth:`_stat_attr`.
+
+        Same decisions, same order, expressed for a browser instead of for
+        curses.  A probe cell is judged by its own ``--warn``/``--crit``
+        through ``_probe_severity``, exactly as the terminal judges it, so a
+        reading cannot be green on one screen and yellow on the other.
+        """
+        if monitor.error is not None:
+            return 'error'
+        probe = self._probe_def_for_label(cname)
+        if probe is not None:
+            # The same rank _probe_attr paints from, including a group taking
+            # its worst member and 'nothing read yet' ranking above 'fine'.
+            if probe.is_group:
+                rank = max((self._probe_severity(monitor, m)
+                            for m in probe.members), default=1)
+            else:
+                rank = self._probe_severity(monitor, probe.name)
+            return {4: 'error', 3: 'error', 2: 'warn', 1: 'stale'}.get(rank, 'ok')
+        if cname == 'Down':
+            _text, is_down = self._compute_updown(monitor)
+            return 'error' if is_down else ''
+        if cname == 'Last':
+            # 'no reply' is red, not blank: an empty latency cell already
+            # means "nothing measured", and the terminal distinguishes them.
+            if monitor.latency is None:
+                return 'error'
+            return 'ok' if monitor.latency < 50 else 'warn'
+        if cname in ('Drift', 'RTime'):
+            with monitor.lock:
+                state = monitor.clock_state
+                offset = monitor.clock_offset_ms
+            if (state == 'no-remote-time' or offset is None
+                    or self._display_stale(monitor)):
+                return 'stale'
+            if abs(offset) < 1000:
+                return 'ok'
+            if abs(offset) < 60000:
+                return 'warn'
+            return 'vslow'
+        if cname in _FROZEN_STATS and self._display_stale(monitor):
+            return 'stale'
+        return ''
+
     def _stat_attr(self, monitor, cname, row_attr):
         """Return the curses attribute for one stats cell of *monitor*.
 
@@ -12374,6 +12590,27 @@ class Application:
 
     def _web_running(self):
         return getattr(self, '_web_server', None) is not None
+
+    def _web_host_detail(self, uid):
+        """The details view for one host, or None when there is no such row.
+
+        Shares :meth:`_details_data` with the terminal's overlay, so the two
+        cannot report different figures for the same host.  The probe blocks
+        are the overlay's own rendered lines: a sparkline is a picture made of
+        characters, and re-deriving one in the client would be a second
+        implementation of something that already reads correctly.
+        """
+        for entry in list(self.entries):
+            if getattr(entry, 'uid', None) != uid or not isinstance(entry, Monitor):
+                continue
+            data = self._details_data(entry)
+            # A fixed width, where the overlay passes the box it drew into:
+            # the sparkline is sized in characters and the browser has no
+            # column count to offer, so 60 is picked once here rather than
+            # letting the client ask for a width it cannot reason about.
+            data['probes'] = self._probe_overlay_lines(entry, 60)
+            return data
+        return None
 
     def _web_index_for_uid(self, uid):
         """Row index for a uid, or None when that row is gone."""
@@ -12824,7 +13061,18 @@ class Application:
         render_time, sync = self._history_render_time()
         entries = list(self.entries)
         visible = self._get_visible_entry_indices()
-        mode = HISTORY_MODES[self.history_mode]
+        # The same three questions draw_hosts asks, and answered by the same
+        # helpers.  ':set ping-view <probe>' puts a probe series in the strip
+        # instead of the ping results, and a probe cell is wider than one
+        # column because it holds the reading rather than a 0-9 bucket.
+        mode = self._history_mode_name()
+        view_probe = self._probe_def_for_label(mode)
+        if view_probe is not None:
+            cell_width = self._probe_cell_width(view_probe)
+        elif mode == 'rtt':
+            cell_width = self._rtt_cell_width()
+        else:
+            cell_width = 1
 
         if self.stats_custom is not None:
             columns = list(self.stats_custom)
@@ -12877,10 +13125,22 @@ class Application:
                 'latency': latency,
                 'updown': updown.strip(),
                 'down': bool(is_down),
-                'stats': {c: self._compute_stat(entry, c).strip() for c in columns},
-                'history': entry.get_history_string(
-                    history_len, self.history_offset, mode, 1,
-                    sync=sync, end_time=render_time),
+                # _stat_cell, not _compute_stat: a column naming a ':probe'
+                # is resolved against the app's declarations, and going
+                # straight to _compute_stat drew '-' for every probe column
+                # while the terminal beside it showed the reading.
+                'stats': {c: self._stat_cell(entry, c).strip() for c in columns},
+                # The terminal's own verdict per cell, not the client's guess
+                # from the text: a probe reading is judged by its --warn and
+                # --crit, which nothing outside this process knows.
+                'stat_class': {c: self._stat_class(entry, c) for c in columns},
+                'history': (
+                    self._probe_history_string(entry, view_probe, history_len,
+                                               self.history_offset, cell_width)
+                    if view_probe is not None else
+                    entry.get_history_string(
+                        history_len, self.history_offset, mode, cell_width,
+                        sync=sync, end_time=render_time)),
             }
             rows.append(row)
             # 'What is broken right now' — the first question a viewer has, so
@@ -12892,7 +13152,8 @@ class Application:
                              'updown': row['updown'], 'error': error})
 
         events = [
-            {'level': e.level, 'category': e.category, 'text': e.text}
+            {'level': e.level, 'category': e.category, 'text': e.text,
+             'cls': _event_class(e)}
             for e in self._events_snapshot() if e.level <= self.loglevel
         ][-event_tail:]
 
@@ -12903,6 +13164,7 @@ class Application:
                 'dns': DNS_MODES[self.dns_mode],
                 'sort': self.sort_by,
                 'ping_view': mode,
+                'cell_width': cell_width,
                 'sync': bool(sync),
                 'layout': self.layout,
                 'loglevel': self._LOGLEVEL_LABELS.get(self.loglevel, 'normal'),
@@ -17218,6 +17480,65 @@ class Application:
                     lines.append(event.text)
         return lines
 
+    def _details_data(self, monitor):
+        """Everything the details view shows, as values rather than lines.
+
+        The overlay used to read all of this inline, which made it the only
+        host view in the program with no accessor: anything else wanting the
+        same figures had to duplicate the reads or scrape formatted text.
+        The overlay and the web view now format from one dict, so they cannot
+        describe the same host differently.
+
+        Durations come out as seconds, not as the ``time.monotonic()`` stamps
+        they are derived from — those mean nothing outside this process and
+        less than nothing in JSON.
+
+        One lock acquisition, not the two the overlay used to take: the
+        latency figures and the clock reading are shown side by side, so they
+        should be from the same instant.  ``_connect_preview`` and
+        ``_host_event_lines`` are deliberately outside it — they reach other
+        state, and holding a monitor lock across them would invite a deadlock
+        for no gain.
+        """
+        with monitor.lock:
+            lat_count = monitor._lat_count
+            now = time.monotonic()
+            data = {
+                'lat_count': lat_count,
+                'lat_avg':   monitor._lat_mean if lat_count else None,
+                'lat_min':   monitor._lat_min  if lat_count else None,
+                'lat_max':   monitor._lat_max  if lat_count else None,
+                'lat_stdev': (math.sqrt(monitor._lat_m2 / lat_count)
+                              if lat_count >= 2 else None),
+                'rx':    monitor.rx_count,
+                'xx':    monitor.xx_count,
+                'tx':    monitor.ping_count,
+                'last':  monitor.latency,
+                'alive': monitor.alive,
+                'error': monitor.error,
+                'paused': monitor.paused,
+                'no_alarm': monitor.no_alarm,
+                'clock_state': monitor.clock_state,
+                'clock_offset_ms': monitor.clock_offset_ms,
+                'clock_age': (None if monitor._clock_ts is None
+                              else int(now - monitor._clock_ts)),
+                'uptime': (None if monitor.up_since is None
+                           else now - monitor.up_since),
+                'downtime': (None if monitor.down_since is None
+                             else now - monitor.down_since),
+            }
+        total = data['rx'] + data['xx']
+        data['loss_pct'] = (data['xx'] / total * 100.0) if total else None
+        data['uid'] = monitor.uid
+        data['name'] = monitor.get_display_name(DNS_MODES[self.dns_mode])
+        data['host'] = monitor.host
+        data['ip'] = monitor.resolved_ip
+        data['cmd'] = (shlex.join(monitor._build_ping_cmd())
+                       if hasattr(monitor, '_build_ping_cmd') else '')
+        data['connect'] = self._connect_preview(monitor)
+        data['events'] = self._host_event_lines(monitor)
+        return data
+
     def _draw_details_overlay(self, stdscr, height, width):
         """Draw the host details overlay as a centered bordered popup.
 
@@ -17236,31 +17557,18 @@ class Application:
 
         monitor = self.details_monitor
 
-        # Collect stats once at the start to ensure consistency
-        with monitor.lock:
-            lat_count = monitor._lat_count
-            lat_avg   = monitor._lat_mean if lat_count else None
-            lat_min   = monitor._lat_min  if lat_count else None
-            lat_max   = monitor._lat_max  if lat_count else None
-            lat_stdev = (math.sqrt(monitor._lat_m2 / lat_count)
-                         if lat_count >= 2 else None)
-            rx = monitor.rx_count
-            xx = monitor.xx_count
-            tx = monitor.ping_count
-            last = monitor.latency
-            alive = monitor.alive
-            error = monitor.error
+        # One snapshot, shared with the web view so the two cannot disagree.
+        d = self._details_data(monitor)
+        lat_count = d['lat_count']
+        lat_avg, lat_min = d['lat_avg'], d['lat_min']
+        lat_max, lat_stdev = d['lat_max'], d['lat_stdev']
+        rx, xx, tx = d['rx'], d['xx'], d['tx']
+        last, alive, error = d['last'], d['alive'], d['error']
 
-        dns_mode = DNS_MODES[self.dns_mode]
-        display_name = monitor.get_display_name(dns_mode)
-        if hasattr(monitor, '_build_ping_cmd'):
-            raw_cmd_str = shlex.join(monitor._build_ping_cmd())
-        else:
-            raw_cmd_str = ""
+        display_name = d['name']
+        raw_cmd_str = d['cmd']
         raw_error_str = error if error is not None else ""
-
-        # Collect host events FIRST — needed to compute ideal overlay width.
-        host_events = self._host_event_lines(monitor)
+        host_events = d['events']
 
         # Calculate dynamic width
         ideal_w = 60
@@ -17292,7 +17600,7 @@ class Application:
 
         # What the 'c' key would run, taken from the binding itself so the
         # preview cannot disagree with it (and follows a rebound 'c').
-        conn_str = self._connect_preview(monitor)
+        conn_str = d['connect']
         conn_disabled = conn_str is None
         if conn_disabled:
             lines.append(f"  Connect: disabled")
@@ -17318,14 +17626,13 @@ class Application:
                 lines.append(f"  Error:  -")
         elif alive is True:
             lines.append(f"  Status: UP")
-            if monitor.up_since is not None:
-                uptime = time.monotonic() - monitor.up_since
-                lines.append(f"  Uptime: {_format_updown_time(uptime)}")
+            if d['uptime'] is not None:
+                lines.append(f"  Uptime: {_format_updown_time(d['uptime'])}")
         elif alive is False:
             lines.append(f"  Status: DOWN")
-            if monitor.down_since is not None:
-                downtime = time.monotonic() - monitor.down_since
-                lines.append(f"  Downtime: {_format_updown_time(downtime)}")
+            if d['downtime'] is not None:
+                lines.append(
+                    f"  Downtime: {_format_updown_time(d['downtime'])}")
         else:
             lines.append(f"  Status: UNKNOWN")
 
@@ -17345,10 +17652,8 @@ class Application:
         lines.append(f"    Received (RX):   {rx}")
         lines.append(f"    Lost (XX):       {xx}")
 
-        total = rx + xx
-        if total > 0:
-            loss_pct = (xx / total) * 100
-            lines.append(f"    Loss rate:       {loss_pct:.2f}%")
+        if d['loss_pct'] is not None:
+            lines.append(f"    Loss rate:       {d['loss_pct']:.2f}%")
         else:
             lines.append(f"    Loss rate:       -")
 
@@ -17373,10 +17678,8 @@ class Application:
         # Remote clock (from ICMP timestamp) — shown only once the host has been
         # probed for the Drift stat.  Always UTC: the ICMP timestamp is
         # milliseconds since UTC midnight, with no date or timezone.
-        with monitor.lock:
-            c_state = monitor.clock_state
-            c_off = monitor.clock_offset_ms
-            c_ts = monitor._clock_ts
+        c_state = d['clock_state']
+        c_off = d['clock_offset_ms']
         if c_state == 'no-remote-time' or c_off is not None:
             lines.append("  Clock (from ICMP timestamp, UTC):")
             if c_off is not None:
@@ -17391,9 +17694,8 @@ class Application:
                 lines.append(f"    Remote UTC:  {_format_utc_hms(remote_ms)}   (no date/TZ)")
                 lines.append(f"    Local  UTC:  {_format_utc_hms(local_ms)}")
                 lines.append(f"    Offset:      {_format_offset(c_off)}   ({direction})")
-                if c_ts is not None:
-                    age = int(time.monotonic() - c_ts)
-                    lines.append(f"    Last probe:  {age}s ago")
+                if d['clock_age'] is not None:
+                    lines.append(f"    Last probe:  {d['clock_age']}s ago")
             else:
                 lines.append("    not available (no -T support or ICMP timestamp blocked)")
             lines.append("")

@@ -350,3 +350,311 @@ class TestItIsSafeToReadFromAnotherThread:
         after = {k: v for k, v in app.__dict__.items()
                  if isinstance(v, (int, float, str, bool, type(None)))}
         assert after == before
+
+
+# ===========================================================================
+# Probe columns and the probe strip
+# ===========================================================================
+
+class TestProbesLookTheSameAsInTheTerminal:
+    """Both of these drew *something plausible and wrong* in the browser.
+
+    A probe column read '-' while the terminal beside it showed the reading,
+    because `_compute_stat` is a pure function over one monitor and knows
+    nothing about the app's ':probe' declarations — `_stat_cell` is the
+    dispatcher that does.  And with ':set ping-view <probe>' the strip came
+    back blank, because a probe series is not one of the HISTORY_MODES that
+    `get_history_string` understands.
+
+    Neither failed loudly.  A blank cell and an empty strip are what a host
+    with no data looks like, so the browser would have quietly disagreed with
+    the screen next to it.
+    """
+
+    HOSTS = (":probe-source --cmd 'echo temp=41'\n"
+             ':probe temp --unit C --range 0:80 --warn 50 --crit 70\n'
+             '10.0.0.1\n')
+
+    def _built(self, pb, tmp_path):
+        app = _app(pb, tmp_path, self.HOSTS)
+        monitor = app.monitors[0]
+        with monitor.lock:
+            series = monitor.probes.setdefault('temp', pb.ProbeSeries(20))
+            for value in (40.0, 41.5, 42.0):
+                series.add(value, time.time())
+        return app, monitor
+
+    def test_a_probe_column_carries_the_reading(self, pb, tmp_path):
+        app, monitor = self._built(pb, tmp_path)
+        app._dispatch_cmd(':set stats last,temp')
+        state = app._web_state()
+        assert state['columns'] == ['Last', 'Temp']
+        assert state['rows'][0]['stats']['Temp'] == '42'
+
+    def test_every_column_matches_the_terminal_cell(self, pb, tmp_path):
+        app, monitor = self._built(pb, tmp_path)
+        app._dispatch_cmd(':set stats last,temp,avg')
+        state = app._web_state()
+        for name, value in state['rows'][0]['stats'].items():
+            assert value == app._stat_cell(monitor, name).strip(), name
+
+    def test_the_strip_shows_the_probe_series(self, pb, tmp_path):
+        app, monitor = self._built(pb, tmp_path)
+        app._dispatch_cmd(':set ping-view temp')
+        state = app._web_state(history_len=8)
+        probe = app.probe_defs['temp']
+        width = app._probe_cell_width(probe)
+        assert state['rows'][0]['history'] == app._probe_history_string(
+            monitor, probe, 8, 0, width)
+        assert '42' in state['rows'][0]['history'], 'the reading, not a bucket'
+
+    def test_the_cell_width_comes_with_it(self, pb, tmp_path):
+        """A probe cell holds a number, so the client cannot assume one column."""
+        app, _m = self._built(pb, tmp_path)
+        app._dispatch_cmd(':set ping-view temp')
+        state = app._web_state()
+        assert state['view']['cell_width'] == app._probe_cell_width(
+            app.probe_defs['temp'])
+
+    def test_rtt_view_uses_the_wide_cell_too(self, pb, tmp_path):
+        app, monitor = self._built(pb, tmp_path)
+        with monitor.lock:
+            monitor.history.append(12.0)
+            monitor.history_times.append(time.time())
+        app._dispatch_cmd(':set ping-view rtt')
+        state = app._web_state(history_len=8)
+        width = app._rtt_cell_width()
+        assert state['view']['cell_width'] == width
+        render_time, sync = app._history_render_time()
+        assert state['rows'][0]['history'] == monitor.get_history_string(
+            8, 0, 'rtt', width, sync=sync, end_time=render_time)
+
+    def test_success_view_is_still_one_column_per_ping(self, pb, tmp_path):
+        app, _m = self._built(pb, tmp_path)
+        app._dispatch_cmd(':set ping-view success')
+        assert app._web_state()['view']['cell_width'] == 1
+
+
+# ===========================================================================
+# The details view
+# ===========================================================================
+
+class TestDetailsData:
+    """`_details_data` is what the overlay and the web view both format from.
+
+    The overlay used to read all of it inline, which made it the only host
+    view in the program with no accessor — anything else wanting the same
+    figures had to duplicate the reads or scrape formatted text.
+    """
+
+    def _seeded(self, pb, tmp_path):
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        m = app.monitors[0]
+        with m.lock:
+            m._record_latency(4.0)
+            m._record_latency(6.0)
+            m.rx_count, m.xx_count, m.ping_count = 9, 1, 10
+            m.latency = 5.5
+            m.alive = True
+            m.up_since = time.monotonic() - 125
+        return app, m
+
+    def test_it_carries_the_figures_the_overlay_shows(self, pb, tmp_path):
+        app, m = self._seeded(pb, tmp_path)
+        d = app._details_data(m)
+        assert (d['tx'], d['rx'], d['xx']) == (10, 9, 1)
+        assert d['loss_pct'] == pytest.approx(10.0)
+        assert d['lat_min'] == 4.0 and d['lat_max'] == 6.0
+        assert d['lat_avg'] == pytest.approx(5.0)
+        assert d['lat_stdev'] == pytest.approx(1.0)
+        assert d['last'] == 5.5
+
+    def test_durations_are_seconds_not_monotonic_stamps(self, pb, tmp_path):
+        """up_since is a time.monotonic() value.
+
+        It means nothing outside this process and less than nothing in JSON,
+        so the accessor converts rather than passing it through.
+        """
+        app, m = self._seeded(pb, tmp_path)
+        d = app._details_data(m)
+        assert 120 < d['uptime'] < 130
+        assert d['downtime'] is None
+        assert 'up_since' not in d and 'down_since' not in d
+
+    def test_loss_is_none_rather_than_zero_when_nothing_was_sent(self, pb,
+                                                                 tmp_path):
+        """'-' and '0.00%' are different claims."""
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        assert app._details_data(app.monitors[0])['loss_pct'] is None
+
+    def test_it_names_the_command_and_the_connect_preview(self, pb, tmp_path):
+        app, m = self._seeded(pb, tmp_path)
+        d = app._details_data(m)
+        assert d['cmd'] == ' '.join(m._build_ping_cmd())
+        assert d['connect'] == app._connect_preview(m)
+
+    def test_a_port_monitor_has_no_ping_command(self, pb, tmp_path):
+        """PortMonitor has no _build_ping_cmd; the overlay shows '-' for it."""
+        app = _app(pb, tmp_path, '10.0.0.1:443\n')
+        assert app._details_data(app.monitors[0])['cmd'] == ''
+
+    def test_it_is_json_serializable(self, pb, tmp_path):
+        app, m = self._seeded(pb, tmp_path)
+        json.dumps(app._details_data(m))
+
+    def test_the_overlay_formats_from_it(self, pb, tmp_path):
+        """One snapshot, so the two views cannot disagree about one host."""
+        import inspect
+        src = inspect.getsource(pb.Application._draw_details_overlay)
+        assert '_details_data(monitor)' in src
+        assert 'monitor._lat_count' not in src, 'no second set of reads'
+        assert 'monitor.up_since' not in src
+
+
+class TestColourIsDecidedHere:
+    """A class name per cell, decided by the same rules the terminal paints by.
+
+    The client used to guess the event colour by looking for 'error:' in the
+    text, which knew nothing about the level or the category — and it had no
+    way at all to judge a probe reading, whose thresholds only ping-bulk knows.
+    """
+
+    PROBE = (":probe-source --cmd 'echo t=1'\n"
+             ':probe t --range 0:100 --warn 50 --crit 80\n'
+             '10.0.0.1\n')
+
+    def _with_reading(self, pb, tmp_path, value):
+        app = _app(pb, tmp_path, self.PROBE)
+        app.stale_attr = 0
+        m = app.monitors[0]
+        with m.lock:
+            series = m.probes.setdefault('t', pb.ProbeSeries(5))
+            series.add(value, time.time())
+            series.state = 'ok'
+        app._dispatch_cmd(':set stats t')
+        return app, m
+
+    @pytest.mark.parametrize('value,expected',
+                             [(10.0, 'ok'), (60.0, 'warn'), (90.0, 'error')])
+    def test_a_probe_cell_is_judged_by_its_own_thresholds(self, pb, tmp_path,
+                                                          value, expected):
+        app, _m = self._with_reading(pb, tmp_path, value)
+        assert app._web_state()['rows'][0]['stat_class']['T'] == expected
+
+    def test_every_cell_carries_a_class(self, pb, tmp_path):
+        app, _m = self._with_reading(pb, tmp_path, 10.0)
+        app._dispatch_cmd(':set stats last,avg,down,t')
+        row = app._web_state()['rows'][0]
+        assert set(row['stat_class']) == set(row['stats'])
+
+    @pytest.mark.parametrize('latency,expected',
+                             [(10.0, 'ok'), (80.0, 'warn'), (None, 'error')])
+    def test_the_latency_cell_is_coloured_three_ways(self, pb, tmp_path,
+                                                     latency, expected):
+        """The default stats mode is a single 'Last' column, so this is *the*
+        cell most rows show — and 'no reply' is red, not blank."""
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        app.stale_attr = 0
+        m = app.monitors[0]
+        m.alive, m.up_since = True, time.monotonic() - 60
+        m.latency = latency
+        assert app._stat_class(m, 'Last') == expected
+
+    def test_the_default_column_is_not_left_uncoloured(self, pb, tmp_path):
+        """':set stats off' still shows Last; it must not come through blank."""
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        app.stale_attr = 0
+        m = app.monitors[0]
+        m.alive, m.up_since, m.latency = True, time.monotonic() - 60, 12.0
+        state = app._web_state()
+        assert state['columns'] == ['Last']
+        assert state['rows'][0]['stat_class']['Last'] == 'ok'
+
+    @pytest.mark.parametrize('offset,expected',
+                             [(500.0, 'ok'), (5000.0, 'warn'),
+                              (120000.0, 'vslow'), (None, 'stale')])
+    def test_the_clock_columns_follow_the_offset(self, pb, tmp_path, offset,
+                                                 expected):
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        app.stale_attr = 0
+        m = app.monitors[0]
+        m.alive, m.up_since, m.latency = True, time.monotonic() - 60, 5.0
+        m.clock_offset_ms = offset
+        m.clock_state = 'ok' if offset is not None else 'idle'
+        assert app._stat_class(m, 'Drift') == expected
+        assert app._stat_class(m, 'RTime') == expected
+
+    def test_an_errored_host_is_marked_everywhere(self, pb, tmp_path):
+        app, m = self._with_reading(pb, tmp_path, 10.0)
+        m.error = 'ssh: permission denied'
+        classes = app._web_state()['rows'][0]['stat_class']
+        assert set(classes.values()) == {'error'}
+
+    def test_a_down_cell_is_marked(self, pb, tmp_path):
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        m = app.monitors[0]
+        m.alive, m.down_since = False, time.monotonic() - 20
+        app._dispatch_cmd(':set stats down')
+        assert app._web_state()['rows'][0]['stat_class']['Down'] == 'error'
+
+    def test_events_carry_the_class_the_terminal_would_paint(self, pb,
+                                                             tmp_path):
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        app._dispatch_cmd(':set log-level debug')
+        app.add_event('warn', 'warning: something')
+        app.add_event('save', 'error: nope')
+        app.add_event('bind-key', 'chatter')
+        events = app._web_state()['events']
+
+        def cls_of(message):
+            hits = [e['cls'] for e in events if e['text'].endswith(message)]
+            assert hits, f'{message!r} not in {[e["text"] for e in events]}'
+            return hits[-1]
+
+        assert cls_of('warning: something') == 'warn'
+        assert cls_of('error: nope') == 'error'
+        assert cls_of('chatter') == 'dim'
+
+    def test_stat_class_covers_every_column_stat_attr_does(self, pb):
+        """The guard that would have caught the gap this test was added for.
+
+        `_stat_class` shipped mirroring five of `_stat_attr`'s seven branches.
+        'Last' and 'Drift'/'RTime' fell through to no class — and since the
+        default stats mode maps to a single 'Last' column, *every* row in the
+        browser had an uncoloured latency cell while the terminal coloured it
+        three ways, red included for "no reply".
+
+        Comparing the column names each function names is what catches the
+        next one; the value tests below only cover the branches somebody
+        thought to write.
+        """
+        import inspect
+        import re
+
+        def columns_named(func):
+            src = inspect.getsource(func)
+            names = set(re.findall(r"cname == '([A-Za-z%]+)'", src))
+            for group in re.findall(r"cname in \(([^)]*)\)", src):
+                names |= set(re.findall(r"'([A-Za-z%]+)'", group))
+            return names
+
+        attr = columns_named(pb.Application._stat_attr)
+        cls = columns_named(pb.Application._stat_class)
+        assert attr, 'the parser found nothing — it has stopped working'
+        assert attr <= cls, f'_stat_class ignores {sorted(attr - cls)}'
+
+    def test_the_class_helper_sits_beside_the_curses_one(self, pb):
+        """Twins, so neither can be changed without seeing the other."""
+        import inspect
+        lines = inspect.getsource(pb).splitlines()
+        at = {name: i for i, line in enumerate(lines)
+              for name in ('_stat_class', '_stat_attr', '_event_class',
+                           '_event_color_attr')
+              if line.startswith(('def ' + name, '    def ' + name))}
+        # Adjacent definitions, not a character distance: an unrelated
+        # insertion between them is exactly what must fail this.
+        between = [i for i in range(min(at['_stat_class'], at['_stat_attr']) + 1,
+                                    max(at['_stat_class'], at['_stat_attr']))
+                   if lines[i].startswith('    def ')]
+        assert not between, f'something moved in between: {between}'
+        assert abs(at['_event_class'] - at['_event_color_attr']) < 40
