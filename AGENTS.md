@@ -567,6 +567,25 @@ Each control below answers a specific way it could go wrong.
   those threads would sit beside dozens of ping subprocesses. `verify_request`
   adds a hard cap (`_WEB_MAX_CONNECTIONS`) and `setup()` a socket timeout, so
   a client that connects and says nothing cannot hold a thread.
+  **Only an admitted request gives its slot back**, which is why `_admitted`
+  exists rather than a bare counter: `socketserver._handle_request_noblock`
+  calls `shutdown_request` on its *refusal* branch too, so decrementing
+  unconditionally returned a slot that was never taken and every refusal
+  admitted one more client. Measured: 3000 attempts against a cap of 16 left
+  **1508** live handler threads, and the descriptors they held made
+  `SubprocessMonitor` fail to respawn `ping` and `ssh` — an unauthenticated
+  flood stopped the monitoring. `verify_request` runs at `accept()`, before
+  `_client_allowed`, so `:set web-allow` is no defence against this and the
+  accounting has to be right on its own.
+  **The access log is not written unless asked for.** `log_message` reported
+  every request — including ones refused at 403, 421 and 404 — as a
+  `LEVEL_DEBUG` event, and a log file records every level by design (§12), so
+  an unauthenticated client could manufacture events at 1117/s: the
+  10 000-entry deque of real host history was gone in about nine seconds and
+  some 6 GB a day went to disk. The event is now built only at `-vvv`, where
+  the operator asked for it and accepts the volume. Nothing diagnostic is
+  lost: `handle_error` and the 500 branch report at `LEVEL_NORMAL` in their
+  own right.
 - **`allow_reuse_address`**, because the kiosk unit is `Restart=always` and a
   restart otherwise races its own `TIME_WAIT` sockets and the bind just fails.
 - **Nothing reaches stderr.** `log_message` and `handle_error` are overridden
@@ -584,9 +603,21 @@ Each control below answers a specific way it could go wrong.
 Two credentials, for two situations.
 
 **A per-run token.** Minted at every `:web start`, printed as a whole URL, and
-never written down. `GET /?t=<token>` swaps it for a session cookie and
-answers 303 to `/`, so the token leaves the address bar, the history and any
-`Referer` after one use. This is the loopback case: nothing to configure, and
+never written to the log file. `GET /?t=<token>` swaps it for a session
+cookie and answers 303 to `/`, so the token leaves the address bar, the
+history and any `Referer` after one use — and **the swap spends it**
+(`server.token = None`). Leaving it live made a credential that is printed on
+screen into a replayable bearer token good for the whole run, minting sessions
+without limit; the 5-per-minute gate covers `/api/login` only, so replaying it
+also evicted the operator's own session once 64 were held. `:web status`
+mints a fresh link when the last was spent, so wanting a second browser does
+not push anyone towards leaving it live. The start line is reported twice —
+`to_file=False` with the link for the screen, `to_screen=False` without it for
+the file — because a log file outlives the run and is readable by exactly the
+local user that `:set web-password-file` refuses a group-readable file to keep
+out. The token does still reach `self.events`, so an authenticated session can
+read it from `/api/state`'s event tail; that is not a new exposure, since such
+a session already has everything the token would buy. This is the loopback case: nothing to configure, and
 the operator already had to get onto the machine to start it.
 
 **A password file.** `:set web-password-file <path>`, holding either a plain
@@ -1282,3 +1313,9 @@ The class delegates `__str__`, `__contains__`, `lower()`, `startswith()`, `__eq_
 
 ### File output
 `save_to_file` always writes **all** levels regardless of `self.loglevel`.  Users grep the file for filtering.
+
+The one place this cuts the other way is the web access log: because the file
+records every level, an event created per HTTP request let an unauthenticated
+client write to disk without limit. `_WebHandler.log_message` therefore does
+not *create* the event below `-vvv` (§9d) — the rule here is unchanged, what
+changed is that the event no longer exists to be recorded.

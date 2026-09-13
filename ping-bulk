@@ -6856,6 +6856,26 @@ _WEB_PBKDF2_ROUNDS = 200_000
 _WEB_COOKIE = 'pb_session'
 
 
+def _web_constant_eq(a, b):
+    """``hmac.compare_digest`` over text that came off the network.
+
+    It refuses a ``str`` holding any non-ASCII character — and a URL query, a
+    cookie and a header are all attacker-chosen, so the bare call turned
+    ``GET /?t=%ff`` into an unauthenticated 500 (and two more event lines).
+    Encoding first keeps the comparison constant-time.  ``surrogateescape`` is
+    belt and braces: neither reachable path produces a lone surrogate today
+    (a header decodes as latin-1, and ``unquote`` replaces bad bytes with
+    U+FFFD), but an encode that can itself raise would put the bug back.
+    """
+    if a is None or b is None:
+        return False
+    if isinstance(a, str):
+        a = a.encode('utf-8', 'surrogateescape')
+    if isinstance(b, str):
+        b = b.encode('utf-8', 'surrogateescape')
+    return hmac.compare_digest(a, b)
+
+
 def _web_hash_password(password, salt=None, rounds=_WEB_PBKDF2_ROUNDS):
     """Derive a verifier string from *password*.
 
@@ -6882,9 +6902,18 @@ def _web_check_password(stored, password):
         salt = base64.b64decode(salt_b64)
         want = base64.b64decode(want_b64)
         rounds = int(rounds)
+        # Encode inside the guard.  The password arrives as JSON, which admits
+        # a lone surrogate that UTF-8 cannot encode; that is a wrong password,
+        # not a server error.  Letting UnicodeEncodeError escape made every
+        # such attempt an unauthenticated 500 reported at LEVEL_NORMAL — so
+        # written to the log file by design — and it never reached the login
+        # throttle, because recording a failure is what the refusal does.
+        # Measured: 1213 requests/second, 18 GB of log a day, on the password
+        # deployment that a non-loopback bind makes mandatory.
+        secret = password.encode('utf-8')
     except (ValueError, TypeError):
         return False
-    got = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, rounds)
+    got = hashlib.pbkdf2_hmac('sha256', secret, salt, rounds)
     return hmac.compare_digest(got, want)
 
 
@@ -7071,13 +7100,29 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         super().setup()
 
     def log_message(self, fmt, *args):
-        """Never stderr: under curses the next redraw paints straight over it."""
+        """Never stderr: under curses the next redraw paints straight over it.
+
+        The access line is built only when somebody asked for it.  Reporting
+        every request unconditionally let an *unauthenticated* client — one
+        refused at 403, 421 or 404, so ``:set web-allow`` was no defence —
+        manufacture events at will: measured at 1117 requests/second, which
+        evicts every real host event from the 10 000-entry deque in about nine
+        seconds and writes some 6 GB a day to a configured ``:log`` file,
+        because a log file deliberately records every level (§12).  That is the
+        "the log just stops" failure of §8 reached from the other end.
+        """
         app = getattr(self.server, 'app', None)
-        if app is not None:
-            try:
-                app.add_event('web', fmt % args, level=LEVEL_DEBUG)
-            except Exception:
-                pass
+        if app is None or app.loglevel < LEVEL_DEBUG:
+            return
+        try:
+            # requestline is raw bytes off the network; the base class
+            # translates control characters and this override must too, or a
+            # crafted request line reaches the event log and the log file with
+            # its escapes intact.
+            app.add_event('web', (fmt % args).translate(self._control_char_table),
+                          level=LEVEL_DEBUG)
+        except Exception:
+            pass
 
     def _send(self, status, body=b'', ctype='text/plain; charset=utf-8',
               extra=()):
@@ -7159,7 +7204,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         sid = self._cookie(_WEB_COOKIE)
         want = self.server.csrf_for(sid)
         got = self.headers.get('X-PB-Token') or ''
-        if not hmac.compare_digest(want, got):
+        if not _web_constant_eq(want, got):
             return False, (403, b'{"error":"missing or wrong X-PB-Token"}')
         return True, None
 
@@ -7314,10 +7359,18 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             # password.  Everything that *is* data sits behind the session.
             if path == '/':
                 token = self._query_token(query)
-                if token and hmac.compare_digest(token, self.server.token):
+                if token and _web_constant_eq(token, self.server.token):
                     # A one-shot link: swap the token for a session and drop
                     # it from the URL, so it stops living in history, in the
-                    # title bar and in any Referer.
+                    # title bar and in any Referer.  Spending it here is what
+                    # makes it one-shot — leaving it live turned a credential
+                    # that is printed on screen into a replayable bearer token
+                    # good for the life of the process, able to mint sessions
+                    # without limit (the 5-per-minute gate covers /api/login
+                    # only, so replaying it also evicts the operator's own
+                    # session once 64 are held).  ':web status' mints a fresh
+                    # one when the operator needs another browser.
+                    self.server.token = None
                     sid = self.server.new_session()
                     self._send(303, b'', 'text/plain',
                                extra=[self._set_session_cookie(sid),
@@ -7391,7 +7444,8 @@ class _WebServer(http.server.ThreadingHTTPServer):
         self.allow_nets = allow_nets
         self.allowed_hosts = allowed_hosts
         self.password_hash = password_hash
-        # Regenerated every start, never written down.  ':web start' prints it
+        # Regenerated every start and by ':web status'; spent on first use,
+        # and kept out of the log file.  ':web start' prints it
         # as a whole URL, so the loopback case needs no setup at all.
         self.token = secrets.token_urlsafe(24)
         # The session cookie is HttpOnly, so the page cannot read it to prove
@@ -7405,6 +7459,7 @@ class _WebServer(http.server.ThreadingHTTPServer):
         self.request_count = 0
         self._active = 0
         self._active_lock = threading.Lock()
+        self._admitted = set()      # requests that took a slot in verify_request
         self._session_lock = threading.Lock()
         super().__init__(addr, _WebHandler)
 
@@ -7436,7 +7491,7 @@ class _WebServer(http.server.ThreadingHTTPServer):
                 if expiry <= now:
                     del self.sessions[known]
                     continue
-                if hmac.compare_digest(known, sid):
+                if _web_constant_eq(known, sid):
                     return True
         return False
 
@@ -7450,11 +7505,21 @@ class _WebServer(http.server.ThreadingHTTPServer):
             if self._active >= _WEB_MAX_CONNECTIONS:
                 return False
             self._active += 1
+            self._admitted.add(request)
         return True
 
     def shutdown_request(self, request):
+        # Only an *admitted* request gives its slot back.  socketserver calls
+        # this on the refusal path too (the `else:` of _handle_request_noblock),
+        # so decrementing unconditionally returns a slot that was never taken
+        # and the cap stops capping: measured, 3000 attempts against a cap of
+        # 16 left 1508 live handler threads, and the file descriptors they held
+        # stopped `ping` and `ssh` children being respawned.  Keyed on the
+        # socket object, so a repeated call for one request is idempotent.
         with self._active_lock:
-            self._active = max(0, self._active - 1)
+            if request in self._admitted:
+                self._admitted.discard(request)
+                self._active = max(0, self._active - 1)
         super().shutdown_request(request)
 
     def handle_error(self, request, client_address):
@@ -8263,7 +8328,8 @@ class Application:
         elif self.help_tab == 5:
             self.help_tab = 0
 
-    def add_event(self, category, message, level=None, to_file=True):
+    def add_event(self, category, message, level=None, to_file=True,
+                  to_screen=True):
         """Add an event to the in-memory log and, if a log file is configured,
         append it immediately to that file.
 
@@ -8272,7 +8338,13 @@ class Application:
         message  — the event text.
         level    — explicit LEVEL_* constant; if None, inferred from category.
         to_file  — False keeps the event on screen only.  Used to report a
-                   failed *file* write, which cannot go through the file.
+                   failed *file* write, which cannot go through the file, and
+                   to keep a credential out of a file that outlives the run.
+        to_screen — False writes the line to the log file without putting it in
+                   the event deque.  The pair lets one event be reported two
+                   ways — the screen getting the sign-in link, the file getting
+                   the same line with the link removed — without either copy
+                   re-implementing this method's formatting.
 
         Timestamp format: ISO 8601 with timezone offset (e.g. 2026-03-20T14:05:32+0200).
         """
@@ -8299,6 +8371,10 @@ class Application:
         max_host_len = max(self._event_cat_width, cat_len)
         line = f"{timestamp}   {category:<{max_host_len}} {message}"
         entry = EventEntry(level=level, category=category, text=line)
+        if not to_screen:
+            if to_file:
+                self._append_log_line(line)
+            return
         self.events.append(entry)
         # Mark cached filtered list dirty; only add to it if the event would be
         # visible at the current loglevel (avoids full rebuild on every add).
@@ -12732,8 +12808,14 @@ class Application:
                                   f'{self.web_listen})', level=LEVEL_NORMAL)
             return
         host, port = server.server_address[:2]
+        if server.token is None:
+            # The previous link was spent.  Without this the operator who wants
+            # a second browser has to stop and restart the listener, which is
+            # what would push somebody towards leaving the token live.
+            server.token = secrets.token_urlsafe(24)
         parts = [f'web: listening on '
-                 f'{"https" if server.is_tls else "http"}://{host}:{port}/',
+                 f'{"https" if server.is_tls else "http"}://{host}:{port}/'
+                 f'?t={server.token}',
                  f'{server.request_count} request(s)',
                  'password login' if server.password_hash else 'token only',
                  f'commands: {self.web_commands}']
@@ -12741,7 +12823,13 @@ class Application:
             parts.append(f'last client {server.last_client}')
         if self.web_allow:
             parts.append(f'allow {self.web_allow}')
-        self.add_event('web', '; '.join(parts), level=LEVEL_NORMAL)
+        self.add_event('web', '; '.join(parts), level=LEVEL_NORMAL,
+                       to_file=False)
+        parts[0] = (f'web: listening on '
+                    f'{"https" if server.is_tls else "http"}://{host}:{port}/'
+                    f' (sign-in link not logged)')
+        self.add_event('web', '; '.join(parts), level=LEVEL_NORMAL,
+                       to_screen=False)
 
     def _web_start(self):
         """Bind the listener, or say exactly why not."""
@@ -12821,10 +12909,22 @@ class Application:
         scheme = 'https' if tls_context is not None else 'http'
         # The whole URL, token and all: nothing to configure for the common
         # case, and the token then leaves the address bar on first use.
+        # Two lines, deliberately.  A log file records every level (§12), so
+        # anything written there outlives the run and is readable by whoever
+        # can read the file — which is the local user that ':set
+        # web-password-file' refuses a group-readable file to keep out.  The
+        # token therefore goes to the screen only, and the file gets the same
+        # line with the credential removed.
         self.add_event('web',
                        f'web: listening on {scheme}://{bound_host}:'
-                       f'{bound_port}/?t={server.token} (read-only)',
-                       level=LEVEL_NORMAL)
+                       f'{bound_port}/?t={server.token} '
+                       f'(commands: {self.web_commands})',
+                       level=LEVEL_NORMAL, to_file=False)
+        self.add_event('web',
+                       f'web: listening on {scheme}://{bound_host}:'
+                       f'{bound_port}/ (commands: {self.web_commands}; '
+                       f'sign-in link not logged)',
+                       level=LEVEL_NORMAL, to_screen=False)
         if password_hash is not None:
             self.add_event('web', 'web: password login is also enabled',
                            level=LEVEL_INFO)

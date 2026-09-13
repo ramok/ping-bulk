@@ -57,11 +57,17 @@ class Client:
 
         '/api/state' is behind a session; the page and the assets are not.
         The cookie rides on the 303, so the redirect must not be followed.
+
+        The sign-in link is spent on first use, so a second Client in the same
+        test asks for a fresh one exactly as an operator would — ':web status'
+        mints another when the last has been used.
         """
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *a, **kw):
                 return None
 
+        if self.app._web_server.token is None:
+            self.app._dispatch_cmd(':web status')
         req = urllib.request.Request(
             self.base + f'/?t={self.app._web_server.token}')
         try:

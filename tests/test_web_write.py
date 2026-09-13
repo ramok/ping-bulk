@@ -77,10 +77,18 @@ class Client:
         self.csrf = ''
 
     def sign_in(self):
+        """Exchange the sign-in link for a session cookie.
+
+        The link is spent on first use, so a second Client in the same test
+        asks for a fresh one exactly as an operator would — ':web status'
+        mints another once the last has been used.
+        """
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *a, **kw):
                 return None
 
+        if self.app._web_server.token is None:
+            self.app._dispatch_cmd(':web status')
         req = urllib.request.Request(
             self.base + f'/?t={self.app._web_server.token}')
         try:
