@@ -634,12 +634,20 @@ class TestThePageCanShowIt:
         """':filter' would move the terminal's view and every other viewer's.
 
         One person searching should not drag anybody else's screen with them.
+        Note this pins the *client*; ':filter' is still in the safe allowlist,
+        so a hand-written request can do what the page declines to.
         """
         js = '\n'.join(line for line in pb._WEB_JS.splitlines()
                        if not line.lstrip().startswith('//'))
-        assert "'/api/cmd'" in js, 'the command box still posts'
         assert ':filter' not in js
         assert 'filterEl.value' in js
+
+    def test_the_page_writes_only_through_the_per_host_verbs(self, pb):
+        """The command box went with 'full'; the buttons are what is left."""
+        js = '\n'.join(line for line in pb._WEB_JS.splitlines()
+                       if not line.lstrip().startswith('//'))
+        assert "'/api/cmd'" not in js
+        assert "'/api/host/'" in js
 
     def test_the_page_still_has_no_inline_script(self, pb):
         html = pb._WEB_HTML

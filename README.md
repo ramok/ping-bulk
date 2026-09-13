@@ -55,8 +55,11 @@ Events
 - **Key binding system** — fully rebindable keys via `:bind-key` /
   `:unbind-key`, with per-mode bindings (normal, help, details, command).
 - **Search** — `/` search in host list or event log with `n`/`N` navigation.
-- **Web view** — `:web start` serves the same live host list over HTTP on
-  127.0.0.1, read-only, no dependencies.  Reach it with
+- **Web view** — `:web start` serves the same live host list over HTTP, no
+  dependencies.  Loopback by default, where the printed sign-in link is all
+  the credential needed; a routable address requires
+  `:set web-password-file`.  A browser can pause a host and quieten its
+  alarm; `:set web-commands read-only` takes even that away.  Reach it with
   `ssh -L 8765:localhost:8765 <host>` and open
   [http://localhost:8765](http://localhost:8765).
 - **Configurable log levels** — quiet/normal/info/debug via `:set log-level`,

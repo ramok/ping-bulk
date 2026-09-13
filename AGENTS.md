@@ -709,22 +709,43 @@ commands are audited whether or not kiosk mode is on, and logged at
 `LEVEL_NORMAL` — someone off this machine changing what is monitored should be
 visible without first turning the log up.
 
-**`full` ships, gated.** The council reviewing this design was unanimous
-against exposing a full command line over HTTP, and the mechanism is
-concrete: outside kiosk mode `:mux` has no whitelist, so a browser session
-that can run commands can run `:mux sh`. It is here because it was asked for,
-with every gate the review argued for:
+**`full` shipped, gated, and was then removed.** It offered the whole `:`
+line over HTTP. Every gate the first design review demanded was built — opt-in
+only, a warning naming the consequence each time it was switched on, refused
+in kiosk mode, refused off loopback without TLS, re-checked on a running
+listener so the setting could not outrun the binding — and all of them were
+verified to work. It was removed anyway, for a reason none of the gates
+addressed.
 
-- opt-in only (`:set web-commands full`), and switching it on logs a warning
-  that names the consequence, every time;
-- refused in kiosk mode outright;
-- refused on a non-loopback bind without TLS — checked both at `:web start`
-  and when the setting changes on a *running* listener, so the setting cannot
-  outrun the binding;
-- `:edit` is refused even here, and for a technical reason rather than a
-  policy one: it opens an editor on the console's terminal, the main loop
-  would block until somebody there closed it, and the requester cannot see
-  or type into it. `_WEB_NEVER_COMMANDS` exists for that shape of thing.
+**Narrowing it was tried first and cannot work.** The obvious repair is to
+subtract the commands that are incoherent over a request — `:mux` and `:term`
+open a pane on the *console's* terminal, which the requester can neither see
+nor type into — using the `_WEB_NEVER_COMMANDS` mechanism that already
+excluded `:edit`. But `_web_command_allowed` derives the command name from the
+**first token** and then returns True unconditionally in `full`, so `:source
+<file>` hands over a file of arbitrary directives and `:bind-key x :mux sh`
+hides one behind a keypress. Measured with the never-list grown to the whole
+mux family: `:mux sh` refused, `:source` allowed, and a `:set web-commands`
+line inside the sourced file took effect. Subtract the launderers as well —
+`source`, `bind-key`, `set`, `probe-source` — and what is left is the
+allowlist `safe` already is.
+
+That is also why `_WEB_NEVER_COMMANDS` is gone rather than kept: with every
+mode an allowlist it guarded nothing, since `edit` was never in
+`_WEB_SAFE_COMMANDS`. A guard that does nothing is worse than no guard,
+because the next reader believes it.
+
+**The removal degrades; it does not reject.** `:set web-commands full` still
+parses, warns, and sets `safe`, and `'full'` is absent from
+`_WEB_COMMAND_MODES` so a `cycle` cannot land on it. Refusing the line
+outright would cost the operator their configuration file, which this program
+has already done to somebody once (§11, the `:set stats` report).
+
+What was actually wanted was never "a shell" — it was particular commands.
+Those are `_WEB_SAFE_COMMANDS` entries, named one at a time, each considered
+before it is exposed. And a remote command line already exists on this
+machine: it is `ssh`, and it is not maintained inside the process being
+defended.
 
 **A web command behaves exactly like one typed at the `:` line** — including
 that `%h`/`%r` are *not* expanded, because `_handle_cmd_key` calls
