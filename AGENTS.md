@@ -1057,8 +1057,9 @@ agreed about colour.
 
 The client cannot do this job: what counts as slow for a cell lives in a
 `:probe` declaration it has never seen, and `_probe_strip_attr` had no web twin
-at all. `_history_cell_classes` now decides every cell, mirroring both branches
-of `draw_hosts`'s strip loop, and `_probe_strip_class` sits beside
+at all. `_history_cell_classes` decides every **host** cell, mirroring both
+branches of `draw_hosts`'s strip loop — a section's cells are a different
+question and go through `_section_cell_classes`, below — and `_probe_strip_class` sits beside
 `_probe_strip_attr` under the same rule as `_stat_class`. `glyphClass` is gone,
 so there is one implementation of the rule rather than two that drift.
 
@@ -1073,6 +1074,25 @@ thirds of which was answering read exactly like one that was entirely dead.
 `_section_cell_classes` mirrors that loop, and `'?'` — a process error, which
 the terminal bolds apart from a plain lost probe — stops arriving as the same
 red too.
+
+**And the strip must be handed the hosts folding actually hid.** `draw_hosts`
+passes `history_monitors=_get_hidden_section_monitors(...)`, which is a strict
+subset of the section's monitors whenever a folded section holds an *unfolded*
+subsection: those hosts are drawn in their own right, and a summary that
+repeats what is visible beside it answers the wrong question. The badge still
+counts everyone, which is why the two arguments exist. Measured on a folded
+parent (one host down, one up) holding an unfolded child (one up): the hidden
+pair alone is an even split, `0.50`, and red; counting the child's host too
+makes it `0.67` and yellow.
+
+**The shape of that bug is worth more than the fix.** The wrong population was
+passed from the day the serializer was written and cost nothing, because the
+consumer collapsed every lost slot to one colour — a wrong input is invisible
+while the thing reading it cannot tell its cases apart. Making the consumer
+finer-grained is what turned it into a wrong answer, and it surfaced in exactly
+the cell the change existed to correct. So: **when you add a branch to a
+summariser, re-check what population it is being handed**, because the
+inputs were only ever as right as the old output was coarse.
 
 **The badge lost every colour it had.** `'badge': [seg for seg, _pair in badge]`
 kept the text and discarded the pair id, and the page's single `.badge` rule

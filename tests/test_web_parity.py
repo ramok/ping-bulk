@@ -449,3 +449,69 @@ class TestTheBadgeKeepsItsColours:
             'b-err', 'g-partial', 'g-err'}
         missing = sorted(c for c in emitted if f'.{c} ' not in css)
         assert not missing, f'emitted but unstyled: {missing}'
+
+
+class TestTheStripSummarisesOnlyWhatFoldingHid:
+    """The badge counts every host; the strip summarises the *hidden* ones.
+
+    Those are different sets whenever a folded section holds an **unfolded**
+    subsection — that subsection's hosts are drawn in their own right, so a
+    summary that repeats them answers the wrong question. ``draw_hosts`` passes
+    ``history_monitors=_get_hidden_section_monitors(...)`` for exactly this;
+    ``_web_state`` did not.
+
+    It cost nothing while every lost slot was painted the same red. It began to
+    cost a wrong reading the moment the ``> 0.5`` branch became reachable,
+    which is what the commit before this one did: the browser could call a
+    section degraded where the terminal calls it down.
+    """
+
+    @pytest.fixture
+    def app(self, pb, tmp_path):
+        import time
+        # '##'/'###' is what nests sections; ':title' has no level flag, and
+        # writing one puts the flag text in the title instead.
+        app = _app(pb, tmp_path,
+                   '## Parent\n10.0.0.1\n10.0.0.2\n'
+                   '### Child\n10.0.0.3\n')
+        now = time.time()
+        # One slot: .1 lost it, .2 and .3 replied.  Hidden hosts alone are
+        # .1 and .2 -> 0.50, not a majority -> red.  Counting .3 as well gives
+        # 0.67 -> yellow, which is the bug.
+        for m, value in zip([e for e in app.entries if isinstance(e, pb.Monitor)],
+                            [None, 12.0, 12.0]):
+            m.history.clear()
+            m.history_times.clear()
+            m.history.append(value)
+            m.history_times.append(now - 1)
+        labels = [e for e in app.entries if isinstance(e, pb.SectionLabel)]
+        labels[0].folded = True     # Parent folds ...
+        labels[1].folded = False    # ... Child stays open, so .3 is on screen
+        return app
+
+    def test_the_two_host_sets_really_do_differ(self, app, pb):
+        """Otherwise the assertion below proves nothing."""
+        idx = next(i for i, e in enumerate(app.entries)
+                   if isinstance(e, pb.SectionLabel))
+        assert len(app._get_section_monitors(idx)) == 3
+        assert len(app._get_hidden_section_monitors(idx)) == 2
+
+    def test_a_half_lost_slot_is_not_called_degraded(self, app):
+        row, _ = _section_row(app, history_len=1)
+        assert row['history'] == 'X'
+        assert row['hist_class'] == ['g-bad'], (
+            'the strip counted a host the viewer can already see, which '
+            'turned an even split into a majority'
+        )
+
+
+class TestAProcessErrorIsNotAPlainLoss:
+    """The terminal bolds ``'?'`` apart from ``'X'``: a host that lost a probe
+    and a host whose ping process failed are not the same report. Both reached
+    the browser as ``g-bad``."""
+
+    def test_an_errored_slot_gets_its_own_class(self, pb, tmp_path):
+        app, _ = _folded_section(pb, tmp_path, [('ERR', 'ERR')])
+        row, _ = _section_row(app, history_len=1)
+        assert row['history'] == '?'
+        assert row['hist_class'] == ['g-err']

@@ -13805,9 +13805,26 @@ class Application:
             entry = entries[idx]
             if isinstance(entry, SectionLabel):
                 members = self._get_section_monitors(idx)
+                # The badge counts every host under this section; the strip
+                # summarises only the ones folding has taken off the screen.
+                # Those are different sets whenever a folded section holds an
+                # *unfolded* subsection, because that subsection's hosts are
+                # already drawn in their own right — and a summary that repeats
+                # what is visible beside it answers the wrong question.
+                #
+                # Passing `members` for both is only harmless while every lost
+                # slot is painted the same: it changes `slot_ok_ratios`, so the
+                # moment the >0.5 branch became reachable it could report a
+                # section as degraded where the terminal reports it down.
+                # Measured on a folded parent (one host down, one up) holding
+                # an unfolded child (one up): 0.50 and red against 0.67 and
+                # yellow.
+                hidden = (self._get_hidden_section_monitors(idx)
+                          if entry.folded else None)
                 badge, hist, slot_ok_ratios = self._section_summary(
                     members, history_len, self.history_offset,
-                    sync=sync, end_time=render_time)
+                    sync=sync, end_time=render_time,
+                    history_monitors=hidden)
                 # draw_hosts computes this at its own draw site and bolds the
                 # red and yellow counts with it; the badge cannot carry it,
                 # since it describes the section rather than one segment.
