@@ -2105,6 +2105,46 @@ Web interface
     Changing the address while the server is running rebinds it, so the
     setting and the socket cannot disagree.
 
+``:set web-anonymous off | read-only``
+    Whether a client with **no session** may read.  Default ``off``, which is
+    the historical behaviour: ``/api/state`` and ``/api/host/<uid>`` answer
+    401 without a cookie, so the only ways in are the one-shot link and the
+    password.
+
+    ``read-only`` opens those two endpoints to anyone the allow-list and the
+    ``Host`` pin already let through — for a monitor on a LAN or a VPN that
+    colleagues and wall displays should be able to watch without a credential.
+
+    It does not touch writes.  Those go through the same gate as before, which
+    wants a session before it looks at anything else, so **no value of this
+    setting reaches a write**.  The two settings are orthogonal:
+    ``web-anonymous`` says who may look, ``web-commands`` says what a
+    signed-in browser may change.  The password file therefore changes meaning
+    rather than becoming redundant — it stops being the way in and becomes the
+    way to become an admin, which is why a routable bind still refuses without
+    one.  A listener anyone may read and nobody may ever administer is not
+    worth offering.
+
+    Refused in kiosk mode: that model's threat is the person at the console,
+    and a reader who never authenticates at all is further out again.
+
+    **What it publishes**, because a setting cannot narrow it afterwards:
+    every host name, address and ``:resolv`` alias — together an inventory of
+    the estate — plus the event tail.  That tail is wider than "errors": at
+    the default log level it carries client addresses, verbatim ``ping`` and
+    ``ssh`` stderr, and **file paths** — a failed ``:save`` names the path it
+    could not write, a hosts-file warning names the file and the line.  ``/api/host/<uid>`` is redacted for
+    these callers: ``cmd`` (the whole ssh invocation, with key paths and the
+    jump chain), ``connect`` (a command ready to paste into a shell) and its
+    unfiltered per-host event list are withheld, because those say how to
+    reach the estate rather than what it is doing.  The readings are not.
+
+    A routable bind also wants ``:set web-hosts``, or clients using the
+    machine's LAN or VPN name are answered 421, and ``:set web-allow`` to name
+    the ranges rather than leaving it open to everything that can route.
+    Without ``:set web-tls-cert`` the password and every reading cross the
+    network in clear.
+
 ``:set web-commands read-only | safe``
     What a browser may change.  Default ``safe``; in kiosk mode it is
     ``read-only`` and cannot be changed.

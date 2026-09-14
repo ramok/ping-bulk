@@ -751,11 +751,57 @@ against. `/etc/<prog>/` is not.
 **A non-loopback bind requires the password file**, because a token that dies
 with the process is useless to a listener other machines keep returning to.
 The refusal happens before the bind, so it is a policy and not an accident of
-which addresses happen to be local.
+which addresses happen to be local. `:set web-anonymous` does not relax it:
+the password stops being the way *in* and becomes the way to become an
+**admin**, and a listener anyone may read and nobody may ever administer is
+not worth offering.
 
-**The page is served without a session; the data is not.** `/` and `/static/*`
-carry nothing, and there has to be somewhere to type the password.
-`/api/state` returns 401 and the client shows a login form.
+**`:set web-anonymous off | read-only` — a reader who never signs in.** Off by
+default, so an existing deployment is unchanged. It is for the case the
+listener was asked for: a monitor on a LAN or a VPN that colleagues and wall
+displays should watch without a credential.
+
+Two settings, deliberately on different axes — `web-anonymous` says who may
+*look*, `web-commands` says what a signed-in browser may *change*. They are
+split in the code the same way: `_may_read()` is a **sibling** of
+`_authenticated()`, not a widening of it, and `_write_gate` still calls the
+narrow one. So there is no value of `web-anonymous` that reaches a write, and
+turning reading on cannot turn writing on by accident. An anonymous caller is
+handed `commands: 'read-only'` and no CSRF value: the page draws its buttons
+from the first, so such a viewer gets a page without them rather than buttons
+that 401.
+
+Refused under kiosk, by the same reasoning that forces `web-commands` there:
+that model's threat is the person at the console, and a reader who never
+authenticates at all is further out again — with nobody for the audit trail to
+name.
+
+**What it publishes cannot be narrowed afterwards**, so it is stated rather
+than discovered: every host name, address and `:resolv` alias, which together
+are an inventory of the estate, plus the event tail. That tail is wider than
+"errors": measured at the **default** log level it also carries `save`, `hosts`
+and `resolv` events, and the first two carry **file paths** — a failed `:save`
+names the path it could not write, a hosts-file warning names the file and the
+line. Those paths are not otherwise exposed anywhere in the payload. `/api/host/<uid>` *is* redacted for these
+callers (`_WEB_ANON_WITHHELD`): `cmd` is the whole ssh invocation including
+key paths and the `-J` chain, `connect` is a command ready to paste into a
+shell, and its per-host event list is **not** level-filtered, so it carries
+debug lines the state tail withholds. Those three say how to reach the estate
+rather than what it is doing; the readings stay, since they are what the
+viewer came for. A denylist is right *there* and was wrong for the event tail,
+because that dict is built field by field in one function — a new field is a
+line in `_details_data`, next to the list.
+
+**The page is served without a session; the data is not** — unless
+`web-anonymous` says otherwise. `/` and `/static/*` carry nothing, and there
+has to be somewhere to type the password. `/api/state` returns 401 and the
+client shows a login form.
+
+**A message that names one setting must name the other.** `_web_access_summary`
+is the single phrase both `:web start` and `:web status` report, because the
+`:web` command help had claimed "(read-only)" whatever `web-commands` said —
+so the default, which lets a browser pause a host, described itself as
+incapable of it.
 
 **`Content-Type: application/json` is required on `POST /api/login`.** That is
 a CSRF control, not politeness: a form on another site can only send the three

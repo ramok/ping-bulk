@@ -377,6 +377,13 @@ LAYOUTS = ['all', 'ping', 'log']
 # cannot land on a token that no longer means anything.
 _WEB_COMMAND_MODES = ('read-only', 'safe')
 
+# ':set web-anonymous' — whether a client with no session may READ.  Default
+# 'off', so nothing changes for an existing deployment until somebody turns it
+# on deliberately.  Writes are not on this axis at all: they stay behind a
+# session and ':set web-commands', so the two settings compose as
+# "who may look" x "what a signed-in browser may change".
+_WEB_ANONYMOUS_MODES = ('off', 'read-only')
+
 class SetParam:
     """Descriptor for a single ':set' sub-command parameter.
 
@@ -489,6 +496,9 @@ SET_PARAMS = [
     SetParam('web-commands', '_cmd_web_commands', list(_WEB_COMMAND_MODES),
              'what the web interface may change (kiosk forces read-only)',
              getter=lambda app: app.web_commands),
+    SetParam('web-anonymous', '_cmd_web_anonymous', list(_WEB_ANONYMOUS_MODES),
+             'whether a client with no session may read (kiosk forces off)',
+             getter=lambda app: app.web_anonymous),
     SetParam('web-password-file', '_cmd_web_password_file', '<path>|none',
              'file holding the web password (mode 600; plain or pbkdf2)',
              getter=lambda app: app.web_password_file or 'none'),
@@ -1204,6 +1214,8 @@ _HELP_BINDINGS = [
     "  :set web-allow <cidr>,...   client addresses allowed to connect (default any)",
     "  :set web-commands <mode>    read-only | safe — whether a browser may pause a",
     "                              host and quieten its alarm (kiosk forces read-only)",
+    "  :set web-anonymous <mode>   off | read-only — may a client with no session read?",
+    "                              off by default; writes always need one (kiosk: off)",
     "  :set web-password-file <f>  file with the web password (mode 600); needed off loopback",
     "  :set web-hosts <name>,...   extra 'Host:' names the web interface answers to",
     "  :set web-tls-cert <file>    serve HTTPS (:set web-tls-key too, if separate)",
@@ -5969,7 +5981,7 @@ CMD_REGISTRY = [
            '[cycle|on|off]',      'report, cycle, or set global pause'),
     CmdDef(['web'],              '_cmd_web',        ['start', 'stop', 'status'],
            '[start|stop|status]',
-           'serve the host list over HTTP (read-only); no arg reports'),
+           'serve the host list over HTTP; no arg reports'),
     CmdDef(['seen'],             '_cmd_seen',       None,
            '',                    "insert 'seen' marker in event log"),
     CmdDef(['clear'],            '_cmd_clear',      None,
@@ -7248,6 +7260,19 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
     def _authenticated(self):
         return self.server.session_valid(self._cookie(_WEB_COOKIE))
 
+    def _may_read(self):
+        """May this caller see data — as a session, or as an anonymous reader?
+
+        Split from :meth:`_authenticated` rather than widened, because the two
+        questions have different answers and the write path must keep asking
+        the narrow one.  ``_write_gate`` still calls ``_authenticated``, so
+        turning anonymous reading on cannot turn anonymous writing on by
+        accident: there is no value of ':set web-anonymous' that reaches a
+        write.
+        """
+        return (self._authenticated()
+                or self.server.app.web_anonymous != 'off')
+
     @staticmethod
     def _query_token(query):
         for part in query.split('&'):
@@ -7514,12 +7539,13 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, _WEB_JS.encode('utf-8'),
                            'application/javascript; charset=utf-8')
             elif path.startswith('/api/host/'):
-                if not self._authenticated():
+                if not self._may_read():
                     self._send(401, b'{"error":"login required"}',
                                'application/json; charset=utf-8')
                     return
                 uid = path[len('/api/host/'):].strip('/')
-                detail = app._web_host_detail(uid)
+                detail = app._web_host_detail(
+                    uid, redacted=not self._authenticated())
                 if detail is None:
                     self._send(404, b'{"error":"no such host"}',
                                'application/json; charset=utf-8')
@@ -7527,13 +7553,22 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 self._send(200, Application._web_json(detail),
                            'application/json; charset=utf-8')
             elif path == '/api/state':
-                if not self._authenticated():
+                if not self._may_read():
                     self._send(401, b'{"error":"login required"}',
                                'application/json; charset=utf-8')
                     return
                 state = app._web_state()
-                state['csrf'] = self.server.csrf_for(self._cookie(_WEB_COOKIE))
-                state['commands'] = app.web_commands
+                if self._authenticated():
+                    state['csrf'] = self.server.csrf_for(
+                        self._cookie(_WEB_COOKIE))
+                    state['commands'] = app.web_commands
+                else:
+                    # No CSRF value, because there is no session to bind one
+                    # to and nothing it could authorise.  'read-only' is what
+                    # the page reads to decide whether to draw its write
+                    # controls (canWrite), so an anonymous viewer gets a page
+                    # with no buttons rather than buttons that 401.
+                    state['commands'] = 'read-only'
                 self._send(200, Application._web_json(state),
                            'application/json; charset=utf-8')
             else:
@@ -8253,6 +8288,10 @@ class Application:
         # ':web start': the default is the value ':set web-commands'
         # refuses to change there, and those two must agree.
         self.web_commands = 'read-only' if kiosk_mode else 'safe'
+        # Off under kiosk for the same reason and by the same rule: the
+        # console user is the party that mode distrusts, and a reader who
+        # never signs in is one more party again.
+        self.web_anonymous = 'off'
         # Writes from the server thread land here and are run by the main
         # loop.  Bounded: a client that could enqueue without limit would be
         # able to grow this without limit.
@@ -8644,6 +8683,8 @@ class Application:
             out.append(f":set web-password-file {self.web_password_file}\n")
         if self.web_commands != 'safe':
             out.append(f":set web-commands {self.web_commands}\n")
+        if self.web_anonymous != 'off':
+            out.append(f":set web-anonymous {self.web_anonymous}\n")
         if self.web_hosts:
             out.append(f":set web-hosts {self.web_hosts}\n")
         if self.web_tls_cert:
@@ -12946,7 +12987,24 @@ class Application:
     def _web_running(self):
         return getattr(self, '_web_server', None) is not None
 
-    def _web_host_detail(self, uid):
+    #: Fields ':set web-anonymous' withholds from '/api/host/<uid>'.
+    #:
+    #: This endpoint is markedly leakier than '/api/state', and all three are
+    #: instructions for reaching the estate rather than facts about it:
+    #:
+    #:   cmd      shlex.join(_build_ping_cmd()) — the whole ssh invocation,
+    #:            so '-i <keypath>', '-p', 'user@relay' and the '-J' chain
+    #:   connect  the 'c' binding expanded for this host: a command that is
+    #:            ready to paste into a shell and log in
+    #:   events   _host_event_lines, which is NOT level-filtered — it returns
+    #:            debug lines that '/api/state's own tail withholds
+    #:
+    #: A denylist is right here and a blocklist was wrong for the event tail,
+    #: because this dict is built field by field in one function: a new field
+    #: is a line in _details_data, next to this list.
+    _WEB_ANON_WITHHELD = ('cmd', 'connect', 'events')
+
+    def _web_host_detail(self, uid, redacted=False):
         """The details view for one host, or None when there is no such row.
 
         Shares :meth:`_details_data` with the terminal's overlay, so the two
@@ -12954,11 +13012,18 @@ class Application:
         are the overlay's own rendered lines: a sparkline is a picture made of
         characters, and re-deriving one in the client would be a second
         implementation of something that already reads correctly.
+
+        *redacted* drops :data:`_WEB_ANON_WITHHELD` for a caller with no
+        session.  The readings stay — that is what the viewer came for — and
+        what goes is the part that says how to log in.
         """
         for entry in list(self.entries):
             if getattr(entry, 'uid', None) != uid or not isinstance(entry, Monitor):
                 continue
             data = self._details_data(entry)
+            if redacted:
+                for field in self._WEB_ANON_WITHHELD:
+                    data.pop(field, None)
             # A fixed width, where the overlay passes the box it drew into:
             # the sparkline is sized in characters and the browser has no
             # column count to offer, so 60 is picked once here rather than
@@ -13090,6 +13155,20 @@ class Application:
             text = alt
         return text
 
+    def _web_access_summary(self):
+        """One phrase naming both halves of who may do what.
+
+        The two settings are orthogonal — ':set web-anonymous' says who may
+        look, ':set web-commands' says what a signed-in browser may change —
+        and a message that names one without the other has already been wrong
+        once: ':web' advertised itself as "(read-only)" whatever
+        ':set web-commands' said, so the default, which allows a browser to
+        pause a host, described itself as incapable of it.
+        """
+        read = ('anyone may read' if self.web_anonymous != 'off'
+                else 'sign-in required')
+        return f'{read}; commands: {self.web_commands}'
+
     def _web_announce_link(self, url, token):
         """Show the one-shot sign-in link on the status bar, and nowhere else.
 
@@ -13158,7 +13237,7 @@ class Application:
         parts = [f'web: listening on {base}',
                  f'{server.request_count} request(s)',
                  'password login' if server.password_hash else 'token only',
-                 f'commands: {self.web_commands}']
+                 self._web_access_summary()]
         if server.last_client:
             parts.append(f'last client {server.last_client}')
         if self.web_allow:
@@ -13250,7 +13329,7 @@ class Application:
         base = f'{scheme}://{bound_host}:{bound_port}/'
         self.add_event('web',
                        f'web: listening on {base} '
-                       f'(commands: {self.web_commands}; '
+                       f'({self._web_access_summary()}; '
                        f'sign-in link: ":web status")',
                        level=LEVEL_NORMAL)
         self._web_announce_link(f'{base}?t={server.token}', server.token)
@@ -13394,6 +13473,63 @@ class Application:
         self.web_commands = value
         if self._monitoring_started:
             self.add_event('config', f'web-commands: {value}')
+
+    def _cmd_web_anonymous(self, args=''):
+        """:set web-anonymous off|read-only — may a client with no session read?
+
+        'off' is the default and the historical behaviour: '/api/state' and
+        '/api/host/<uid>' answer 401 without a cookie, so the only way in is
+        the one-shot link or the password.
+
+        'read-only' opens the two read endpoints to anybody the allow-list and
+        the Host pin already let through.  It does not touch writes: those go
+        through _write_gate, which wants a session before it looks at anything
+        else, so an anonymous caller is refused whatever ':set web-commands'
+        says.  The password file therefore changes meaning rather than becoming
+        redundant — it stops being the way in and becomes the way to become an
+        admin, which is why a routable bind still refuses without one.  A
+        listener anyone may read and nobody may ever administer is not worth
+        offering.
+
+        Refused in kiosk mode.  That mode's threat model is the person at the
+        console; a reader who never authenticates at all is strictly further
+        out than that, and the audit trail has nobody to name.
+
+        What it publishes is worth stating plainly, because it cannot be
+        narrowed afterwards by a setting: every host name, address and
+        ':resolv' alias, which together are an inventory of the estate, plus
+        the event tail, which carries client addresses and verbatim ping and
+        ssh stderr.  '/api/host/<uid>' is redacted for these callers — see
+        _web_host_detail — but '/api/state' is not.
+        """
+        if self._handle_param_verb('web-anonymous', args):
+            return
+        value = args.strip().lower()
+        if value in ('no', 'none', 'false'):
+            value = 'off'
+        if value in ('yes', 'on', 'true', 'read'):
+            value = 'read-only'
+        if value not in _WEB_ANONYMOUS_MODES:
+            self._refuse('cmd',
+                         f"web-anonymous: unknown value '{value}' — "
+                         f"choices: {' '.join(_WEB_ANONYMOUS_MODES)}")
+            return
+        if value != 'off' and self.kiosk_mode:
+            self._refuse('cmd',
+                         'web-anonymous: kiosk mode allows off only — the '
+                         'console user is already the party that mode '
+                         'distrusts')
+            return
+        self.web_anonymous = value
+        if self._monitoring_started:
+            self.add_event('config', f'web-anonymous: {value}')
+        if value != 'off' and self._web_running():
+            self.add_event('warn',
+                           'warning: the web interface is now readable '
+                           'without signing in — every host name, address '
+                           'and the event tail are served to anyone the '
+                           'allow-list lets through',
+                           level=LEVEL_NORMAL)
 
     def _cmd_web_hosts(self, args=''):
         """:set web-hosts <name>[,<name>…] — extra Host: names to answer to.
