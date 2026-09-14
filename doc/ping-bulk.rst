@@ -2596,6 +2596,23 @@ Recognised settings
 ``:set log-size <n>``
     Event log maximum line count.  Default: ``10000``.
 
+``:set autosave on|off``
+    Write this file whenever a setting it holds changes.  Default ``off``,
+    and the skeleton written on first run says so in an active line rather
+    than a commented one.
+
+    What counts as a change is every setting this section lists, plus
+    ``:layout``, ``:log``, ``:no-alarm``, ``:relay-os``, ``:prog-options``
+    and user key bindings — anything the file holds.  Commands that change
+    nothing it holds, such as ``:seen`` or ``:clear``, write nothing.
+
+    Settings applied by a *hosts* file are not written here: they belong to
+    the file that declared them.
+
+    A save that fails — a read-only directory, a full disk — is reported
+    once, and reported again when saving works.  The previous contents are
+    never destroyed by a failed save.
+
 ``:log /path/to/file``
     Path to stream the event log; omit to disable.
 

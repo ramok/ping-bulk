@@ -308,6 +308,21 @@ The repository is structured to keep the core application as a single deployable
   config hand-edited in another encoding degrades to a visible replacement
   character instead of costing the user their settings.
 
+  **A stale `$LINES` froze the layout, and the obvious fix made it worse.**
+  ncurses prefers `$LINES`/`$COLUMNS` over the kernel's window size (`use_env`
+  is TRUE by default), so a shell that exports them leaves this program drawing
+  the old geometry after every resize — SIGWINCH arrives, the pty really is the
+  new size, and ncurses ignores both. Measured in a pane carrying `LINES=40`:
+  shrinking to 15 rows left the help overlay drawing 40, its top border
+  scrolled off screen, unrecoverable without a restart.
+
+  `main()` deletes the two variables before `curses.wrapper`. **Not
+  `curses.use_env(False)`** — Python's curses module does not wrap
+  `use_tioctl`, and with that unavailable, disabling `use_env` makes ncurses
+  fall back to *terminfo's* size instead of the ioctl: measured, the same
+  40-row pane then rendered as 24. Removing the variables leaves the default
+  `use_env(True)` with nothing to prefer, so it asks the kernel.
+
   The lesson that keeps recurring: **`except OSError` around a write of
   program-authored text is a bug**, because the interesting failure is an
   encoding one and that is a `ValueError`. If you add a file this program
@@ -1451,6 +1466,56 @@ Consequences worth knowing:
 - Found while adding this: `SetParam('terminal')`'s getter read `app.terminal`,
   but the attribute is `app.terminal_emulator`, so that row had always shown
   `?` in the Settings tab. A test now asserts no parameter reports `?`.
+
+### `autosave`, and why it compares text rather than counting commands
+
+`:set autosave on` writes the config whenever a setting the file holds changes.
+Off by default: quietly rewriting a file somebody hand-edited is not something
+to start doing unasked, and the skeleton written on first run says `:set
+autosave off` in an **active** line rather than a commented one, because a
+commented default answers "does this thing rewrite my file?" only for a reader
+who already knows the setting exists.
+
+**`_config_text()` is the single renderer**, split out of `_save_config` so
+`_autosave` can ask "has anything persisted actually changed?" by comparing the
+rendered file. The alternative — a list of which commands are persisted — is
+every `:set`, plus `:layout`, `:log`, `:no-alarm`, `:relay-os`,
+`:prog-options` and every user key binding, and it would fall behind the next
+addition silently. Comparing the text cannot. The split is also what makes the
+atomic write possible: the whole text has to exist before anything opens the
+file.
+
+Hooked at the tail of `_dispatch_cmd`, which every command passes through — the
+`:` line, a key binding, a hosts-file directive, a web request. Guarded on
+`_monitoring_started`, **and re-baselined at the end of an `:edit` reload**,
+which is the subtle half: the reload flips that flag False and back around
+`_cmd_source`, so without a fresh baseline the next command would write the
+*hosts file's* settings into the user's own config. Those belong to the file
+that declared them.
+
+Four things this cost, all found in review or in use:
+
+- **The seeded line must not carry a trailing comment.** `_load_config` skips
+  lines that *start* with `#` and never strips one, so `:set autosave off  #
+  explanation` reached the handler as the unknown value `off  # explanation` —
+  a fresh install reporting an error about the file it had just written, on
+  every start, forever. The explanation goes on the `#` line above. This is not
+  specific to `autosave`: **no directive may carry a trailing comment.**
+- **A failed save must be audible.** `_save_config` reports under category
+  `config`, which is `LEVEL_INFO` and therefore invisible by default; with
+  autosave on the operator would believe settings were being kept while every
+  command silently failed to write one — measured, 24 of 25. It reports through
+  `_refuse` once, stays quiet until a save succeeds, and says so when one does
+  (`_autosave_broken`).
+- **A failed save must not destroy what was there.** `open(path, 'w')`
+  truncates before the first byte, so any later failure leaves an empty file.
+  `_write_file_atomically` writes a sibling temp file, fsyncs, and
+  `os.replace`s. **Not hypothetical — a real config was emptied this way during
+  development.**
+- **`autosave`, `_config_on_disk` and `_autosave_broken` are class attributes**,
+  for the reason `_entries_generation` is (§9c): several tests build an
+  `Application` through `__new__`, and `_dispatch_cmd` — which they do call —
+  reads all three.
 
 ### Confirmation UX
 - Destructive commands support `--confirm`.

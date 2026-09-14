@@ -469,6 +469,9 @@ SET_PARAMS = [
     SetParam('history-size', '_cmd_history_size', ['1000', '10000', '86400', '604800'],
              'per-host ping history depth (default 86400)',
              getter=lambda app: str(app.history_size)),
+    SetParam('autosave', '_cmd_autosave', ['off', 'on'],
+             'write the config file whenever a saved setting changes',
+             getter=lambda app: 'on' if app.autosave else 'off'),
     SetParam('sync-history', '_cmd_sync_history', ['on', 'off'],
              'align history bars to wall-clock time (default on)',
              getter=lambda app: 'on' if app.sync_history else 'off'),
@@ -1194,6 +1197,7 @@ _HELP_BINDINGS = [
     "  :bind-key                 list all user bindings",
     "  :unbind-key <key>         remove a key binding",
     "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
+    "  :set autosave on|off        save the config whenever a setting changes",
     "  :web \\[start|stop|status]   serve the host list over HTTP  (no arg reports)",
     "  :set web-listen <host:port> where it binds (default 127.0.0.1:8765; a routable",
     "                              address needs :set web-password-file)",
@@ -8122,6 +8126,11 @@ class Application:
         self.hosts_map = {}  # static DNS overrides: ip→(ip, hostname) and hostname→(ip, hostname)
         self.port_map = {}   # static port overrides: port_num→service_name and service_name→port_num
         self.history_size = 86400  # per-host ping history deque size (default 24 h at 1 ping/s)
+        self.autosave = False      # write the config when a saved setting changes
+        self._autosave_broken = False   # True after a failed save, until one works
+        # What the config file holds, as far as this process knows.  Seeded by
+        # start_monitoring so a run that changes nothing writes nothing.
+        self._config_on_disk = None
         self.sync_history = False  # align history bars to wall-clock time (off by default)
         self.log_size = 10000
         self.events = deque(maxlen=self.log_size)
@@ -8579,6 +8588,7 @@ class Application:
             out.append(f":layout {self.layout}\n")
         out.append(f":set log-size {self.log_size}\n")
         out.append(f":set history-size {self.history_size}\n")
+        out.append(f":set autosave {'on' if self.autosave else 'off'}\n")
         out.append(f":set sync-history {'on' if self.sync_history else 'off'}\n")
         out.append(f":set mux-split {self.mux_split}\n")
         label = self._LOGLEVEL_LABELS.get(self.loglevel, 'normal')
@@ -8656,7 +8666,7 @@ class Application:
                             f" {ctx_str}{b.key_notation} {cmds}{suffix}\n")
         return ''.join(out)
 
-    def _save_config(self):
+    def _save_config(self, quiet=False):
         """Write current settings to the XDG config file, creating dirs as needed.
 
         Uses the same ':cmd args' syntax as the interactive command line so the
@@ -8669,8 +8679,10 @@ class Application:
         try:
             _write_file_atomically(path, text)
         except Exception as e:
-            self.add_event("config", f"error saving config: {e}")
+            if not quiet:        # autosave reports in its own, bounded words
+                self.add_event("config", f"error saving config: {e}")
             return False
+        self._config_on_disk = text
         return True
 
     def _create_default_config(self):
@@ -8690,6 +8702,12 @@ class Application:
             "# :set log-size 10000     # event log max lines\n",
             "# :set history-size 86400 # per-host ping history depth (default 24 h at 1 ping/s)\n",
             "# :log                    # path to stream event log; leave blank to disable\n",
+            "#\n",
+            "# Write the config whenever a setting changes.  Left active rather\n",
+            "# than commented out because it answers \"does this program rewrite\n",
+            "# my file behind my back?\", which a commented default answers only\n",
+            "# for a reader who already knows the setting exists.\n",
+            ":set autosave off\n",
         ]
         try:
             _write_file_atomically(_config_path(), ''.join(lines))
@@ -8858,6 +8876,13 @@ class Application:
     # it; '+= 1' rebinds it per instance.
     _entries_generation = 0
 
+    # Same reason: 'save on every change' is read from _dispatch_cmd, which
+    # those __new__-built Applications do call.  Off, and "the file is
+    # unknown", are the right answers for an object that never ran __init__.
+    autosave = False
+    _config_on_disk = None
+    _autosave_broken = False
+
     def _add_entry(self, entry):
         """Append *entry* to self.entries and invalidate layout caches."""
         self.entries.append(entry)
@@ -8998,6 +9023,14 @@ class Application:
     def start_monitoring(self):
         """Start all ping threads"""
         self._monitoring_started = True
+        # Autosave's baseline: what the settings mean now that the config and
+        # the hosts file have both been applied.  Taken here rather than from
+        # the file's bytes, which need not be spelled the way this program
+        # writes them, so the first interactive change is not blamed for a
+        # difference that was only formatting.  Hosts-file settings are
+        # therefore not written back: they belong to the file that declared
+        # them.
+        self._config_on_disk = self._config_text()
         self._install_thread_excepthook()
         self._start_time = time.monotonic()
         for monitor in self.monitors:
@@ -14375,6 +14408,10 @@ class Application:
         if cmd_def:
             self._last_cmd_name = cmd  # let handlers know which alias was used
             getattr(self, cmd_def.action)(args)
+            # Here rather than in each handler: every command arrives through
+            # this one function — the ':' line, a key binding, a hosts-file
+            # directive, a web request — so there is one place to keep right.
+            self._autosave()
         else:
             self.add_event("cmd",
                 f"unknown command: {cmd}" + (f" {args}" if args else "")
@@ -15685,6 +15722,14 @@ class Application:
             self._cmd_source(hosts_file)
         finally:
             self._monitoring_started = True
+            # Re-baseline autosave against what the settings mean *now*.
+            # The reload just applied the hosts file's own directives with
+            # _monitoring_started False, so _autosave did not fire for them —
+            # but the baseline is still the one taken at start_monitoring, and
+            # without this the next command would see the hosts file's
+            # settings as a change and write them into the user's config.
+            # They belong to the file that declared them (§11).
+            self._config_on_disk = self._config_text()
 
         fresh = self._adopt_monitors(pool)
         for leftover in pool.values():
@@ -16406,6 +16451,76 @@ class Application:
                 monitor.history_times = deque(monitor.history_times, maxlen=n)
         if self._monitoring_started:
             self.add_event("history-size", f"per-host ping history size set to {n}")
+
+    def _cmd_autosave(self, args=''):
+        """Report (no arg), cycle, or set autosave (on/off).
+
+        With autosave on, any change to something the config file holds is
+        written straight away, so a run's settings survive a crash, a kill, or
+        simply forgetting ':save-config'.  Off by default: this program writes
+        to a network and to a log, and quietly rewriting a file the user
+        hand-edited is not something to start doing unasked.
+        """
+        if self._handle_param_verb('autosave', args):
+            return
+        val = args.strip().lower()
+        if val == 'on':
+            self.autosave = True
+        elif val == 'off':
+            self.autosave = False
+        else:
+            self._refuse('cmd',
+                f"autosave: unknown value '{val}' — choices: on off cycle")
+            return
+        if self._monitoring_started:
+            self.add_event('config',
+                           f"autosave {'on' if self.autosave else 'off'}")
+            # Turning it on saves at once: the setting that says "keep my
+            # settings" should not itself wait for the next change.
+            if self.autosave:
+                self._autosave()
+
+    def _autosave(self):
+        """Write the config if autosave is on and anything persisted changed.
+
+        Compares the rendered file rather than tracking which commands are
+        persisted, so a setting added later is covered without anyone
+        remembering to add it here.  Called from ``_dispatch_cmd`` after the
+        handler has run — every command goes through there, including the ones
+        a key binding fires.
+
+        **A save that fails is said out loud, once.**  ``_save_config`` reports
+        under category ``config``, which is ``LEVEL_INFO`` — invisible at the
+        default level — so the operator would switch autosave on, believe their
+        settings were being kept, and lose them.  And because
+        ``_config_on_disk`` only advances on success, every later command
+        retries: measured, 24 failed writes in 25 commands, none of them
+        visible.  That is the flood the refusal work exists to stop, so the
+        report is bounded the same way — the first failure spoken, the rest
+        silent until a save succeeds again.
+        """
+        if not self.autosave or not self._monitoring_started:
+            return
+        try:
+            text = self._config_text()
+        except Exception as exc:
+            if not self._autosave_broken:
+                self._autosave_broken = True
+                self._refuse('config', f'autosave: cannot render the config: '
+                                       f'{exc} — settings are not being saved')
+            return                      # never let a save break a command
+        if text == self._config_on_disk:
+            return
+        if self._save_config(quiet=True):
+            if self._autosave_broken:
+                self._autosave_broken = False
+                self.add_event('config', 'autosave: saving again',
+                               level=LEVEL_NORMAL)
+        elif not self._autosave_broken:
+            self._autosave_broken = True
+            self._refuse('config',
+                         f'autosave: cannot write {_config_path()} — '
+                         f'settings are not being saved')
 
     def _cmd_sync_history(self, args=''):
         """Report (no arg), cycle, or set sync-history mode (on/off).
@@ -18656,4 +18771,24 @@ if __name__ == "__main__":
                 _cmd = _screen.relaunch_cmd(sys.argv, hosts_file=_args.file[-1] if _args.file else None)
                 os.execvp(_cmd[0], _cmd)
             # If neither available, fall through and run directly
+    # The terminal's actual size decides the layout, not a stale $LINES.
+    #
+    # ncurses prefers $LINES/$COLUMNS over the kernel's idea of the window
+    # (use_env is TRUE by default).  A shell that exports them — some do, and
+    # some scripts set them deliberately — leaves them stale the moment the
+    # window is resized, and this program then draws the old geometry forever:
+    # SIGWINCH arrives, the pty really is the new size, and ncurses ignores
+    # both.  Measured in a pane carrying LINES=40: shrinking to 15 rows left
+    # the help overlay drawing 40, its top border scrolled off screen, with no
+    # way back short of restarting.
+    #
+    # Removing them is the fix, **not** curses.use_env(False): with
+    # use_tioctl unavailable in Python's curses module, disabling use_env makes
+    # ncurses fall back to terminfo's size rather than the ioctl — measured, a
+    # 40-row pane then rendered as 24.  With the variables gone, the default
+    # use_env(True) finds nothing and asks the kernel, which is what is wanted.
+    # Child processes lose them too, which is equally right: they would inherit
+    # a size that was already wrong.
+    os.environ.pop('LINES', None)
+    os.environ.pop('COLUMNS', None)
     curses.wrapper(main, _args)

@@ -230,18 +230,40 @@ class TestCreateDefaultConfig:
             content = f.read()
         assert '# ping-bulk configuration' in content
 
-    def test_default_config_all_lines_are_comments(self, pb, tmp_path):
-        """Every non-blank setting line in the default config must be commented out."""
+    def test_default_config_changes_nothing_except_autosave(self, pb, tmp_path):
+        """The generated config must not alter behaviour — with one exception.
+
+        Every setting line is commented out, so a first run behaves exactly
+        like no config at all.  ':set autosave off' is deliberately *active*:
+        it answers "does this program rewrite my file behind my back?", which
+        a commented default answers only for a reader who already knows the
+        setting exists, and it pins the behaviour so a future change of
+        default cannot silently start rewriting a hand-edited file.
+        """
         cfg = str(tmp_path / 'ping-bulk' / 'config')
         make_app(pb, cfg, config_text=None)
-        with open(cfg) as f:
+        with open(cfg, encoding='utf-8') as f:
             lines = f.readlines()
-        for line in lines:
-            stripped = line.strip()
-            if stripped and not stripped.startswith('#'):
-                pytest.fail(
-                    f"Default config has an active (non-commented) line: {line!r}"
-                )
+        active = [l.strip() for l in lines
+                  if l.strip() and not l.strip().startswith('#')]
+        assert active == [':set autosave off'], active
+
+    def test_the_generated_config_parses_without_complaint(self, pb, tmp_path):
+        """It must not report an error about the file it just wrote.
+
+        The first cut put the explanation *after* the directive, as a trailing
+        comment — and ':' lines are dispatched whole, with no comment
+        stripping, so ':set autosave off  # …' reached the handler as an
+        unknown value.  A fresh install would have complained about its own
+        config on every start, forever.
+        """
+        cfg = str(tmp_path / 'ping-bulk' / 'config')
+        make_app(pb, cfg, config_text=None)
+        second = make_app(pb, cfg, config_text=None)
+        complaints = [e.text for e in second.events
+                      if 'unknown' in e.text or 'invalid' in e.text]
+        assert complaints == [], complaints
+        assert second.autosave is False
 
     def test_a_first_run_survives_an_ascii_locale(self, pb, tmp_path):
         """The em dash in the banner used to stop the program starting.
