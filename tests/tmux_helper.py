@@ -14,7 +14,10 @@ Usage::
 """
 
 import os
+import shutil
+import weakref
 import subprocess
+import tempfile
 import time
 
 # ---------------------------------------------------------------------------
@@ -34,6 +37,66 @@ import time
 TIMEOUT_SCALE: float = float(os.environ.get('PING_BULK_TIMEOUT_SCALE', '1.0'))
 
 
+# Every test session's name starts with this, so one pattern finds them all.
+_TEST_SESSION_PREFIX = 'ping-bulk-test-'
+
+# **The tests run on their own tmux server**, reached through a private socket
+# (`tmux -L`).  Nothing here shares a server with the person running the suite,
+# so a test — or a careless cleanup — cannot see, resize or kill their work.
+# It also makes teardown total rather than pattern-matched: the whole server is
+# killed at the end of the run, which is safe precisely because it is ours.
+#
+# This exists because the alternative failed in the worst way: a `tmux
+# kill-server` meant for leaked test sessions destroyed 50 live sessions on a
+# developer's machine, and separately 44 test sessions leaked under a name no
+# cleanup pattern matched.  A private server answers both at once.
+_TEST_SERVER = 'ping-bulk-test'
+
+
+def tmux_cmd(*args):
+    """An argv for the tests' own tmux server."""
+    return ['tmux', '-L', _TEST_SERVER, *args]
+
+
+# The environment the tmux server is started with — and therefore the one
+# every pane inherits.
+#
+# **LINES and COLUMNS must not be in it.**  ncurses defaults to `use_env(TRUE)`
+# and prefers those variables over the terminal's real size, so an app that
+# inherits a stale `LINES=40` keeps drawing 40 rows after the window shrinks to
+# 15: SIGWINCH arrives, the pty is genuinely 15 rows, and ncurses ignores both.
+# The resize tests then see the *bottom* of an oversized frame and time out
+# waiting for an indicator that is scrolled off the top.
+#
+# It only showed up once the suite moved to its own server: a long-running
+# shared server was started from a context that never exported them, while this
+# one inherits whatever shell ran pytest.  Measured: `env -u LINES -u COLUMNS`
+# takes the indicator from '(none)' back to '1-11/161'.
+_TMUX_ENV = {k: v for k, v in os.environ.items()
+             if k not in ('LINES', 'COLUMNS')}
+
+# Sessions created but not yet killed.  A WeakSet, so a forgotten object does
+# not keep anything alive; conftest sweeps whatever is left at the end.
+_LIVE_SESSIONS = weakref.WeakSet()
+
+
+def kill_leftover_sessions():
+    """Kill test sessions this run created and did not clean up.
+
+    Only ever by name, and only names this module made.  Never
+    ``tmux kill-server``: that ends every session the user has, including work
+    with nothing to do with the tests.
+    """
+    killed = []
+    for sess in list(_LIVE_SESSIONS):
+        try:
+            killed.append(sess.name)
+            sess.kill()
+        except Exception:
+            pass
+    return killed
+
+
 class TmuxSession:
     """Manage a single detached tmux session for integration testing."""
 
@@ -41,40 +104,65 @@ class TmuxSession:
         import uuid
         # Always use a unique session ID by appending a uuid
         self.name = f"{name}-{uuid.uuid4().hex[:8]}"
+        # **One prefix, always.**  A session named anything else is invisible
+        # to every cleanup that looks for test sessions, and
+        # `test_recursive_fold.py` did exactly that (`pytest-rfold-…`): 44
+        # sessions leaked onto a developer's tmux server where nothing would
+        # find them again.  Enforced here rather than asked for in a guide.
+        if not self.name.startswith(_TEST_SESSION_PREFIX):
+            self.name = _TEST_SESSION_PREFIX + self.name
         self.width = width
         self.height = height
+        # Registered so the run can clean up after a test that raised before
+        # reaching its own kill() — several do, and a timeout is when it
+        # happens.
+        _LIVE_SESSIONS.add(self)
 
         # Kill any stale session with this name left over from a previous
         # test run that crashed without cleanup.
         stale = subprocess.run(
-            ['tmux', 'has-session', '-t', self.name],
-            check=False,
+            tmux_cmd('has-session', '-t', self.name),
+            check=False, env=_TMUX_ENV,
         )
         if stale.returncode == 0:
-            subprocess.run(['tmux', 'kill-session', '-t', self.name], check=False)
+            subprocess.run(tmux_cmd('kill-session', '-t', self.name), check=False,
+                           env=_TMUX_ENV)
+
+        # A private config directory for this session, so the suite does not
+        # read — or depend on — whoever is running it.
+        #
+        # The tests drive the real ./ping-bulk, which loads
+        # $XDG_CONFIG_HOME/ping-bulk/config (falling back to ~/.config).  A
+        # pane inherits the tmux *server's* environment, not this process's,
+        # so exporting the variable here or in pytest does not reach it: it has
+        # to be set on the session.  Without this, a developer's own settings
+        # decide what the tests see — ':layout log' alone fails twenty of them,
+        # with an error that looks like a bug in the code under test.
+        self._cfgdir = tempfile.mkdtemp(prefix='pb-test-xdg-')
 
         # Create a new detached session with the requested dimensions.
         subprocess.run(
-            [
-                'tmux', 'new-session',
+            tmux_cmd(
+                'new-session',
                 '-d',            # detached
                 '-s', self.name,
                 '-x', str(width),
                 '-y', str(height),
-            ],
-            check=True,
+                '-e', f'XDG_CONFIG_HOME={self._cfgdir}',
+            ),
+            check=True, env=_TMUX_ENV,
         )
 
         # Explicitly resize the window after creation to handle older tmux
         # versions that may ignore the -x/-y flags on new-session.
         subprocess.run(
-            [
-                'tmux', 'resize-window',
+            tmux_cmd(
+                'resize-window',
                 '-t', self.name,
                 '-x', str(width),
                 '-y', str(height),
-            ],
-            check=False,  # not fatal — old tmux may not support resize-window
+            ),
+            check=False, env=_TMUX_ENV,  # not fatal — old tmux may not support resize-window
         )
 
     # ------------------------------------------------------------------
@@ -94,8 +182,8 @@ class TmuxSession:
         not recognise.  Use :meth:`send_literal` for that.
         """
         subprocess.run(
-            ['tmux', 'send-keys', '-t', self.name] + list(keys),
-            check=True,
+            tmux_cmd('send-keys', '-t', self.name) + list(keys),
+            check=True, env=_TMUX_ENV,
         )
 
     def send_literal(self, text: str) -> None:
@@ -106,8 +194,8 @@ class TmuxSession:
         ``send_keys('Enter')`` if a newline is required.
         """
         subprocess.run(
-            ['tmux', 'send-keys', '-t', self.name, '-l', text],
-            check=True,
+            tmux_cmd('send-keys', '-t', self.name, '-l', text),
+            check=True, env=_TMUX_ENV,
         )
 
     # ------------------------------------------------------------------
@@ -121,8 +209,8 @@ class TmuxSession:
         preserved so column-position assertions remain meaningful.
         """
         result = subprocess.run(
-            ['tmux', 'capture-pane', '-t', self.name, '-p'],
-            check=True,
+            tmux_cmd('capture-pane', '-t', self.name, '-p'),
+            check=True, env=_TMUX_ENV,
             capture_output=True,
             text=True,
         )
@@ -178,13 +266,13 @@ class TmuxSession:
         self.width = width
         self.height = height
         subprocess.run(
-            [
-                'tmux', 'resize-window',
+            tmux_cmd(
+                'resize-window',
                 '-t', self.name,
                 '-x', str(width),
                 '-y', str(height),
-            ],
-            check=True,
+            ),
+            check=True, env=_TMUX_ENV,
         )
 
     def __enter__(self):
@@ -202,11 +290,21 @@ class TmuxSession:
         self.wait_for('DNS:', timeout=10)
 
     def kill(self) -> None:
-        """Kill the tmux session.  Safe to call even if already dead."""
+        """Kill the tmux session.  Safe to call even if already dead.
+
+        Kills this session by name and nothing else.  Never ``tmux
+        kill-server``: that ends *every* session the user has, including work
+        that has nothing to do with the tests.
+        """
         subprocess.run(
-            ['tmux', 'kill-session', '-t', self.name],
-            check=False,
+            tmux_cmd('kill-session', '-t', self.name),
+            check=False, env=_TMUX_ENV,
         )
+        cfgdir = getattr(self, '_cfgdir', None)
+        if cfgdir:
+            shutil.rmtree(cfgdir, ignore_errors=True)
+            self._cfgdir = None
+        _LIVE_SESSIONS.discard(self)
 
     def stop(self) -> None:
         self.kill()

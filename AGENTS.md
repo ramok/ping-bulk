@@ -41,6 +41,43 @@ The repository is structured to keep the core application as a single deployable
   - **Commit messages must focus on User Experience (UX) impact, not just technical implementation details**. Frame the commit message to explain *how* the change affects the end user (e.g., "feat: simplify port monitoring syntax for users"), rather than just listing what functions changed. The commit message should be human-readable, formatted nicely, and concisely explain the value to the user.
 - **Running the Application**: You can run the script directly from the root directory: `./ping-bulk <hosts>`.
 - **Running Tests**: Navigate to the root directory and execute `tests/venv/bin/pytest -n auto tests/` to run the test suite in parallel (or simply `make test`). A dedicated venv lives in `tests/venv/`; create it once with `make venv` (or `python3 -m venv tests/venv && tests/venv/bin/pip install -r requirements-dev.txt`). It is **highly recommended** to use `-n auto` for significantly faster test execution, as test sessions are fully isolated using unique `tmux` session names via `pytest-xdist`. Ensure any new features include appropriate tests, especially for complex parsing (like brace expansion or SSH directives). For more details on the testing infrastructure and how to write tests using the headless tmux environment, refer to `tests/AI_TESTING_GUIDE.md` and `SKILL.md`.
+  - **The suite is hermetic, and must stay that way.** Every test gets its own
+    `XDG_CONFIG_HOME` (`conftest.isolated_config_dir`), because the tests drive
+    the real `./ping-bulk`, which loads `$XDG_CONFIG_HOME/ping-bulk/config`.
+    Without it the suite reads — and can *write* — whoever is running it: a
+    developer's own `:layout log` fails twenty tests, with errors that look
+    exactly like a regression in the code under test, and a test that calls
+    `:save-config` unpatched overwrites a real config. Both happened.
+    The tmux sessions need it separately (`-e XDG_CONFIG_HOME=…` on
+    `tmux new-session`), because a pane inherits the tmux **server's**
+    environment, not pytest's — exporting it in a fixture does not reach it.
+  - **Never `tmux kill-server` to clean up.** It ends every session the user
+    has, not the test ones; `TmuxSession.kill()` kills by name and that is the
+    only correct way. Orphaned `ping-bulk-test-*` sessions are harmless.
+  - **The suite is hermetic, and must stay that way.** Every test gets its own
+    `XDG_CONFIG_HOME` (`conftest.isolated_config_dir`), because the tests drive
+    the real `./ping-bulk`, which loads `$XDG_CONFIG_HOME/ping-bulk/config`.
+    Without it the suite reads — and can *write* — whoever is running it: a
+    developer's own `:layout log` fails twenty tests, with errors that look
+    exactly like a regression in the code under test, and a test that reaches
+    `:save-config` unpatched overwrites a real config. Both happened.
+  - **The suite runs on its own tmux server** (`tmux -L ping-bulk-test`), so it
+    cannot see, resize or kill the sessions you are working in. `conftest`
+    refuses to start if anything would reach the default server — a guard added
+    after a one-line experiment pointed the start-up sweep at a developer's real
+    server and destroyed 11 live sessions. That sweep also requires the
+    `ping-bulk-test-` prefix, so its safety no longer rests on one constant, and
+    it spares sessions younger than 120 s so two concurrent pytest runs do not
+    destroy each other's work.
+  - **The server is started without `LINES`/`COLUMNS`.** tmux copies its own
+    environment into every pane, and ncurses prefers those variables over the
+    pty, so a stale `LINES=40` makes the app under test ignore every resize.
+    `TmuxSession` forces the `ping-bulk-test-` prefix for a related reason — 44
+    sessions once leaked under `pytest-rfold-*`, which no cleanup pattern
+    matched.
+  - **Never `tmux kill-server` to clean up.** It ends every session the user
+    has, not the test ones — not even on the private socket. `TmuxSession.kill()`
+    kills by name and that is the only correct way.
   - **CRITICAL REQUIREMENT FOR AI AGENTS:** Before writing **any** new tests, you **MUST** read and fully understand `tests/AI_TESTING_GUIDE.md`. You **MUST** strictly follow the test templates provided in that guide to ensure consistency with the existing headless tmux testing infrastructure. Failure to do so will result in broken UI tests and test suite failures.
 - **Building Documentation**: Navigate to the `doc/` directory and run `make` (requires `docutils` installed via pip) to generate the updated man page and HTML documentation.
 - **Keeping `--help-example` in sync**: Whenever `doc/ping-bulk.rst` or `examples/ping-bulk.advance` is updated with new features or syntax, the `_EXAMPLE_HELP` constant in `ping-bulk` (printed by `--help-example`) **must also be updated** to reflect the same features. All three should stay consistent.

@@ -30,44 +30,139 @@ import importlib.machinery
 import importlib.util
 import os
 import shutil
+import time
 import sys
 import pytest
 
 def pytest_sessionstart(session):
-    """Cleanup any stale tmux sessions before the test run."""
-    # Only run cleanup in the main process, not in xdist workers
+    """Private config directory, private tmux server, and a clean slate.
+
+    **The config directory.** The tests build a real ``Application``, which
+    loads ``$XDG_CONFIG_HOME/ping-bulk/config`` — so without this the suite
+    reads, and can *write*, whoever is running it.  A developer's own
+    ``:layout log`` fails twenty tests with errors that look exactly like a
+    regression in the code under test, and a test that reaches ``:save-config``
+    unpatched overwrites a real config.  Both happened.
+
+    **The tmux server.** Every session lives on ``tmux -L ping-bulk-test``
+    (see ``tmux_helper``), so the suite cannot see or touch the user's own
+    sessions at all.  Leftovers from an earlier run are killed here, by name,
+    on that private server — a run must not inherit a session another run
+    abandoned.
+
+    Note what is *not* done: ``tmux kill-server``.  Not even on the private
+    socket.  The rule is absolute because the failure it prevents is
+    unrecoverable, and a habit that has an exception is not a habit.  The
+    private server exits on its own once its last session is gone.
+    """
+    import tempfile
+    cfg = os.environ.get('PB_TEST_XDG')
+    if not cfg:
+        cfg = tempfile.mkdtemp(prefix='pb-test-xdg-')
+        os.environ['PB_TEST_XDG'] = cfg
+    os.environ['XDG_CONFIG_HOME'] = cfg
+
+    # Refuse to run at all if anything can reach the user's tmux server.
+    # Not a comment, not a convention — the suite stops.  A previous version
+    # relied on `tmux_cmd` naming a private socket and on nothing ever editing
+    # that; one temporary edit later, the start-up sweep destroyed 11 of a
+    # developer's live sessions.
+    _assert_private_tmux()
+
+    # Only sweep in the controller, not in every xdist worker.
     if hasattr(session.config, "workerinput"):
         return
-    
+    _kill_test_sessions('left over from an earlier run', older_than=120)
+
+
+def _assert_private_tmux():
+    """Every tmux command must name the suite's own socket."""
+    from tmux_helper import tmux_cmd, _TEST_SERVER
+    argv = tmux_cmd('ls')
+    if argv[:3] != ['tmux', '-L', _TEST_SERVER]:
+        raise pytest.UsageError(
+            'refusing to run: tmux commands would reach the default server '
+            '(%r).  The suite must use its own socket, tmux -L %s.'
+            % (' '.join(argv), _TEST_SERVER))
+
+
+def _kill_test_sessions(why, older_than=None):
+    """Kill *test* sessions on the tests' own tmux server, one by one.
+
+    *older_than* seconds, when given, spares anything younger — because the
+    socket is shared by every pytest invocation, not just this one.  Two
+    terminals running the suite at once would otherwise destroy each other's
+    live sessions mid-test.  The original harness had exactly this check, with
+    the comment "to avoid killing sessions from parallel pytest runs", and an
+    earlier pass through this file dropped it.
+
+    Two independent guards, because relying on one of them failed
+    catastrophically.  The socket is private (``tmux -L``), **and** every name
+    must carry ``_TEST_SESSION_PREFIX``.
+
+    The first version had only the socket guard and killed everything the
+    socket listed — "safe by construction", because the socket belongs to the
+    suite.  Then a one-line experiment pointed ``tmux_cmd`` at the default
+    server for a single test run, and this function destroyed 11 of a
+    developer's live sessions.  It never ran ``kill-server``; it did not need
+    to.  A function that kills every session it is shown *is* a kill-server
+    wearing a loop, and its safety lived entirely in a constant somebody was
+    always going to edit.
+
+    So the prefix check is not redundant.  Pointed at the wrong server, the
+    worst this can now do is kill sessions that the suite itself named.
+    """
     import subprocess
-    import time
-    
-    result = subprocess.run(
-        ['tmux', 'ls', '-F', '#{session_name}:#{session_created}'],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0:
-        for line in result.stdout.splitlines():
-            if ':' not in line:
-                continue
-            name, created_str = line.split(':', 1)
-            # Only clean up ping-bulk test sessions
-            if name.startswith('ping-bulk-test-') and len(name) > 20:
-                try:
-                    created = int(created_str)
-                    age_seconds = time.time() - created
-                    # Only kill sessions older than 120 seconds (stale from previous runs)
-                    if age_seconds > 120:
-                        subprocess.run(['tmux', 'kill-session', '-t', name], check=False)
-                except (ValueError, IndexError):
-                    pass
+    try:
+        from tmux_helper import tmux_cmd, _TEST_SESSION_PREFIX
+    except Exception:
+        return []
+    try:
+        listed = subprocess.run(
+            tmux_cmd('ls', '-F', '#{session_name}:#{session_created}'),
+            capture_output=True, text=True, check=False)
+    except Exception:
+        return []
+    names = []
+    for row in listed.stdout.split():
+        name, _, created = row.rpartition(':')
+        if not name.startswith(_TEST_SESSION_PREFIX):
+            continue
+        if older_than is not None:
+            try:
+                if time.time() - float(created) < older_than:
+                    continue        # another run's, and still alive
+            except ValueError:
+                continue            # unparseable: leave it alone
+        names.append(name)
+    for name in names:
+        subprocess.run(tmux_cmd('kill-session', '-t', name), check=False)
+    if names:
+        print(f'\ntmux: killed {len(names)} test session(s) {why}')
+    return names
+
 
 def pytest_sessionfinish(session, exitstatus):
-    """Cleanup is handled by individual test fixtures, not globally."""
-    # We don't clean up here to avoid killing sessions from parallel pytest runs
-    pass
+    """Leave the private tmux server empty, and say so if it was not.
+
+    Several tests build a session and then call ``wait_for`` with no
+    try/except, so a timeout leaves one behind; 44 accumulated before anybody
+    noticed.  Killing them here keeps the next run clean, and reporting the
+    count is what makes the leak visible instead of silent.
+    """
+    if hasattr(session.config, "workerinput"):
+        return
+    # Only this run's own sessions, from its registry — never a sweep of the
+    # socket, which another pytest invocation may be using right now.
+    try:
+        from tmux_helper import kill_leftover_sessions
+        leaked = kill_leftover_sessions()
+    except Exception:
+        leaked = []
+    if leaked:
+        print('\ntmux: %d session(s) were not cleaned up by their own test: %s'
+              % (len(leaked), ', '.join(sorted(leaked)[:5])))
+
 
 # Make the tests/ directory importable without installing anything.
 sys.path.insert(0, os.path.dirname(__file__))
@@ -123,6 +218,23 @@ def pb(app_path):
 # ---------------------------------------------------------------------------
 # Dependency check fixture
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def isolated_config_dir(tmp_path_factory, monkeypatch):
+    """A fresh config directory per test.
+
+    ``pytest_sessionstart`` keeps the suite out of the developer's real config,
+    but one directory shared by every test is not enough: anything that runs
+    ':save-config' — or, now, autosave — writes a config that later tests then
+    *read*, so a run could pass alone and fail in the suite depending on the
+    order xdist happened to pick.  Measured: ten failures under ``-n auto``
+    against a file that passed 48/48 on its own.
+
+    The tmux sessions get their own directory the same way; a pane cannot see
+    this one, because it inherits the tmux server's environment.
+    """
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path_factory.mktemp('xdg')))
+
 
 @pytest.fixture(autouse=True)
 def check_integration_deps_for_tmux_tests(request):

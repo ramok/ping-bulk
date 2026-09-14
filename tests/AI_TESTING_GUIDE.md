@@ -52,13 +52,40 @@ Since the test suite interacts with an actual `tmux` session, running tests in p
    Specify worker count explicitly with `-n 4` if needed.
 
 ### Handling Hanging Tests
-If tests fail or are interrupted abruptly, orphaned `tmux` sessions might be left running in the background. This can cause subsequent test runs to fail or consume system resources.
-- **Detect Orphaned Sessions**: Run `tmux ls` to list active sessions.
-- **Cleanup**: To kill all `ping-bulk` test sessions, run:
+If tests fail or are interrupted abruptly, orphaned `tmux` sessions might be
+left behind.  They cannot reach your own sessions, and the next run clears
+them, but here is where they live:
+
+- **The suite runs on its own tmux server.** Every session is created on a
+  private socket, `tmux -L ping-bulk-test`, so the tests cannot see, resize or
+  kill the sessions you are working in — and you cannot accidentally sweep
+  theirs away with yours. To look at what the tests are doing, name the socket:
+
   ```bash
-  tmux kill-server
+  tmux -L ping-bulk-test ls
+  tmux -L ping-bulk-test attach -t <session>
   ```
-  *(Note: This will terminate all tmux sessions for the current user. Use `tmux kill-session -t <session_name>` to selectively kill test sessions if you have other important tmux work running.)*
+
+- **Cleanup is automatic and checked.** `pytest_sessionstart` kills anything
+  left on that socket by an earlier run, and `pytest_sessionfinish` kills what
+  this run leaked and *reports the count*, so a leak is visible instead of
+  silent. The server exits by itself once its last session is gone.
+
+- **To clean up by hand**, kill sessions on that socket individually:
+
+  ```bash
+  tmux -L ping-bulk-test ls -F '#{session_name}' | xargs -r -n1 tmux -L ping-bulk-test kill-session -t
+  ```
+
+> **Never run `tmux kill-server`** — not on your own server, and not on the
+> test socket either. This guide used to suggest it with a parenthetical
+> warning, and the warning did not work: it destroyed 50 live sessions on a
+> developer's machine, most of them unrelated long-running work, and tmux
+> sessions cannot be recovered. A rule with an exception is not a rule, so
+> there is no exception. Separately, 44 test sessions once leaked under the
+> name `pytest-rfold-*`, which no cleanup pattern matched — which is why
+> `TmuxSession` now forces the `ping-bulk-test-` prefix and registers every
+> session it creates for sweeping.
 
 ## Patterns & Best Practices for AI
 
