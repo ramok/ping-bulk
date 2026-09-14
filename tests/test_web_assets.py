@@ -12,6 +12,7 @@ the other client tests were substring checks against the constant.  None of
 them parsed it, so 153 web tests passed against a page that could not load.
 """
 
+import json
 import shutil
 import subprocess
 
@@ -66,3 +67,83 @@ class TestServedJavaScriptIsWellFormed:
             bad = [(n, ln) for n, ln in enumerate(text.split('\n'), 1)
                    if ln.count('"') % 2 and '<!--' not in ln]
             assert bad == [], '%s: %r' % (name, bad)
+
+
+class TestThePageKeepsOnePollChain:
+    """A click must not fork a second self-perpetuating poll.
+
+    ``poll()`` re-arms itself when it finishes, so anything that *also* called
+    it — a row button, a successful login — started a chain that never ended.
+    Measured against the real client under a virtual clock: 26 clicks left 27
+    live timers issuing 296 requests in 20 s, against a server that accepts 16
+    connections at once (``_WEB_MAX_CONNECTIONS``).  Clicking for a few minutes
+    locked the operator out of their own monitor.
+    """
+
+    HARNESS = r'''
+let now = 0, timers = [], nextId = 1, fetches = 0;
+const el = () => new Proxy(function(){}, {
+  get: (t, k) => (k === 'value' ? '' :
+                  k === 'classList' ? {add(){}, remove(){}, toggle(){}} :
+                  k === 'style' ? {} :
+                  typeof k === 'string' && k.startsWith('add') ? () => {} : el()),
+  set: () => true, apply: () => el(),
+});
+global.document = { getElementById: el, createElement: el, addEventListener(){}, body: el() };
+global.window = {
+  setTimeout(fn, ms) { const id = nextId++; timers.push({id, at: now + (ms||0), fn}); return id; },
+  clearTimeout(id) { timers = timers.filter(t => t.id !== id); },
+  addEventListener(){}, location: {href: ''},
+};
+global.setTimeout = global.window.setTimeout;
+global.clearTimeout = global.window.clearTimeout;
+global.fetch = () => { fetches++; return Promise.resolve({
+  ok: true, status: 200,
+  json: () => Promise.resolve({rows: [], down: [], events: [], time: 0,
+                               view: {cell_width: 1}, commands: 'safe', csrf: 'x'}),
+}); };
+const drain = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+const tick = async (ms) => {
+  const end = now + ms;
+  for (;;) {
+    const due = timers.filter(t => t.at <= end).sort((a,b) => a.at - b.at)[0];
+    if (!due) break;
+    timers = timers.filter(t => t !== due);
+    now = due.at; due.fn(); await drain();
+  }
+  now = end;
+};
+(async () => {
+  require(process.argv[2]);
+  await drain();
+  await tick(2000);
+  fetches = 0;
+  for (let i = 0; i < 26; i++) { global.act('uid' + i, 'pause'); await drain(); }
+  await tick(20000);
+  console.log(JSON.stringify({requests: fetches, timers: timers.length}));
+})();
+'''
+
+    @pytest.mark.skipif(shutil.which('node') is None,
+                        reason='node not installed; this check needs a JS engine')
+    def test_clicking_leaves_exactly_one_timer(self, pb, tmp_path):
+        app_js = tmp_path / 'app.js'
+        # act() is a top-level function; the harness needs a handle on it.
+        app_js.write_text(
+            _served_js(pb).replace('\nfunction act(', '\nglobal.act = function act('))
+        harness = tmp_path / 'harness.js'
+        harness.write_text(self.HARNESS)
+        r = subprocess.run(['node', str(harness), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        assert out['timers'] == 1, f"{out['timers']} poll chains after 26 clicks"
+        # 26 click-kicks + ~10 scheduled polls.  The old code issued 296.
+        assert out['requests'] < 60, out
+
+    def test_only_one_place_arms_the_timer(self, pb):
+        """Structural, so it still guards where node is unavailable."""
+        code = '\n'.join(line for line in _served_js(pb).split('\n')
+                         if not line.strip().startswith('//'))
+        assert code.count('setTimeout(poll') == 1
+        assert 'clearTimeout' in code
