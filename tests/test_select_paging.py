@@ -409,8 +409,7 @@ class TestOnARealTerminal:
         hosts.write_text(TWENTY)
         sess = TmuxSession(f'ping-bulk-test-{name}', width=120, height=height)
         try:
-            sess.send_literal(f'python3 {app_path} -f {hosts}')
-            sess.send_keys('Enter')
+            sess.run_shell(f'python3 {app_path} -f {hosts}')
             sess.wait_for('DNS:', timeout=10)
         except Exception:
             sess.kill()

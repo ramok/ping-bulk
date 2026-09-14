@@ -444,8 +444,7 @@ class TestHierarchicalTitlesUI:
         sess_name = f'pb-test-hier-{uuid.uuid4().hex[:8]}'
         sess = TmuxSession(sess_name, width=120, height=40)
         try:
-            sess.send_literal(f'python3 {app_path} -f {hosts_file}')
-            sess.send_keys('Enter')
+            sess.run_shell(f'python3 {app_path} -f {hosts_file}')
             sess.wait_for('DNS:', timeout=10)
         except Exception:
             sess.kill()

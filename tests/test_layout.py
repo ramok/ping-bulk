@@ -202,8 +202,7 @@ class TestLayoutRendering:
         hosts = tmp_path / 'many.hosts'
         hosts.write_text(self.HOSTS)
         sess = TmuxSession(f'ping-bulk-test-{name}', width=120, height=height)
-        sess.send_literal(f'python3 {app_path} -f {hosts}')
-        sess.send_keys('Enter')
+        sess.run_shell(f'python3 {app_path} -f {hosts}')
         sess.wait_for('DNS:', timeout=10)
         return sess
 
@@ -291,8 +290,7 @@ class TestFoldedListReleasesItsRows:
         hosts = tmp_path / 'folding.hosts'
         hosts.write_text(self.HOSTS)
         sess = TmuxSession(f'ping-bulk-test-{name}', width=120, height=height)
-        sess.send_literal(f'python3 {app_path} -f {hosts}')
-        sess.send_keys('Enter')
+        sess.run_shell(f'python3 {app_path} -f {hosts}')
         sess.wait_for('DNS:', timeout=10)
         return sess
 

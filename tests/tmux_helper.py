@@ -140,6 +140,36 @@ class TmuxSession:
         # with an error that looks like a bug in the code under test.
         self._cfgdir = tempfile.mkdtemp(prefix='pb-test-xdg-')
 
+        # The pane runs the developer's **interactive login shell**, and the
+        # tests type the command under test into it — so every session the
+        # suite starts appends a line to that developer's real shell history.
+        # Measured on 2026-09-14: 4559 of the 5008 lines in a developer's
+        # ~/.zsh_history were this suite, and with SAVEHIST=5000 each run
+        # evicted nearly all of their own.  Shell history does not come back.
+        #
+        # `ZDOTDIR` is the layer that works: zsh reads its rc files from there,
+        # so it never sees the developer's own `.zshrc` — only the empty one
+        # written below — and therefore never assigns `HISTFILE`, which it has
+        # no default for.  Nothing is written at all.  Setting `HISTFILE` alone
+        # is **not** enough, because an rc file that does get read assigns it
+        # unconditionally and beats the environment.
+        #
+        # `HISTFILE` is set anyway for bash, which does default it — but note
+        # that bash is only *partly* covered: `~/.bashrc` can reassign
+        # `HISTFILE` exactly as `~/.zshrc` does, and the leading space needs
+        # `HISTCONTROL=ignorespace`, which bash does not set by default.  A
+        # pane whose shell is bash is a known gap, not a covered case.
+        #
+        # **That empty `.zshrc` is not optional.**  A `ZDOTDIR` with no `.zshrc`
+        # in it makes Debian's zsh run `zsh-newuser-install`, an *interactive*
+        # first-run wizard that owns the terminal and swallows what is typed
+        # next — measured: the first command sent to the pane was consumed by
+        # its menu, so `start_app` would wait for a UI that never started.  An
+        # empty file is the wizard's own documented way out, and it assigns no
+        # `HISTFILE`, so the history still goes nowhere.
+        self._histfile = os.path.join(self._cfgdir, 'shell_history')
+        open(os.path.join(self._cfgdir, '.zshrc'), 'w').close()
+
         # Create a new detached session with the requested dimensions.
         subprocess.run(
             tmux_cmd(
@@ -149,6 +179,8 @@ class TmuxSession:
                 '-x', str(width),
                 '-y', str(height),
                 '-e', f'XDG_CONFIG_HOME={self._cfgdir}',
+                '-e', f'ZDOTDIR={self._cfgdir}',
+                '-e', f'HISTFILE={self._histfile}',
             ),
             check=True, env=_TMUX_ENV,
         )
@@ -281,11 +313,28 @@ class TmuxSession:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
 
+    def run_shell(self, cmd: str) -> None:
+        """Type *cmd* at the pane's shell prompt and press Enter.
+
+        **Every shell command typed into a pane goes through here**, and it is
+        prefixed with a space so `hist_ignore_space` keeps it out of the
+        developer's shell history.  That is the second of two layers — the
+        session already runs with `ZDOTDIR` pointed at a directory holding
+        nothing but an empty `.zshrc`, so no `HISTFILE` is assigned in the
+        first place — because the space depends on a shell option a developer
+        may not have set, and the `ZDOTDIR` trick is zsh-specific.  Neither one
+        failing on its own leaks.
+
+        Do **not** reach for :meth:`send_literal` to run a command: it is also
+        how app keystrokes are typed (``send_literal('zC')``), so it cannot
+        prepend anything of its own.
+        """
+        self.send_literal(' ' + cmd)
+        self.send_keys('Enter')
+
     def start_app(self, args: list[str]) -> None:
         """Start the ping-bulk application with the given arguments."""
-        import os
-        self.send_literal(f"python3 {os.path.abspath('ping-bulk')} {' '.join(args)}")
-        self.send_keys("Enter")
+        self.run_shell(f"python3 {os.path.abspath('ping-bulk')} {' '.join(args)}")
         # Wait for the app to initialize
         self.wait_for('DNS:', timeout=10)
 

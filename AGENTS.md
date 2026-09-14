@@ -78,6 +78,28 @@ The repository is structured to keep the core application as a single deployable
   - **Never `tmux kill-server` to clean up.** It ends every session the user
     has, not the test ones — not even on the private socket. `TmuxSession.kill()`
     kills by name and that is the only correct way.
+  - **The pane runs the developer's own interactive shell, so the suite must
+    not leave anything in its history.** Every session typed the command under
+    test at that shell's prompt: measured, **4559 of the 5008 lines** in a
+    developer's `~/.zsh_history` were this suite, and `SAVEHIST=5000` meant each
+    run evicted nearly all of their own commands — history that does not come
+    back. Two layers, because either alone has a way to fail. `ZDOTDIR` points
+    at the session's private temp directory, so zsh never reads the developer's
+    own `.zshrc` — only the empty one written there — and therefore never
+    assigns `HISTFILE`, which it has no default for; setting `HISTFILE` alone is
+    **not** enough, since an rc file that does get read assigns it
+    unconditionally and beats the environment. And `run_shell(cmd)` prefixes a
+    space, which `hist_ignore_space` drops, covering a shell the first layer
+    does not govern. **That empty `.zshrc` is not tidiness**: without one,
+    Debian's zsh runs the *interactive* `zsh-newuser-install` wizard, which took
+    over the terminal and swallowed the first command sent to the pane, so
+    `start_app` waited for a UI that never started. **A bash pane is a known
+    gap, not a covered case** — `~/.bashrc` can reassign `HISTFILE` just as
+    `~/.zshrc` does, and the space needs `HISTCONTROL=ignorespace`, which bash
+    does not set by default. Shell commands go through `run_shell`, never `send_literal` plus an
+    `Enter` — `send_literal` also types application keystrokes (`'zC'`) and so
+    cannot prepend anything of its own. `tests/test_shell_history_clean.py`
+    fails if a new test bypasses it.
   - **CRITICAL REQUIREMENT FOR AI AGENTS:** Before writing **any** new tests, you **MUST** read and fully understand `tests/AI_TESTING_GUIDE.md`. You **MUST** strictly follow the test templates provided in that guide to ensure consistency with the existing headless tmux testing infrastructure. Failure to do so will result in broken UI tests and test suite failures.
 - **Building Documentation**: Navigate to the `doc/` directory and run `make` (requires `docutils` installed via pip) to generate the updated man page and HTML documentation.
 - **Keeping `--help-example` in sync**: Whenever `doc/ping-bulk.rst` or `examples/ping-bulk.advance` is updated with new features or syntax, the `_EXAMPLE_HELP` constant in `ping-bulk` (printed by `--help-example`) **must also be updated** to reflect the same features. All three should stay consistent.

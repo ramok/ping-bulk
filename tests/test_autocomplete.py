@@ -787,8 +787,7 @@ class TestCommandLineScrolling:
         hosts = tmp_path / 'h.hosts'
         hosts.write_text('127.0.0.1\n')
         sess = TmuxSession(f'ping-bulk-test-{name}', width=width, height=16)
-        sess.send_literal(f'python3 {app_path} -f {hosts}')
-        sess.send_keys('Enter')
+        sess.run_shell(f'python3 {app_path} -f {hosts}')
         sess.wait_for('DNS:', timeout=10)
         return sess
 

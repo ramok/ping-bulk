@@ -284,10 +284,9 @@ def _make_app_session(name: str, app_path: str, width: int, height: int) -> Tmux
     """
     sess = TmuxSession(name, width=width, height=height)
     try:
-        # Send the command as a literal string so tmux does not interpret
-        # spaces or special characters as key names.
-        sess.send_literal(f'python3 {app_path} 127.0.0.1')
-        sess.send_keys('Enter')
+        # run_shell, not send_literal: it types the command literally *and*
+        # prefixes a space, so it stays out of the developer's shell history.
+        sess.run_shell(f'python3 {app_path} 127.0.0.1')
         # Wait until the menu bar appears — confirms curses has initialised.
         sess.wait_for('DNS:', timeout=10)
     except Exception:
@@ -354,8 +353,7 @@ def tmux_app_with_section(app_path: str, check_integration_deps, tmp_path):
     sess_name = f'ping-bulk-test-section'
     sess = TmuxSession(sess_name, width=120, height=40)
     try:
-        sess.send_literal(f'python3 {app_path} -f {config_file}')
-        sess.send_keys('Enter')
+        sess.run_shell(f'python3 {app_path} -f {config_file}')
         sess.wait_for('DNS:', timeout=10)
     except Exception:
         sess.kill()

@@ -15,6 +15,7 @@ A thin wrapper class around the `tmux` CLI used to orchestrate the test sessions
 - **Input Helpers:**
   - `send_keys(*keys)`: Used for special keys (e.g., `'Enter'`, `'Escape'`, `'Up'`, `'Down'`) or single printable characters.
   - `send_literal(text)`: Used to type multi-character strings cleanly, without tmux misinterpreting them as key names.
+  - `run_shell(cmd)`: Types a **shell** command at the pane's prompt and presses Enter. Use this for anything the shell runs — never `send_literal` — because it prefixes the command with a space so `hist_ignore_space` keeps it out of the developer's shell history. `start_app()` goes through it.
 - **Output Helpers:**
   - `capture_pane()`: Returns the visible terminal screen as a single string. Trailing whitespaces are preserved, keeping column assertions reliable.
   - `wait_for(text, timeout=5.0)`: Polls `capture_pane` until the `text` appears. This is heavily used to wait for UI state transitions (e.g., waiting for the menu bar to appear or a dialog to open).
@@ -87,6 +88,41 @@ them, but here is where they live:
 > `TmuxSession` now forces the `ping-bulk-test-` prefix and registers every
 > session it creates for sweeping.
 
+## The pane runs *your* shell, and it must not keep what the tests type
+
+A tmux pane starts the developer's own interactive login shell, and the tests
+type the command under test into it — so every session the suite starts
+appends a line to the real `~/.zsh_history`. Measured on 2026-09-14: **4559 of
+the 5008 lines** in a developer's history were this suite, one per session, and
+with `SAVEHIST=5000` each run evicted nearly all of their own commands. Their
+history reached back three days. Shell history does not come back.
+
+Two layers, because either alone has a way to fail:
+
+- **`ZDOTDIR` points at the session's private temp directory**, so zsh never
+  reads the developer's own `.zshrc` — only the empty one written there — and
+  therefore never assigns `HISTFILE`, which it has no default for. Nothing is
+  written at all. Setting `HISTFILE` *alone* is not enough: an rc file that
+  does get read assigns it unconditionally and beats the environment.
+- **`run_shell(cmd)` prefixes a space**, which `hist_ignore_space` drops. This
+  covers a shell whose rc files the first layer does not govern.
+
+**That empty `.zshrc` is not tidiness.** A `ZDOTDIR` with no `.zshrc` makes
+Debian's zsh run `zsh-newuser-install`, an *interactive* first-run wizard that
+takes over the terminal: measured, it swallowed the first command sent to the
+pane, so `start_app` waited for a UI that never started. An empty file is the
+wizard's own documented way out and assigns no `HISTFILE`.
+
+**A bash pane is a known gap, not a covered case.** `HISTFILE` is set on the
+session for bash, which does default it — but `~/.bashrc` can reassign it
+exactly as `~/.zshrc` does, and the leading space needs
+`HISTCONTROL=ignorespace`, which bash does not set by default.
+
+So: **run shell commands with `run_shell`, never `send_literal` plus `Enter`.**
+`send_literal` cannot prepend anything of its own — it is also how app
+keystrokes are typed (`send_literal('zC')`). `tests/test_shell_history_clean.py`
+fails if a new test bypasses `run_shell`.
+
 ## Patterns & Best Practices for AI
 
 1. **Wait for State Changes:** Always use `sess.wait_for(text)` after sending an input that triggers a UI transition. Do not rely on hardcoded `time.sleep()`, as UI rendering speeds vary.
@@ -94,6 +130,7 @@ them, but here is where they live:
 3. **Typing Literals vs Keys:**
    - To send a command string like "10.0.0.1", use `sess.send_literal("10.0.0.1")`.
    - To press Enter or Escape, use `sess.send_keys("Enter")` or `sess.send_keys("Escape")`.
+   - **To run a shell command, use `sess.run_shell(cmd)`** — not `send_literal` plus an `Enter`. The pane runs the developer's own interactive shell, so a command typed into it lands in their real history; `run_shell` prefixes a space and `test_shell_history_clean.py` fails if a new test bypasses it.
 4. **Scoping:** Remember that UI tests are inherently slower. Use them strategically. For testing internal data parsing or isolated logic, consider unit tests that mock or invoke functions directly rather than driving the full UI.
 5. **No Network Dependency:** To prevent flaky tests, ensure network-dependent features (like `ping` or `ssh`) are mocked or directed to `127.0.0.1` (localhost is reliably reachable).
 

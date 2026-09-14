@@ -35,8 +35,7 @@ class TestTheDrawSurvives:
         hosts = tmp_path / 'wide.hosts'
         hosts.write_text(content)
         sess = TmuxSession(f'ping-bulk-test-{name}', width=width, height=height)
-        sess.send_literal(f'python3 {app_path} -f {hosts}')
-        sess.send_keys('Enter')
+        sess.run_shell(f'python3 {app_path} -f {hosts}')
         return sess
 
     @pytest.mark.parametrize('width', [60, 80, 120])
@@ -78,8 +77,7 @@ class TestTheDrawSurvives:
         sess = TmuxSession(f'ping-bulk-test-example-{width}',
                            width=width, height=20)
         try:
-            sess.send_literal(f'python3 {app_path} -f {example}')
-            sess.send_keys('Enter')
+            sess.run_shell(f'python3 {app_path} -f {example}')
             sess.wait_for('DNS:', timeout=15)
             assert 'error' not in sess.capture_pane().lower()
         finally:

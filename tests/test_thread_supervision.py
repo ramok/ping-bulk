@@ -303,8 +303,7 @@ class TestTheProcessNamesItself:
         hosts.write_text('127.0.0.1\n')
         sess = TmuxSession('ping-bulk-test-procname', width=100, height=12)
         try:
-            sess.send_literal(f'python3 {app_path} -f {hosts}')
-            sess.send_keys('Enter')
+            sess.run_shell(f'python3 {app_path} -f {hosts}')
             sess.wait_for('DNS:', timeout=10)
             pids = subprocess.run(['pgrep', '-f', str(hosts)],
                                   capture_output=True, text=True).stdout.split()

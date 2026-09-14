@@ -289,8 +289,7 @@ class TestDetailsConnectLine:
         f.write_text(hosts)
         sess = TmuxSession(f'{name}-{uuid.uuid4().hex[:8]}',
                            width=120, height=40)
-        sess.send_literal(f'python3 {app_path} -f {f}')
-        sess.send_keys('Enter')
+        sess.run_shell(f'python3 {app_path} -f {f}')
         sess.wait_for('DNS:', timeout=10)
         return sess
 

@@ -39,8 +39,7 @@ def two_host_app(app_path, check_integration_deps, tmp_path):
     sess_name = 'ping-bulk-test-nav-wrap'
     sess = TmuxSession(sess_name, width=120, height=40)
     try:
-        sess.send_literal(f'python3 {app_path} -f {config}')
-        sess.send_keys('Enter')
+        sess.run_shell(f'python3 {app_path} -f {config}')
         sess.wait_for('DNS:', timeout=10)
     except Exception:
         sess.kill()

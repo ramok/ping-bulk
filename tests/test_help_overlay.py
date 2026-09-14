@@ -474,8 +474,7 @@ class TestHelpModeBindingsReachable:
         )
         sess = TmuxSession('ping-bulk-test-helprebind', width=120, height=40)
         try:
-            sess.send_literal(f'python3 {app_path} -f {hosts}')
-            sess.send_keys('Enter')
+            sess.run_shell(f'python3 {app_path} -f {hosts}')
             sess.wait_for('DNS:', timeout=10)
             sess.send_keys('?')                 # opens on Bindings (tab 5 of 6)
             sess.wait_for('[5:tabactive Bindings]'.replace(':tabactive', ''))

@@ -37,8 +37,7 @@ github.com
         session_name = f"pytest-rfold-{uuid.uuid4().hex[:8]}"
         self.sess = TmuxSession(session_name, width=120, height=40)
         cmd = f"{app_path} -f {hosts}"
-        self.sess.send_literal(cmd)
-        self.sess.send_keys("Enter")
+        self.sess.run_shell(cmd)
 
         # Wait for UI ready
         self.sess.wait_for("DNS:", timeout=10)
@@ -216,8 +215,7 @@ host1
         session_name = f"pytest-rfold-space-{uuid.uuid4().hex[:8]}"
         self.sess = TmuxSession(session_name, width=120, height=30)
         cmd = f"{app_path} -f {hosts}"
-        self.sess.send_literal(cmd)
-        self.sess.send_keys("Enter")
+        self.sess.run_shell(cmd)
         self.sess.wait_for("DNS:", timeout=10)
         self.sess.wait_for("[-] A")
 
