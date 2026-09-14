@@ -6897,6 +6897,10 @@ _WEB_REFUSE_LOG_MAX = 5             # refusal events per client per window
 _WEB_REFUSE_CMD_CHARS = 200         # of the command text, in the report
 _WEB_PBKDF2_ROUNDS = 200_000
 _WEB_COOKIE = 'pb_session'
+# How long the one-shot sign-in link stays on the status bar.  Longer than
+# a ':set' report (3 s) because it is a URL with a 32-character credential
+# in it and the operator has to read it across to a browser.
+_WEB_LINK_SECONDS = 30.0
 
 
 def _web_constant_eq(a, b):
@@ -7180,10 +7184,34 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             # translates control characters and this override must too, or a
             # crafted request line reaches the event log and the log file with
             # its escapes intact.
-            app.add_event('web', (fmt % args).translate(self._control_char_table),
+            app.add_event('web',
+                          self._loggable(
+                              (fmt % args).translate(self._control_char_table)),
                           level=LEVEL_DEBUG)
         except Exception:
             pass
+
+    @staticmethod
+    def _loggable(text):
+        """Strip any query string, so a logged path cannot carry a credential.
+
+        The sign-in link is '/?t=<token>' and the token is only spent once the
+        request reaches the '/' branch — so a request refused earlier (403 from
+        the allow-list, 421 on the Host pin, 404) or one that raised still
+        carries a **live** token in its request line.  Logging that puts it
+        back in the event deque and in the log file, which is the whole of what
+        Phase A took it out of.
+
+        No query parameter this server understands is worth logging, so the
+        whole query goes rather than the one parameter that is known to be
+        dangerous today: a blocklist would need editing every time a parameter
+        is added, and would be edited late.
+        """
+        out = []
+        for token in text.split(' '):
+            path, sep, _query = token.partition('?')
+            out.append(path + ('?…' if sep else ''))
+        return ' '.join(out)
 
     def _send(self, status, body=b'', ctype='text/plain; charset=utf-8',
               extra=()):
@@ -7518,7 +7546,8 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             # traceback would be painted over.
             try:
                 self.server.app.add_event(
-                    'web', f'error: request {self.path!r} failed: '
+                    'web', f'error: request '
+                           f'{self._loggable(self.path)!r} failed: '
                            f'{type(exc).__name__}: {exc}', level=LEVEL_NORMAL)
             except Exception:
                 pass
@@ -8408,13 +8437,17 @@ class Application:
         message  — the event text.
         level    — explicit LEVEL_* constant; if None, inferred from category.
         to_file  — False keeps the event on screen only.  Used to report a
-                   failed *file* write, which cannot go through the file, and
-                   to keep a credential out of a file that outlives the run.
+                   failed *file* write, which cannot go through the file.
         to_screen — False writes the line to the log file without putting it in
                    the event deque.  The pair lets one event be reported two
-                   ways — the screen getting the sign-in link, the file getting
-                   the same line with the link removed — without either copy
-                   re-implementing this method's formatting.
+                   ways without either copy re-implementing this method's
+                   formatting.
+
+        **Neither flag hides anything from the web.**  'On screen' is the same
+        deque '/api/state' serves, and to_screen=False returns before the
+        append, so there is no combination that shows a line to the operator
+        and to nobody else.  A credential therefore does not belong in an
+        event at all — see _web_announce_link, which uses the status bar.
 
         Timestamp format: ISO 8601 with timezone offset (e.g. 2026-03-20T14:05:32+0200).
         """
@@ -13035,6 +13068,80 @@ class Application:
                          f"web: unknown argument '{verb}' — "
                          "choices: start stop status")
 
+    @staticmethod
+    def _status_line(status_msg, width):
+        """Pick the longest form of a status message that fits *width*.
+
+        Most messages are a single 'text' and this returns it unchanged — the
+        bar has always been free to slice those, because losing the tail of
+        "dns name+ip" costs nothing.  A message may instead supply 'alts',
+        progressively shorter forms tried in order, for the case where a slice
+        would be actively harmful: a sign-in link cut inside its token reads as
+        a whole one (see _web_announce_link).
+
+        Evaluated here rather than where the message is set, because this is
+        the only place the *drawn* width is known.  A message outlives several
+        frames and the terminal can be resized under it.
+        """
+        text = status_msg['text']
+        for alt in status_msg.get('alts', ()):
+            if len(text) < width:
+                break
+            text = alt
+        return text
+
+    def _web_announce_link(self, url, token):
+        """Show the one-shot sign-in link on the status bar, and nowhere else.
+
+        It must not go through ``add_event``, because on this program's own
+        terms "on screen" *is* "in the deque": ``to_screen=False`` returns
+        before ``self.events.append`` and ``to_file=False`` does not, so every
+        line the operator can see is also a line ``/api/state`` can serve.
+        That was an accepted risk while every reader of ``/api/state`` was
+        already authenticated — ``:set web-anonymous`` removes that
+        precondition, so the credential leaves the event log altogether.
+
+        The status bar is transient, which is the one cost.  It is paid back by
+        ``:web status``, which re-mints a spent token on demand — so the link
+        is always one command away, and nobody is pushed towards leaving one
+        live to avoid losing it.  There is no screen at all while a hosts file
+        is still loading, which is why the event that *is* logged names
+        ``:web status`` rather than leaving the operator to guess.
+
+        **A truncated credential must never be shown.**  The status bar is
+        drawn as ``msg.ljust(width - 1)[:width - 1]`` — a hard slice, no
+        ellipsis — and the token is 32 characters, so the full line runs from
+        about 70 columns for ``127.0.0.1:8765`` to 87 for a hostname bind and
+        more for an IPv6 literal.  On an 80-column console a hostname bind
+        would cut inside the token, and half a token looks exactly like a whole
+        one: the operator copies it, gets a 401, and nothing on screen says
+        why.  That is a worse failure than the disclosure this method exists to
+        remove.
+
+        So this hands the draw loop a **ladder** of forms, longest first, and
+        the draw picks the first that fits (``_status_line``).  Choosing here
+        instead would be choosing against a width that is not the one drawn:
+        the message lives for ``_WEB_LINK_SECONDS``, so a terminal narrowed in
+        between would slice a form picked for the old width — and a ``:web
+        start`` in a hosts file runs before the first frame, when there is no
+        width to consult at all.  The fallbacks lead with the credential, where
+        the slice cannot reach it; the last rung refuses rather than paint 29
+        of 32 characters.
+
+        The window is longer than the 3-4 s the bar's other messages use, which
+        in a kiosk deployment means a credential is on screen for 30 s in front
+        of the party §9d models as the attacker.  That is accepted: the console
+        user can type ``:web status`` whenever they like, so a shorter window
+        would cost the operator and not them.
+        """
+        self._status_msg = {
+            'text': f'web sign-in: {url}',
+            'alts': [f'web sign-in ?t={token}',
+                     token,
+                     f'web sign-in needs {len(token) + 1} cols; :web status'],
+            'expires': time.time() + _WEB_LINK_SECONDS,
+        }
+
     def _web_report(self):
         server = getattr(self, '_web_server', None)
         if server is None:
@@ -13047,9 +13154,8 @@ class Application:
             # a second browser has to stop and restart the listener, which is
             # what would push somebody towards leaving the token live.
             server.token = secrets.token_urlsafe(24)
-        parts = [f'web: listening on '
-                 f'{"https" if server.is_tls else "http"}://{host}:{port}/'
-                 f'?t={server.token}',
+        base = f'{"https" if server.is_tls else "http"}://{host}:{port}/'
+        parts = [f'web: listening on {base}',
                  f'{server.request_count} request(s)',
                  'password login' if server.password_hash else 'token only',
                  f'commands: {self.web_commands}']
@@ -13057,13 +13163,8 @@ class Application:
             parts.append(f'last client {server.last_client}')
         if self.web_allow:
             parts.append(f'allow {self.web_allow}')
-        self.add_event('web', '; '.join(parts), level=LEVEL_NORMAL,
-                       to_file=False)
-        parts[0] = (f'web: listening on '
-                    f'{"https" if server.is_tls else "http"}://{host}:{port}/'
-                    f' (sign-in link not logged)')
-        self.add_event('web', '; '.join(parts), level=LEVEL_NORMAL,
-                       to_screen=False)
+        self.add_event('web', '; '.join(parts), level=LEVEL_NORMAL)
+        self._web_announce_link(f'{base}?t={server.token}', server.token)
 
     def _web_start(self):
         """Bind the listener, or say exactly why not."""
@@ -13138,22 +13239,21 @@ class Application:
         scheme = 'https' if tls_context is not None else 'http'
         # The whole URL, token and all: nothing to configure for the common
         # case, and the token then leaves the address bar on first use.
-        # Two lines, deliberately.  A log file records every level (§12), so
-        # anything written there outlives the run and is readable by whoever
-        # can read the file — which is the local user that ':set
-        # web-password-file' refuses a group-readable file to keep out.  The
-        # token therefore goes to the screen only, and the file gets the same
-        # line with the credential removed.
+        # One line, and it carries no credential.  A log file records every
+        # level (§12), so anything written there outlives the run and is
+        # readable by the local user that ':set web-password-file' refuses a
+        # group-readable file to keep out — but the event log is not the only
+        # reader any more.  '/api/state' serves the same deque, and ':set
+        # web-anonymous' lets it serve an unauthenticated one, so the link goes
+        # to the status bar (_web_announce_link) and the event names the
+        # command that re-shows it.
+        base = f'{scheme}://{bound_host}:{bound_port}/'
         self.add_event('web',
-                       f'web: listening on {scheme}://{bound_host}:'
-                       f'{bound_port}/?t={server.token} '
-                       f'(commands: {self.web_commands})',
-                       level=LEVEL_NORMAL, to_file=False)
-        self.add_event('web',
-                       f'web: listening on {scheme}://{bound_host}:'
-                       f'{bound_port}/ (commands: {self.web_commands}; '
-                       f'sign-in link not logged)',
-                       level=LEVEL_NORMAL, to_screen=False)
+                       f'web: listening on {base} '
+                       f'(commands: {self.web_commands}; '
+                       f'sign-in link: ":web status")',
+                       level=LEVEL_NORMAL)
+        self._web_announce_link(f'{base}?t={server.token}', server.token)
         if password_hash is not None:
             self.add_event('web', 'web: password login is also enabled',
                            level=LEVEL_INFO)
@@ -18354,7 +18454,7 @@ class Application:
                     curses.curs_set(1)
                 else:
                     if self._status_msg and time.time() < self._status_msg['expires']:
-                        msg = self._status_msg['text']
+                        msg = self._status_line(self._status_msg, width)
                         try:
                             stdscr.addstr(height - 1, 0,
                                           msg.ljust(width - 1)[:width - 1],

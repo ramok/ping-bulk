@@ -703,14 +703,41 @@ screen into a replayable bearer token good for the whole run, minting sessions
 without limit; the 5-per-minute gate covers `/api/login` only, so replaying it
 also evicted the operator's own session once 64 were held. `:web status`
 mints a fresh link when the last was spent, so wanting a second browser does
-not push anyone towards leaving it live. The start line is reported twice —
-`to_file=False` with the link for the screen, `to_screen=False` without it for
-the file — because a log file outlives the run and is readable by exactly the
-local user that `:set web-password-file` refuses a group-readable file to keep
-out. The token does still reach `self.events`, so an authenticated session can
-read it from `/api/state`'s event tail; that is not a new exposure, since such
-a session already has everything the token would buy. This is the loopback case: nothing to configure, and
-the operator already had to get onto the machine to start it.
+not push anyone towards leaving it live.
+
+**The link goes to the status bar, and into no event at all.** It used to be
+reported twice — `to_file=False` with the link for the screen, `to_screen=False`
+without it for the file — and the token therefore reached `self.events`. That
+was accepted on a stated precondition: *"an authenticated session can read it
+from `/api/state`'s event tail; that is not a new exposure, since such a session
+already has everything the token would buy."* An anonymous read tier removes
+that precondition, so the risk had to be closed before the tier landed. The
+mechanism leaves no third option: `to_screen=False` returns *before*
+`self.events.append`, so "on screen" **is** "in the deque" and no combination of
+flags shows a line to the operator and to nobody else. `_web_announce_link`
+therefore uses `_status_msg`, and the logged line carries the address without
+the token plus the words `:web status`.
+
+Two consequences worth keeping. **The status bar truncates, and half a token
+looks exactly like a whole one** — it is drawn as
+`msg.ljust(width - 1)[:width - 1]`, a hard slice with no ellipsis, and a
+32-character token makes the full line 70 columns for `127.0.0.1:8765`, 87 for
+a hostname bind and more for an IPv6 literal. On an 80-column console a
+hostname bind cut *inside* the credential: the operator copies it, gets a 401,
+and nothing says why — a worse failure than the disclosure being removed. So
+the full form is used only when it demonstrably fits, the fallback leads with
+the token where the slice cannot reach it, and below the width of the token
+itself the bar says so instead of painting 29 of its 32 characters. **And there
+is no screen while a hosts file is still loading**, which is why the logged
+line names `:web status` rather than leaving the operator to guess.
+
+**The link got its own expiry**, `_WEB_LINK_SECONDS` (30 s), because the status
+bar's existing values are 3 s for a `:set` report and 4 s for a refusal — long
+enough to read a word, not long enough to transcribe a URL with a 32-character
+credential in it into another machine's browser. That is also why `:web status`
+re-minting stays: a transient channel is only acceptable while the thing it
+carries can be asked for again, and re-minting is what stops anyone leaving a
+token live so as not to lose it.
 
 **A password file.** `:set web-password-file <path>`, holding either a plain
 password or a `pbkdf2_sha256$rounds$salt$hash` verifier. Refused if it is

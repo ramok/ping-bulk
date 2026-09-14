@@ -320,8 +320,22 @@ class TestTheAuthGate:
             app._web_stop(quiet=True)
 
     def test_the_start_message_is_a_usable_url(self, served):
+        """On the status bar — deliberately not in the event log.
+
+        /api/state serves the event deque, and ':set web-anonymous' lets an
+        unauthenticated client read it, so a credential in an event is a
+        credential on the network.
+        """
         app, _s = served
-        assert f'?t={app._web_server.token}' in _events(app)
+        token = app._web_server.token
+        assert f'?t={token}' in app._status_msg['text']
+        assert token not in _events(app)
+
+    def test_the_start_event_says_how_to_get_the_link_back(self, served):
+        """There is no screen while a hosts file loads, so the line that *is*
+        logged has to name the command that re-shows the link."""
+        app, _s = served
+        assert ':web status' in _events(app)
 
 
 # ===========================================================================

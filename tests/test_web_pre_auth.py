@@ -306,8 +306,103 @@ class TestTheSignInLinkIsSpentAndNotWrittenDown:
         assert _raw(port, '/?t=' + fresh)[0] == 303
         assert fresh not in open(logf, encoding='utf-8').read()
 
-    def test_the_screen_shows_the_link_the_file_does_not(self, served):
+    def test_the_link_is_on_the_status_bar_and_in_no_event(self, served):
+        """The event log is not a private channel any more.
+
+        ':set web-anonymous' lets an unauthenticated client read
+        '/api/state', which serves the same deque the screen draws from — and
+        add_event has no way to show a line without storing it
+        ('to_screen=False' returns before self.events.append).  So the
+        credential goes to the status bar instead, and neither the deque nor
+        the file ever holds it.
+        """
         app, _, logf = served
+        token = app._web_server.token
         onscreen = ' | '.join(e.text for e in app.events)
-        assert '/?t=' in onscreen
-        assert 'sign-in link not logged' in open(logf, encoding='utf-8').read()
+        assert '/?t=' not in onscreen and token not in onscreen
+        assert token not in open(logf, encoding='utf-8').read()
+        assert token in app._status_msg['text']
+        # and the logged line still says how to get it back
+        assert ':web status' in onscreen
+
+
+class TestARefusedRequestDoesNotLogItsToken:
+    """The token is spent only when a request reaches the '/' branch.
+
+    Anything refused earlier — 403 from the allow-list, 421 on the Host pin,
+    404 — still carries a *live* credential in its request line, and the
+    access log writes that line to the event deque and to the log file: the
+    two places the sign-in link was just taken out of.
+    """
+
+    def test_a_421_does_not_log_the_live_token(self, served):
+        app, port, logf = served
+        app.loglevel = 3                       # LEVEL_DEBUG, where the log exists
+        token = app._web_server.token
+        c = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+        c.request('GET', '/?t=' + token, headers={'Host': 'evil.example'})
+        assert c.getresponse().status == 421
+        c.close()
+        assert app._web_server.token == token, 'token should still be unspent'
+        events = ' | '.join(e.text for e in app.events)
+        assert token not in events
+        assert token not in open(logf, encoding='utf-8').read()
+
+    def test_the_path_is_still_logged_without_its_query(self, served):
+        """Stripping the query must not cost the access log its usefulness."""
+        app, port, _logf = served
+        app.loglevel = 3
+        _raw(port, '/api/state')
+        events = ' | '.join(e.text for e in app.events)
+        assert '/api/state' in events
+
+    def test_the_helper_keeps_the_path_and_drops_the_query(self, pb):
+        loggable = pb._WebHandler._loggable
+        assert loggable('/api/state') == '/api/state'
+        assert loggable('/?t=SECRET') == '/?…'
+        assert loggable('"GET /?t=SECRET HTTP/1.1" 421 -') == \
+            '"GET /?… HTTP/1.1" 421 -'
+
+
+class TestTheSignInLinkIsNeverCutInHalf:
+    """A token sliced by the status bar reads exactly like a whole one.
+
+    The bar draws `msg.ljust(width - 1)[:width - 1]` — a hard slice, no
+    ellipsis — so the operator copies a partial credential, gets a 401, and
+    nothing on screen says why.  That is worse than the disclosure the
+    status-bar route exists to remove, so the forms are a ladder and the draw
+    picks the longest that fits.
+    """
+
+    TOKEN = 'A' * 32
+
+    def _msg(self, app, host='kiosk-console.example.com:8088'):
+        app._web_announce_link(f'http://{host}/?t={self.TOKEN}', self.TOKEN)
+        return app._status_msg
+
+    def test_no_width_renders_a_partial_token(self, pb, tmp_path):
+        """Announced once, then drawn at every width — the terminal can be
+        resized under a message that lives for _WEB_LINK_SECONDS."""
+        app = _make_app(pb, tmp_path)
+        msg = self._msg(app)
+        partial = []
+        for width in range(10, 140):
+            drawn = pb.Application._status_line(msg, width).ljust(width - 1)[:width - 1]
+            if self.TOKEN not in drawn and 'A' * 8 in drawn:
+                partial.append(width)
+        assert partial == []
+
+    def test_the_widest_form_that_fits_is_used(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path)
+        msg = self._msg(app, host='127.0.0.1:8765')
+        assert pb.Application._status_line(msg, 200).startswith('web sign-in: http')
+        assert self.TOKEN in pb.Application._status_line(msg, 80)
+
+    def test_below_the_token_width_it_refuses_rather_than_cut(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path)
+        assert 'cols' in pb.Application._status_line(self._msg(app), 30)
+
+    def test_an_ordinary_message_is_returned_unchanged(self, pb):
+        """Most messages have no ladder and the bar may slice them freely."""
+        assert pb.Application._status_line({'text': 'dns name+ip'}, 80) == 'dns name+ip'
+        assert pb.Application._status_line({'text': 'dns name+ip'}, 5) == 'dns name+ip'

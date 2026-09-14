@@ -2048,14 +2048,21 @@ Web interface
     Each host row carries **pause/resume** and **quiet/alarm** buttons, and
     what they do is governed by ``:set web-commands``.
 
-    Starting it prints a URL with a one-time token in it::
+    Starting it puts a URL with a one-time token in it on the **status bar**::
 
-        web: listening on http://127.0.0.1:8765/?t=hT2s… (commands: safe)
+        web sign-in: http://127.0.0.1:8765/?t=hT2s…
 
     Open that and the token is exchanged for a session cookie and dropped
     from the address bar, so it stops living in history and in any
     ``Referer``.  The token is fresh on every start and is never written
     down; for a listener that has to outlive one run, set a password.
+
+    The status bar rather than the event log, because the event log is not
+    private: ``/api/state`` serves the same events, and ``:set web-anonymous``
+    lets an unauthenticated client read them.  The line that *is* logged names
+    the address without the token, and says ``:web status`` — which re-mints a
+    spent token, so the link is always one command away.  On a terminal too
+    narrow for the whole URL the token is shown on its own rather than cut.
 
     The page leads with what is down, then shows the host rows with their
     sections, stats columns and history strips, then the event log.  It polls
