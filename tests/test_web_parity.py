@@ -142,8 +142,10 @@ class TestTheServerDecidesTheColour:
         assert sections
         for r in sections:
             assert r['hist_class']
-            assert len(r['hist_class']) == \
-                len(r['history']) // state['view']['cell_width']
+            # The row's own width, not the view's.  Dividing by the view's
+            # width is what this test used to do, and it passed only because
+            # the default view happens to be one column wide.
+            assert len(r['hist_class']) == len(r['history']) // r['cell_width']
 
     def test_the_client_no_longer_classifies_characters_itself(self, pb):
         """The whole point: one implementation of the rule, next to the other."""
@@ -276,3 +278,174 @@ class TestConnectNamesTheHostThatWasAskedFor:
         app.highlighted_index = None
         for m in self._monitors(pb, app):
             assert app._details_data(m)['connect'] == app._connect_preview(m)
+
+
+# ===========================================================================
+# A folded section summarises hosts the viewer cannot see
+# ===========================================================================
+
+def _folded_section(pb, tmp_path, slots):
+    """An app with one folded section of len(slots[0]) hosts and known history.
+
+    *slots* is a list of per-slot tuples, one entry per host, using the raw
+    history encoding: a float is a reply, None is a lost probe, 'ERR' is a
+    process error.
+    """
+    import time
+    n = len(slots[0])
+    hosts = ''.join(f'10.0.0.{i + 1}\n' for i in range(n))
+    app = _app(pb, tmp_path, ':title Site\n' + hosts)
+    now = time.time()
+    monitors = [e for e in app.entries if isinstance(e, pb.Monitor)]
+    for host_i, m in enumerate(monitors):
+        m.history.clear()
+        m.history_times.clear()
+        for slot_i, per_host in enumerate(slots):
+            m.history.append(per_host[host_i])
+            m.history_times.append(now - (len(slots) - slot_i))
+    for label in [e for e in app.entries if isinstance(e, pb.SectionLabel)]:
+        label.folded = True
+    return app, monitors
+
+
+def _section_row(app, **kw):
+    state = app._web_state(**kw)
+    return next(r for r in state['rows'] if r['kind'] == 'section'), state
+
+
+class TestAPartlyLostSlotIsNotATotalLoss:
+    """``slot_ok_ratios`` is the whole reason a section strip differs from a
+    host strip, and the serializer threw it away.
+
+    The terminal paints an ``'X'`` **yellow** when more than half the hidden
+    hosts replied in that slot — the section is degraded, not down. Discarding
+    the ratios made every lost slot red, so a section two thirds of which was
+    answering read in the browser exactly like one that was entirely dead.
+    """
+
+    @pytest.fixture
+    def rows(self, pb, tmp_path):
+        # Appended oldest-first, but the strip puts the NEWEST sample on the
+        # left (AGENTS.md §8, Phase 22), so the last row here is cell 0.
+        #   cell 0 <- two of three replied -> 0.67, mostly fine -> yellow
+        #   cell 1 <- one of three replied -> 0.33, a real outage -> red
+        app, _ = _folded_section(pb, tmp_path, [
+            (12.0, None, None),
+            (12.0, 12.0, None),
+        ])
+        return _section_row(app, history_len=10)
+
+    def test_both_slots_are_a_lost_probe(self, rows):
+        """Otherwise the test below is comparing two different glyphs."""
+        row, _ = rows
+        assert row['history'][:2] == 'XX'
+
+    def test_the_two_slots_do_not_get_the_same_colour(self, rows):
+        """The discriminating assertion: identical glyphs, different readings.
+
+        If ``slot_ok_ratios`` is ever dropped again — or stubbed to a constant —
+        both cells collapse to one class and this fails.  An assertion that
+        merely compared ``hist_class`` against ``_section_cell_classes`` could
+        not: it would be comparing the function with itself.
+        """
+        row, _ = rows
+        assert row['hist_class'][0] != row['hist_class'][1]
+
+    def test_the_mostly_ok_slot_is_the_yellow_one(self, rows):
+        row, _ = rows
+        assert row['hist_class'][0] == 'g-partial'   # newest: 2 of 3 replied
+        assert row['hist_class'][1] == 'g-bad'       # older:  1 of 3 replied
+
+
+class TestASectionStripIsOneCellPerSlot:
+    """A section strip is built at ``cell_width=1`` whatever the view shows.
+
+    ``_web_state`` handed it the *view's* width, so under ':set ping-view rtt'
+    a ten-slot strip was cut into four cells while the host rows beside it drew
+    ten — the folded section was out of step with the rows it summarises, which
+    is a misalignment rather than a wrong colour.
+    """
+
+    @pytest.fixture
+    def app(self, pb, tmp_path):
+        app, _ = _folded_section(pb, tmp_path, [(12.0, None)] * 4)
+        return app
+
+    def test_the_row_declares_its_own_width(self, app, pb):
+        row, _ = _section_row(app, history_len=10)
+        assert row['cell_width'] == pb.Application.SECTION_STRIP_CELL_WIDTH == 1
+
+    def test_one_class_per_character_even_in_a_wide_view(self, app, pb):
+        app.history_mode = pb.HISTORY_MODES.index('rtt')
+        row, state = _section_row(app, history_len=10)
+        assert state['view']['cell_width'] > 1, 'rtt should widen the view'
+        assert len(row['hist_class']) == len(row['history']) == 10
+
+    def test_host_rows_still_follow_the_view(self, app, pb):
+        """The section is the exception; the fix must not flatten everything."""
+        for label in [e for e in app.entries if isinstance(e, pb.SectionLabel)]:
+            label.folded = False        # a folded section hides its hosts
+        app.history_mode = pb.HISTORY_MODES.index('rtt')
+        state = app._web_state(history_len=10)
+        host = next(r for r in state['rows'] if r['kind'] == 'host')
+        assert host['cell_width'] == state['view']['cell_width'] > 1
+        assert len(host['hist_class']) == len(host['history']) // host['cell_width']
+
+
+class TestTheBadgeKeepsItsColours:
+    """``_web_state`` kept only the badge text, and the page's one ``.badge``
+    rule then painted every count dim — so "1 up, 2 down" arrived as grey and
+    grey, which is the single distinction a badge exists to make.
+    """
+
+    @pytest.fixture
+    def parts(self, pb, tmp_path):
+        app, monitors = _folded_section(pb, tmp_path, [(12.0, None, None)])
+        monitors[0].alive = True
+        monitors[1].alive = False
+        monitors[2].alive = False
+        return app, monitors
+
+    def test_a_count_carries_the_class_for_its_colour(self, parts):
+        app, _ = parts
+        row, _ = _section_row(app, history_len=10)
+        classes = {seg['text']: seg['class'] for seg in row['badge']}
+        assert classes.get('1↑') == 'b-up'
+        assert classes.get('2↓') == 'b-down'
+
+    def test_the_separator_is_left_classless(self, parts):
+        """Pair id 0.  With parallel arrays it is one off-by-one from
+        inheriting the colour of the count before it, which would read as a
+        third status."""
+        app, _ = parts
+        row, _ = _section_row(app, history_len=10)
+        assert [seg['class'] for seg in row['badge'] if seg['text'] == '/'] == ['']
+
+    def test_an_errored_member_bolds_the_count_the_terminal_bolds(self, parts):
+        """draw_hosts bolds pairs 2 and 3 when any member has an error: a host
+        that is down and a host whose ping process died are not the same
+        report.  b-err is a weight, so it composes rather than replacing."""
+        app, monitors = parts
+        row, _ = _section_row(app, history_len=10)
+        assert 'b-err' not in ' '.join(seg['class'] for seg in row['badge'])
+
+        monitors[1].error = 'ping: command not found'
+        row, _ = _section_row(app, history_len=10)
+        down = next(seg for seg in row['badge'] if seg['text'] == '2↓')
+        assert down['class'] == 'b-down b-err'
+
+    def test_the_client_renders_segments_rather_than_joining_them(self, pb):
+        """A structural guard: `.join(' ')` on the texts throws the classes
+        away again, and it is the obvious thing to write."""
+        js = pb._WEB_JS
+        assert 'badge.join' not in js, 'the badge is per-segment now'
+        assert 'function badge(' in js
+
+    def test_every_class_the_server_emits_is_styled(self, pb):
+        """A class with no CSS rule is an invisible regression: the cell simply
+        inherits, which looks like the bug this commit fixes."""
+        css = pb._WEB_CSS
+        emitted = set(pb.Application._BADGE_CLASSES.values()) | {
+            'b-err', 'g-partial', 'g-err'}
+        missing = sorted(c for c in emitted if f'.{c} ' not in css)
+        assert not missing, f'emitted but unstyled: {missing}'

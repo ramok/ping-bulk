@@ -1062,6 +1062,44 @@ of `draw_hosts`'s strip loop, and `_probe_strip_class` sits beside
 `_probe_strip_attr` under the same rule as `_stat_class`. `glyphClass` is gone,
 so there is one implementation of the rule rather than two that drift.
 
+**A folded section is not a host, and was serialized as though it were.**
+`_section_summary` returns three things and `_web_state` took two, dropping
+`slot_ok_ratios` — which is the *only* reason a section strip differs from a
+host strip. An `'X'` there summarises hosts the viewer cannot see, so the
+terminal paints it **yellow** when more than half of them replied: the section
+is degraded, not down. Measured on three hosts, two slots both drawing `'X'`
+with ratios `0.33` and `0.67`: the browser gave both `g-bad`, so a section two
+thirds of which was answering read exactly like one that was entirely dead.
+`_section_cell_classes` mirrors that loop, and `'?'` — a process error, which
+the terminal bolds apart from a plain lost probe — stops arriving as the same
+red too.
+
+**The badge lost every colour it had.** `'badge': [seg for seg, _pair in badge]`
+kept the text and discarded the pair id, and the page's single `.badge` rule
+then painted the lot dim, so "1 up, 2 down" reached the viewer as grey and grey
+— the one distinction a badge exists to make. Segments now carry a class each.
+The `'/'` separator is pair 0 and is deliberately left **classless**, so it
+cannot inherit the colour of the count before it; `b-err` is a *weight*, not a
+colour, because `has_error` composes with red and yellow in the terminal rather
+than replacing them.
+
+**A section strip is one character per slot, in every view.** It is built at
+`cell_width=1` because it is a worst-of summary rather than a reading, and
+`draw_hosts` draws it one cell per character — but `_web_state` handed it the
+*view's* width. Under `:set ping-view rtt` that cut a ten-slot strip into four
+cells while the host rows beside it drew ten, so the folded section was out of
+step with the rows it summarises. That is a misalignment, not a wrong colour,
+and it is the half of this bug that no amount of palette work would have found.
+`SECTION_STRIP_CELL_WIDTH` names the rule and **every row now carries its own
+`cell_width`**, so the client follows one rule per row instead of a global that
+was wrong for one kind of row.
+
+**The guard that catches the next one is the ratio boundary**, not a comparison
+against the function under test — `test_web_parity.py`'s own lesson (below).
+Two slots holding the same glyph and different ratios must get different
+classes; stubbing `slot_ok_ratios` to a constant makes that assertion fail,
+which was checked rather than assumed.
+
 **`connect` is resolved and expanded against the host that was asked for.**
 `_connect_preview(monitor)` passed its argument only to the relay wrapping; the
 `%h`/`%r`/`%j` substitution came from `_binding_context()`, which takes no

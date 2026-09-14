@@ -7756,7 +7756,7 @@ _WEB_CSS = """
 :root {
   --bg: #12141a; --fg: #d6dae2; --dim: #767d8c; --line: #262a34;
   --ok: #49b86b; --slow: #d3a43a; --bad: #d9534f; --vslow: #b06ec8;
-  --quiet: #5a6070;
+  --quiet: #5a6070; --paused: #3fa9bf;
 }
 * { box-sizing: border-box; }
 body {
@@ -7821,6 +7821,22 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .g-vslow { color: var(--vslow); }
 .g-quiet { color: var(--quiet); }
 .g-none { color: var(--line); }
+/* Folded sections only.  A lost slot where most of the hidden hosts still
+   replied is yellow, not red — the same colour as a late reply, but a
+   separate name because it is a different reading. */
+.g-partial { color: var(--slow); }
+.g-err { color: var(--bad); font-weight: 800; }
+/* Badge segments.  The '/' separator carries no class and so keeps .badge's
+   dim, which is what the terminal gives it too. */
+.b-up { color: var(--ok); }
+.b-down { color: var(--bad); }
+.b-unknown { color: var(--slow); }
+.b-paused { color: var(--paused); }
+.b-quiet { color: var(--quiet); }
+/* A weight, not a colour: it composes with b-down and b-unknown to say that
+   one of the hosts behind this count has a failed ping process, which is what
+   the terminal's bold means there. */
+.b-err { font-weight: 800; }
 #filter { width: 100%; margin-bottom: 6px; font: inherit; padding: 6px 10px;
           border-radius: 3px; border: 1px solid var(--line);
           background: #1b1e26; color: var(--fg); }
@@ -8062,9 +8078,23 @@ function sectionRow(r, cellWidth) {
   var el = document.createElement('div');
   el.className = 'row section lvl' + r.level;
   el.appendChild(span(r.title, 'name'));
-  el.appendChild(span(r.badge.join(' '), 'badge'));
+  el.appendChild(badge(r.badge));
   el.appendChild(strip(r.history, r.hist_class, cellWidth));
   return el;
+}
+
+// One span per badge segment, so each count keeps the colour the terminal
+// gives it.  The segments already carry their own '/' separators, and they are
+// concatenated rather than joined with anything, because a separator is a
+// segment in its own right -- joining would put a space around it and make the
+// browser read "1up / 2down" where the terminal reads "1up/2down".
+function badge(segments) {
+  var box = document.createElement('span');
+  box.className = 'badge';
+  segments.forEach(function (seg) {
+    box.appendChild(span(seg.text, seg['class']));
+  });
+  return box;
 }
 
 function render(state) {
@@ -8096,9 +8126,12 @@ function render(state) {
     return r.kind === 'host' && r.name.toLowerCase().indexOf(needle) !== -1;
   });
   rowsEl.replaceChildren.apply(rowsEl, shown.map(function (r) {
-    return r.kind === 'section'
-      ? sectionRow(r, state.view.cell_width)
-      : hostRow(r, state.view.cell_width);
+    // The width the row itself declares, not the view-wide one: a section
+    // strip is one character per slot whatever ping-view is showing, and
+    // slicing it by the wider figure drew four blobs against ten cells on the
+    // rows below.
+    var w = r.cell_width || state.view.cell_width;
+    return r.kind === 'section' ? sectionRow(r, w) : hostRow(r, w);
   }));
 
   eventsEl.replaceChildren.apply(eventsEl, state.events.slice(-120).map(
@@ -11114,6 +11147,19 @@ class Application:
         """
         return max(chars, key=_hist_char_rank, default=' ')
 
+    # A section strip is one character per time slot, always.  _section_summary
+    # builds it with cell_width=1 because it is a worst-of summary of the hidden
+    # hosts and not a reading, and draw_hosts draws it one cell per character.
+    #
+    # Named rather than written as a bare 1 at the call site, because the
+    # serializer, the row it emits and the client all have to agree on it —
+    # and because handing the *view's* cell width to a section strip is exactly
+    # the bug this constant exists to stop.  Measured under ':set ping-view
+    # rtt': a 10-slot section strip was sliced into 4 cells while the host rows
+    # beside it drew 10, so a folded section was visibly out of step with the
+    # rows it summarises, not merely miscoloured.
+    SECTION_STRIP_CELL_WIDTH = 1
+
     def _section_summary(self, monitors, length, offset, sync=False, end_time=None,
                          history_monitors=None):
         """Compute ``(badge_parts, history_str, slot_ok_ratios)`` for monitors.
@@ -12499,6 +12545,76 @@ class Application:
                 classes.append('g-none')
         return classes
 
+    def _section_cell_classes(self, history, slot_ok_ratios):
+        """One class per cell of a **folded section's** strip.
+
+        The twin of the section branch of ``draw_hosts``' strip loop, and it
+        lives here rather than there for the reason ``_stat_class`` lives beside
+        ``_stat_attr``: the rule needs one implementation, and a curses
+        attribute cannot be handed to a browser.
+
+        ``_history_cell_classes`` cannot do this job, which is why serializing
+        the section strip through it was wrong.  A section cell summarises the
+        hidden hosts rather than describing one of them, so an ``'X'`` means
+        "every one of them lost this probe" only when ``slot_ok_ratios`` says
+        so — the terminal paints it **yellow** when most of them replied.  The
+        serializer discarded the ratios, so a section two thirds of whose hosts
+        were fine read as solid red in the browser.
+
+        ``'?'`` is a process error, which the terminal already separates from a
+        plain lost probe by bolding it.  Both arrived as ``g-bad`` before.
+        """
+        classes = []
+        for ci, char in enumerate(history):
+            if char == 'X':
+                # A majority of the hidden hosts replied in this slot, so the
+                # loss is partial and the terminal says so in yellow.  Missing
+                # ratios rank as "none replied": the pessimistic reading is the
+                # safe one for a strip that exists to show trouble.
+                ok = slot_ok_ratios[ci] if ci < len(slot_ok_ratios) else 0.0
+                classes.append('g-partial' if ok > 0.5 else 'g-bad')
+            elif char == '?':
+                classes.append('g-err')
+            elif char == 'x':
+                classes.append('g-late')
+            elif char == '.':
+                classes.append('g-ok')
+            elif char in '_o':
+                classes.append('g-quiet')
+            else:
+                classes.append('g-none')
+        return classes
+
+    # Badge colour pairs, as _section_summary hands them out, mapped to the
+    # class names the page styles.  -1 is "dim", which the terminal resolves
+    # against the palette it actually has; the browser always has it.
+    _BADGE_CLASSES = {1: 'b-up', 2: 'b-down', 3: 'b-unknown',
+                      6: 'b-paused', -1: 'b-quiet'}
+
+    def _badge_segments(self, badge_parts, has_error):
+        """``[{'text', 'class'}]`` for a section badge — the twin of the badge
+        loop in ``draw_hosts``.
+
+        ``_web_state`` kept only the text, so every count reached the page as a
+        bare string and its single ``.badge`` rule painted the lot dim: a
+        section reading "1 up, 2 down" showed the terminal's green and its red
+        as identical grey, which is the one thing a badge exists to distinguish.
+
+        The ``'/'`` separator carries pair id 0 and is deliberately left
+        classless, so it cannot inherit the colour of the count before it.
+        ``has_error`` bolds red and yellow exactly as the terminal does — that
+        is the difference between a host that is down and a host whose ping
+        process failed — and it composes, so ``b-err`` is a weight rather than
+        a colour of its own.
+        """
+        segments = []
+        for text, pair_id in badge_parts:
+            cls = self._BADGE_CLASSES.get(pair_id, '')
+            if has_error and pair_id in (2, 3):
+                cls = f'{cls} b-err'.strip()
+            segments.append({'text': text, 'class': cls})
+        return segments
+
     def _probe_overlay_lines(self, monitor, inner_w):
         """Build the details-overlay block for every probe declared on *monitor*.
 
@@ -13689,19 +13805,26 @@ class Application:
             entry = entries[idx]
             if isinstance(entry, SectionLabel):
                 members = self._get_section_monitors(idx)
-                badge, hist, _ = self._section_summary(
+                badge, hist, slot_ok_ratios = self._section_summary(
                     members, history_len, self.history_offset,
                     sync=sync, end_time=render_time)
+                # draw_hosts computes this at its own draw site and bolds the
+                # red and yellow counts with it; the badge cannot carry it,
+                # since it describes the section rather than one segment.
+                has_error = any(m.error is not None for m in members)
                 rows.append({
                     'kind': 'section',
                     'uid': entry.uid,
                     'title': entry.title,
                     'level': entry.level,
                     'folded': bool(entry.folded),
-                    'badge': [seg for seg, _pair in badge],
+                    'badge': self._badge_segments(badge, has_error),
                     'history': hist,
-                    'hist_class': self._history_cell_classes(
-                        hist, cell_width, view_probe, mode),
+                    # Its own width, not the view's: see
+                    # SECTION_STRIP_CELL_WIDTH.
+                    'cell_width': self.SECTION_STRIP_CELL_WIDTH,
+                    'hist_class': self._section_cell_classes(
+                        hist, slot_ok_ratios),
                 })
                 continue
             if not isinstance(entry, Monitor):
@@ -13743,6 +13866,10 @@ class Application:
                         history_len, self.history_offset, mode, cell_width,
                         sync=sync, end_time=render_time)),
             }
+            # Each row carries the width its own strip is drawn at, so the
+            # client has one rule to follow instead of a global that is wrong
+            # for section rows.
+            row['cell_width'] = cell_width
             row['hist_class'] = self._history_cell_classes(
                 row['history'], cell_width, view_probe, mode)
             rows.append(row)
