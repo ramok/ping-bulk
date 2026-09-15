@@ -2078,6 +2078,15 @@ Web interface
     moves nobody else's screen, which matters when two people are looking at
     once.
 
+    The buttons beside the summary work the same way.  ``light``/``dark``
+    switches the palette, and the two panel buttons hide the *down* list and
+    the event log.  All of it is this browser's, kept in ``localStorage``, and
+    none of it posts a command — so one viewer tidying their page leaves the
+    terminal and every other viewer exactly as they were.  Without a stored
+    choice the palette follows the system's, and a browser that refuses
+    storage — a private window, or one with site data blocked — simply starts
+    from the defaults each time rather than failing.
+
     Columns follow ``:set stats``, including ``:probe`` columns, and the
     strip follows ``:set ping-view``, including a probe series.  Every cell is
     coloured by the terminal's own verdict rather than by anything the page

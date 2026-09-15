@@ -7719,6 +7719,18 @@ _WEB_HTML = """<!DOCTYPE html>
 <header>
   <h1>ping-bulk</h1>
   <div id="summary" class="summary">connecting…</div>
+  <!-- Every control here changes this browser and nothing else.  None of them
+       posts a command: the terminal and any other viewer keep the view they
+       had, which is the whole point of putting them in the page rather than
+       reaching for ':set'. -->
+  <div id="view-bar" class="view-bar">
+    <button type="button" id="theme-toggle"
+            aria-label="switch to the light theme">light</button>
+    <button type="button" class="panel-toggle" data-panel="down"
+            aria-pressed="true">down</button>
+    <button type="button" class="panel-toggle" data-panel="events"
+            aria-pressed="true">events</button>
+  </div>
 </header>
 <section id="login-wrap" hidden>
   <h2>Sign in</h2>
@@ -7743,7 +7755,7 @@ _WEB_HTML = """<!DOCTYPE html>
   <h2>Details <button type="button" id="detail-close">close</button></h2>
   <pre id="detail" class="detail"></pre>
 </section>
-<section>
+<section id="events-wrap">
   <h2>Events</h2>
   <div id="events" class="events"></div>
 </section>
@@ -7753,10 +7765,30 @@ _WEB_HTML = """<!DOCTYPE html>
 """
 
 _WEB_CSS = """
+/* Dark is the base, so a page that never runs the theme script -- or runs it
+   before localStorage answers -- looks exactly as it always has.  Light is an
+   override keyed on a data-theme attribute, chosen in JS: doing it there
+   rather than in a prefers-color-scheme media query means the light values
+   are written once instead of twice, and two copies of a palette drift. */
 :root {
   --bg: #12141a; --fg: #d6dae2; --dim: #767d8c; --line: #262a34;
   --ok: #49b86b; --slow: #d3a43a; --bad: #d9534f; --vslow: #b06ec8;
   --quiet: #5a6070; --paused: #3fa9bf;
+  /* Surfaces.  These were literals until a light theme needed to override
+     them, and a literal cannot be overridden by a palette. */
+  --panel: #171a21;     /* a host row, and the details pane */
+  --panel-hi: #1e222b;  /* a host row under the pointer */
+  --field: #1b1e26;     /* inputs and buttons */
+  --down-bg: #1b1418;   /* the 'down now' list, tinted towards --bad */
+}
+[data-theme="light"] {
+  --bg: #f7f8fa; --fg: #1f2430; --dim: #5d6472; --line: #d5d9e0;
+  /* Darker than their dark-theme counterparts, not lighter: these are read
+     against a pale ground, so the contrast has to move the other way. */
+  --ok: #1f7a3d; --slow: #8a6300; --bad: #b3261e; --vslow: #7b3ba0;
+  --quiet: #767d8c; --paused: #10697d;
+  --panel: #ffffff; --panel-hi: #eef0f4;
+  --field: #ffffff; --down-bg: #fdf1f0;
 }
 * { box-sizing: border-box; }
 body {
@@ -7769,22 +7801,33 @@ h1 { margin: 0; font-size: 18px; font-weight: 600; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
      color: var(--dim); margin: 24px 0 8px; font-weight: 600; }
 .summary { color: var(--dim); font-size: 13px; }
+.view-bar { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.view-bar button {
+  font: inherit; font-size: 12px; padding: 2px 10px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 3px;
+  background: var(--field); color: var(--dim);
+}
+.view-bar button:hover { color: var(--fg); border-color: var(--dim); }
+/* Pressed is the state worth showing, and aria-pressed already carries it --
+   so the style hangs off the attribute rather than a second class that could
+   disagree with it. */
+.view-bar button[aria-pressed="true"] { color: var(--fg); }
 .summary.stale { color: var(--slow); }
 #login { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 #login input, #login button {
   font: inherit; padding: 6px 10px; border-radius: 3px;
-  border: 1px solid var(--line); background: #1b1e26; color: var(--fg);
+  border: 1px solid var(--line); background: var(--field); color: var(--fg);
 }
 #login button { cursor: pointer; border-color: var(--dim); }
 .login-error { color: var(--bad); font-size: 13px; }
 #down { margin: 0; padding: 0; list-style: none;
         border-left: 3px solid var(--bad); }
-#down li { padding: 6px 12px; background: #1b1418; margin-bottom: 2px; }
+#down li { padding: 6px 12px; background: var(--down-bg); margin-bottom: 2px; }
 #down .name { font-weight: 600; }
 #down .since { color: var(--dim); margin-left: 8px; font-size: 13px; }
 .rows { display: flex; flex-direction: column; gap: 1px; }
 .row { display: flex; align-items: center; gap: 12px;
-       padding: 5px 8px; background: #171a21; border-radius: 3px; }
+       padding: 5px 8px; background: var(--panel); border-radius: 3px; }
 .row.section { background: none; padding: 12px 0 2px; font-weight: 600; }
 .row.section .name { color: var(--dim); }
 /* Section nesting is not limited to three in the hosts file, so neither is
@@ -7809,7 +7852,7 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .acts button {
   font: inherit; font-size: 12px; padding: 2px 8px; cursor: pointer;
   border: 1px solid var(--line); border-radius: 3px;
-  background: #1b1e26; color: var(--dim);
+  background: var(--field); color: var(--dim);
 }
 .acts button:hover { color: var(--fg); border-color: var(--dim); }
 .acts button[disabled] { opacity: .4; cursor: default; }
@@ -7839,17 +7882,17 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .b-err { font-weight: 800; }
 #filter { width: 100%; margin-bottom: 6px; font: inherit; padding: 6px 10px;
           border-radius: 3px; border: 1px solid var(--line);
-          background: #1b1e26; color: var(--fg); }
+          background: var(--field); color: var(--fg); }
 .row.host { cursor: pointer; }
-.row.host:hover { background: #1e222b; }
+.row.host:hover { background: var(--panel-hi); }
 .row.sel { outline: 1px solid var(--dim); }
 #detail-close { font: inherit; font-size: 12px; margin-left: 8px;
                 padding: 1px 8px; cursor: pointer; border-radius: 3px;
-                border: 1px solid var(--line); background: #1b1e26;
+                border: 1px solid var(--line); background: var(--field);
                 color: var(--dim); }
 .detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 12px; white-space: pre-wrap; word-break: break-word;
-          background: #171a21; padding: 10px; border-radius: 3px; margin: 0; }
+          background: var(--panel); padding: 10px; border-radius: 3px; margin: 0; }
 .stats .warn b { color: var(--slow); }
 .stats .error b { color: var(--bad); }
 .stats .stale b { color: var(--quiet); }
@@ -7891,6 +7934,109 @@ var detailWrap = document.getElementById('detail-wrap');
 var detailEl = document.getElementById('detail');
 var selectedUid = '';
 var lastState = null;
+
+// -- per-viewer view state --------------------------------------------------
+// Everything below lives in this browser and is never sent anywhere.  The
+// terminal's ':set' values are shared by every viewer and the console, so a
+// person changing how they read the page would otherwise move somebody else's
+// screen -- the same reasoning that already keeps the filter client-side.
+var STORE = 'ping-bulk.view';
+
+// localStorage throws rather than returning null in a private window, and on
+// a page whose site data has been blocked.  A viewer preference is not worth
+// a dead page, so every read and write is guarded and failure just means the
+// defaults.
+function readPrefs() {
+  try {
+    return JSON.parse(window.localStorage.getItem(STORE) || '{}') || {};
+  } catch (e) { return {}; }
+}
+
+function writePrefs(p) {
+  try { window.localStorage.setItem(STORE, JSON.stringify(p)); } catch (e) {}
+}
+
+var prefs = readPrefs();
+
+function setPref(key, value) {
+  prefs[key] = value;
+  writePrefs(prefs);
+}
+
+// -- theme ------------------------------------------------------------------
+// The attribute, never a style string: the CSP is style-src 'self' with no
+// 'unsafe-inline', so an inline style would be dropped and the page would
+// silently keep the wrong palette.
+var themeBtn = document.getElementById('theme-toggle');
+
+function systemPrefersLight() {
+  try {
+    return window.matchMedia('(prefers-color-scheme: light)').matches;
+  } catch (e) { return false; }
+}
+
+function applyTheme(theme) {
+  var light = theme === 'light';
+  if (light) {
+    document.documentElement.setAttribute('data-theme', 'light');
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+  // The label is what the click will DO, not what is currently on.  So no
+  // aria-pressed: it would say "dark, pressed" while light is showing, which
+  // a screen reader renders as "dark is on" -- the opposite of the truth.
+  themeBtn.textContent = light ? 'dark' : 'light';
+  themeBtn.setAttribute('aria-label',
+                        light ? 'switch to the dark theme'
+                              : 'switch to the light theme');
+}
+
+// A stored choice wins; with none, follow the system.  Asking here rather than
+// in a media query keeps the light palette written once -- two copies of a
+// palette drift, and the one nobody is looking at drifts first.
+applyTheme(prefs.theme || (systemPrefersLight() ? 'light' : 'dark'));
+
+themeBtn.addEventListener('click', function () {
+  var next = document.documentElement.getAttribute('data-theme') === 'light'
+    ? 'dark' : 'light';
+  applyTheme(next);
+  setPref('theme', next);
+});
+
+// -- panels -----------------------------------------------------------------
+// 'down' is also hidden by render() when nothing is down, so the preference is
+// a ceiling rather than a switch: hiding it wins, showing it only permits.
+var panels = {
+  // render() owns this one, because it also hides the list when nothing is
+  // down -- so there is no element here to toggle, only a preference to read.
+  down: null,
+  events: document.getElementById('events-wrap')
+};
+
+function panelShown(name) { return prefs['panel.' + name] !== false; }
+
+function applyPanel(btn) {
+  var name = btn.getAttribute('data-panel');
+  var on = panelShown(name);
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  // A button naming a panel that does not exist must not take the page down.
+  // This runs at module scope, before poll(), so a TypeError here leaves no
+  // polling, no render and -- in password mode -- no way to log in, because
+  // the form is hidden in the HTML and only the script reveals it.
+  var el = panels[name];
+  if (el) { el.hidden = !on; }
+}
+
+Array.prototype.forEach.call(
+  document.querySelectorAll('.panel-toggle'), function (btn) {
+    applyPanel(btn);
+    btn.addEventListener('click', function () {
+      var name = btn.getAttribute('data-panel');
+      setPref('panel.' + name, !panelShown(name));
+      applyPanel(btn);
+      if (lastState) { render(lastState); }
+    });
+  });
 
 document.getElementById('detail-close').addEventListener('click', function () {
   selectedUid = '';
@@ -8079,7 +8225,15 @@ function sectionRow(r, cellWidth) {
   el.className = 'row section lvl' + r.level;
   el.appendChild(span(r.title, 'name'));
   el.appendChild(badge(r.badge));
-  el.appendChild(strip(r.history, r.hist_class, cellWidth));
+  // Only when folded, as the terminal does -- an open section's hosts are
+  // already drawing their own strips underneath, and summarising them again
+  // on the header put a second, coarser answer directly above the real one.
+  // (The terminal's condition also tests that the bar fits the screen; that
+  // half is a layout guard with no meaning here.)  The server sends the strip
+  // either way, which costs a few bytes and keeps the serializer simple.
+  if (r.folded) {
+    el.appendChild(strip(r.history, r.hist_class, cellWidth));
+  }
   return el;
 }
 
@@ -8110,7 +8264,8 @@ function render(state) {
     (state.down.length ? ' \\u2014 ' + state.down.length + ' down' : '') +
     ' \\u2014 ' + new Date(state.time * 1000).toLocaleTimeString();
 
-  downWrap.hidden = state.down.length === 0;
+  // Nothing down hides it regardless; the preference can only hide it further.
+  downWrap.hidden = state.down.length === 0 || !panelShown('down');
   downList.replaceChildren.apply(downList, state.down.map(function (d) {
     var li = document.createElement('li');
     li.appendChild(span(d.name, 'name'));

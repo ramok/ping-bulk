@@ -1148,6 +1148,36 @@ does for every cursor position including None.
 every other viewer's; one person searching should not drag anybody else's
 screen with them. A test asserts the client never posts `:filter`.
 
+**So is every other view choice**, for the same reason: the palette and which
+panels are shown live in `localStorage` under one key and reach no request.
+The rule is that anything describing *how this person reads the page* stays in
+the browser, and only things describing *what the fleet is doing* go to the
+server. `:set` is shared by every viewer and the console, so it is the wrong
+instrument for the first kind however convenient it looks.
+
+Three details that are not arbitrary. **Dark stays `:root` and light is an
+override** keyed on a `data-theme` attribute, so a page whose script never
+runs looks exactly as it always has. **The default is chosen in JS**, from
+`localStorage` first and `prefers-color-scheme` second — asking in a media
+query instead would mean writing the light palette twice, and the copy nobody
+is looking at is the one that drifts. **The attribute, never a style string**:
+the CSP is `style-src 'self'` with no `'unsafe-inline'`, so an inline style is
+dropped and the page would silently keep the wrong palette.
+
+Every read and write of `localStorage` is wrapped: it *throws* rather than
+returning null in a private window and where site data is blocked, and a
+viewer preference is not worth a dead page. A browser that refuses storage
+starts from the defaults each time, which is the correct degradation.
+
+**A section strip is drawn only when the section is folded**, as the terminal
+does — an open section's hosts are already drawing their own strips below, and
+summarising them again on the header put a second, coarser answer directly
+above the real one. Only the client gates: the serializer still emits
+`history` for an open section, which costs a few bytes and keeps one code path
+where there would otherwise be two. The terminal's condition also tests that
+the bar fits the screen, which is a layout guard with no meaning in a browser
+and is deliberately not mirrored.
+
 **Kiosk mode: declared, never typed.** `:web start` is refused at the console
 and allowed while `_loading_file` is set — the rule `:probe-source` already
 follows. Starting is audited. A port below 1024 is refused with the reason
