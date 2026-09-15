@@ -235,8 +235,15 @@ class TestTheSetting:
         assert last.level == pb.LEVEL_NORMAL, 'a refusal must be visible'
 
     def test_kiosk_refuses_it(self, pb, tmp_path):
-        """That mode's threat model is the console user; a reader who never
-        authenticates is further out again."""
+        """Typed at the console, that is — the hosts file may declare it.
+
+        The original reasoning here was "a reader who never authenticates is
+        further out than the console user", which is true and is not the
+        question: that mode's threat is the person at the *keyboard*, and the
+        hosts file is the operator's own declaration.  Refusing both refused
+        the deployment the setting exists for.  See
+        tests/test_kiosk_declared_not_typed.py for the other half.
+        """
         app = _make_app(pb, tmp_path, kiosk=True)
         app._dispatch_cmd(':set web-anonymous read-only')
         assert app.web_anonymous == 'off'

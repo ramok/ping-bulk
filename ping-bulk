@@ -497,7 +497,7 @@ SET_PARAMS = [
              'what the web interface may change (kiosk forces read-only)',
              getter=lambda app: app.web_commands),
     SetParam('web-anonymous', '_cmd_web_anonymous', list(_WEB_ANONYMOUS_MODES),
-             'whether a client with no session may read (kiosk forces off)',
+             'whether a client with no session may read (kiosk: file only)',
              getter=lambda app: app.web_anonymous),
     SetParam('web-password-file', '_cmd_web_password_file', '<path>|none',
              'file holding the web password (mode 600; plain or pbkdf2)',
@@ -1215,7 +1215,7 @@ _HELP_BINDINGS = [
     "  :set web-commands <mode>    read-only | safe — whether a browser may pause a",
     "                              host and quieten its alarm (kiosk forces read-only)",
     "  :set web-anonymous <mode>   off | read-only — may a client with no session read?",
-    "                              off by default; writes always need one (kiosk: off)",
+    "                              off by default; writes always need one (kiosk: file only)",
     "  :set web-password-file <f>  file with the web password (mode 600); needed off loopback",
     "  :set web-hosts <name>,...   extra 'Host:' names the web interface answers to",
     "  :set web-tls-cert <file>    serve HTTPS (:set web-tls-key too, if separate)",
@@ -8689,6 +8689,34 @@ class Application:
         self.threads = []
         self._start_time = None
 
+        # The hosts file is the trusted declaration; the keyboard is not.  Only
+        # this loop sets the flag — deliberately NOT the ':edit' reload below,
+        # which looks like the same thing and is not: ':edit' is *allowed* at
+        # the console under kiosk (it opens a restricted editor on this very
+        # file), so a reload replays a file the console user may have just
+        # written.  Startup replays the one the operator deployed.
+        # (':probe-source' is NOT one of these: it gates on
+        # '_monitoring_started', which the reload also clears.)
+        self._loading_file = True
+        try:
+            self._load_entries(entries)
+        finally:
+            self._loading_file = False
+
+        # Applied after the loop as well as inside ':no-alarm' / ':relay-os':
+        # a rule may be written after the hosts it names, and a ':for' body
+        # emits both.
+        self._apply_no_alarm()
+        self._apply_relay_os()
+
+    def _load_entries(self, entries):
+        """Walk the hosts file's entries in document order.
+
+        Split out of ``__init__`` so the ``_loading_file`` window is one
+        ``try``/``finally`` around exactly the directives the file declares,
+        rather than a flag set and cleared across seventy lines of unrelated
+        construction.
+        """
         for kind, *rest in entries:
             value = rest[0] if rest else ''
             if kind == 'host':
@@ -8734,12 +8762,6 @@ class Application:
                 self.add_event("hosts", f"warning: {value}")
             elif kind == 'error':
                 self.add_event("hosts", f"expansion error: {value}")
-
-        # Applied after the loop as well as inside ':no-alarm' / ':relay-os':
-        # a rule may be written after the hosts it names, and a ':for' body
-        # emits both.
-        self._apply_no_alarm()
-        self._apply_relay_os()
 
     @property
     def help_scroll(self):
@@ -9269,6 +9291,24 @@ class Application:
     autosave = False
     _config_on_disk = None
     _autosave_broken = False
+
+    # True only while __init__ walks the hosts file's own directives.  Kiosk
+    # mode models the person at the console as the attacker, so three commands
+    # may be *declared* by the trusted file and never *typed* at the keyboard:
+    # ':bind-key', ':web start' and ':set web-anonymous'.  Those are the only
+    # three readers — ':source' reads the flag nowhere, deliberately, and
+    # _cmd_source says why.
+    #
+    # It was read in three places (':source' then, not ':set web-anonymous')
+    # and assigned in none, so it was always
+    # False in production and the exemption did not exist: under '--kiosk' a
+    # hosts file's ':web start' was refused, and its ':bind-key' lines were
+    # dropped.  Nothing failed loudly, because a phantom attribute read through
+    # 'getattr(self, ..., False)' raises nothing, and the tests that covered the
+    # three exemptions set the flag by hand — proving a state production never
+    # reached.  The reads are plain attribute access now, and the tests that
+    # matter drive a real hosts file.
+    _loading_file = False
 
     def _add_entry(self, entry):
         """Append *entry* to self.entries and invalidate layout caches."""
@@ -10989,7 +11029,7 @@ class Application:
         Context flags (--%h/--%s/--%p/--%r/--%d/--%j/--%J) restrict to context
         (normal only).
         """
-        if self.kiosk_mode and not getattr(self, '_loading_file', False):
+        if self.kiosk_mode and not self._loading_file:
             self.add_event("cmd", "bind-key: blocked in kiosk mode")
             return
 
@@ -13648,8 +13688,10 @@ class Application:
             return
         # Kiosk mode models the person at the console as the attacker, so an
         # inbound socket may be declared by the trusted hosts file but never
-        # typed at the keyboard — the same rule ':probe-source' follows.
-        if self.kiosk_mode and not getattr(self, '_loading_file', False):
+        # typed at the keyboard.  (':probe-source' is often described as
+        # following this rule and does not: it gates on '_monitoring_started',
+        # which an ':edit' reload also clears.)
+        if self.kiosk_mode and not self._loading_file:
             self._refuse('cmd',
                            'web: not allowed interactively in kiosk mode — '
                            'declare ":web start" in the hosts file')
@@ -13887,9 +13929,13 @@ class Application:
         listener anyone may read and nobody may ever administer is not worth
         offering.
 
-        Refused in kiosk mode.  That mode's threat model is the person at the
-        console; a reader who never authenticates at all is strictly further
-        out than that, and the audit trail has nobody to name.
+        In kiosk mode it may be declared by the hosts file and never typed at
+        the console — the rule ':web start' already follows, and for the same
+        reason: that mode's threat model is the person at the keyboard, not the
+        operator who deployed the file.  Publishing the whole estate to anyone
+        who can reach the port is exactly the decision such a person must not
+        be able to make, and exactly the one the deployment may legitimately
+        want.  Switching it on there is audited, like the bind.
 
         What it publishes is worth stating plainly, because it cannot be
         narrowed afterwards by a setting: every host name, address and
@@ -13910,13 +13956,15 @@ class Application:
                          f"web-anonymous: unknown value '{value}' — "
                          f"choices: {' '.join(_WEB_ANONYMOUS_MODES)}")
             return
-        if value != 'off' and self.kiosk_mode:
+        if value != 'off' and self.kiosk_mode and not self._loading_file:
             self._refuse('cmd',
-                         'web-anonymous: kiosk mode allows off only — the '
-                         'console user is already the party that mode '
-                         'distrusts')
+                         'web-anonymous: not allowed interactively in kiosk '
+                         'mode — declare ":set web-anonymous read-only" in '
+                         'the hosts file')
             return
         self.web_anonymous = value
+        if value != 'off' and self.kiosk_mode:
+            self._kiosk_audit('web-anonymous', value)
         if self._monitoring_started:
             self.add_event('config', f'web-anonymous: {value}')
         if value != 'off' and self._web_running():
@@ -15136,7 +15184,16 @@ class Application:
 
         filename = _resolve_path(args.strip())
 
-        if self.kiosk_mode and not getattr(self, '_loading_file', False):
+        # Unconditional, deliberately — this is the one of the three where the
+        # unset flag was doing real work.  ':bind-key' and ':web start' were
+        # dead features while '_loading_file' was never assigned; here the
+        # always-False read meant the path guard *always ran*, and switching
+        # the flag on would have let a kiosk hosts file source any absolute
+        # path (and, through a nested ':source', reach ':web start' on the
+        # outer file's trust).  Nothing legitimate is lost: the hosts file's
+        # own directory is an allowed prefix, which is the "extra sources
+        # alongside the main file" case _kiosk_allow_path was written for.
+        if self.kiosk_mode:
             if not self._kiosk_allow_path(filename, 'source'):
                 return
 

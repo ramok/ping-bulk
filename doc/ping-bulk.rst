@@ -2150,8 +2150,13 @@ Web interface
     one.  A listener anyone may read and nobody may ever administer is not
     worth offering.
 
-    Refused in kiosk mode: that model's threat is the person at the console,
-    and a reader who never authenticates at all is further out again.
+    In kiosk mode it may be **declared by the hosts file and never typed at
+    the console** — the rule ``:web start`` already follows.  That model's
+    threat is the person at the keyboard, not the operator who deployed the
+    file: publishing the whole estate to anyone who
+    can reach the port is exactly the decision the first must not be able to
+    make, and exactly the one the deployment may legitimately want.  Switching
+    it on there is audited, like the bind itself.
 
     **What it publishes**, because a setting cannot narrow it afterwards:
     every host name, address and ``:resolv`` alias — together an inventory of

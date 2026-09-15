@@ -411,7 +411,12 @@ class TestKioskMode:
         assert 'kiosk' in _events(app)
 
     def test_the_hosts_file_may_still_declare_it(self, pb, tmp_path):
-        """Same rule ':probe-source' follows: the file is trusted, the keyboard is not."""
+        """The file is trusted, the keyboard is not.
+
+        Often described as the rule ':probe-source' follows; it is not —
+        that one gates on '_monitoring_started'.  ':bind-key' and
+        ':set web-anonymous' are the siblings that read the same flag.
+        """
         app = _make_app(pb, tmp_path, kiosk=True)
         app._dispatch_cmd(':set web-listen 127.0.0.1:0')
         app._loading_file = True

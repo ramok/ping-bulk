@@ -115,6 +115,56 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 23 (the kiosk exemption that was never switched on)**: `_loading_file`
+  was read in three places — `:bind-key`, `:web start` and `:source` — and
+  **assigned in none**. So the rule those three docstrings describe, *declared
+  by the trusted hosts file, never typed at the console*, did not exist under
+  `--kiosk`: a kiosk hosts file's `:web start` was refused and its `:bind-key`
+  lines were silently dropped, for the whole life of the feature.
+  Two things hid it, and both are worth naming. The reads went through
+  `getattr(self, '_loading_file', False)`, so a phantom attribute raised
+  nothing and read False forever — **a `getattr` default is a silent
+  assignment**, and this one was the entire feature. And the six tests that
+  covered the exemptions each set the flag **by hand**
+  (`tests/test_web_server.py`, `tests/test_bindkey.py`,
+  `tests/test_web_write.py`), proving the gate logic works in a state
+  production never reached; they passed throughout.
+  `Application.__init__` now sets it around one `try`/`finally` — the entry
+  loop, extracted as `_load_entries` so the window is exactly the file's own
+  directives and not seventy lines of unrelated construction — and it is a
+  class attribute for the reason `_entries_generation` is (§9c): several tests
+  build an `Application` through `__new__` and do dispatch commands. That also
+  means **nothing here can raise if the assignment goes missing again** — a
+  class attribute always resolves. The only thing that catches a repeat is
+  `tests/test_kiosk_declared_not_typed.py`, below.
+  **`:source` keeps its guard, and that is not an oversight.** It is the one of
+  the three where the unset flag was doing real work: for the other two the
+  *feature* was dead, but here the always-False read meant
+  `_kiosk_allow_path` **always ran**. Switching the flag on would have let a
+  kiosk hosts file source any absolute path — and, through a nested `:source`,
+  reach `:web start` on the outer file's trust. Measured both ways on the same
+  input. Nothing legitimate is lost: the hosts file's own directory is an
+  allowed prefix, which is the case that guard was written for. So the check
+  is unconditional now rather than reading a flag it must not honour.
+  **Deliberately not extended to the `:edit` reload**, which looks like the
+  same thing and is the opposite one: `:edit` is *allowed* at the console under
+  kiosk (it opens `rnano`/`rvim` on the hosts file), so a reload replays a file
+  the person at the keyboard may have just written, while startup replays the
+  one the operator deployed. Giving the reload the exemption would hand that
+  person `:web start` and `:bind-key <k> :mux sh` through the editor.
+  `:set web-anonymous` joins the two (§9d), audited like the bind.
+  **`:probe-source` is described everywhere as following this rule and does
+  not**: it gates on `_monitoring_started`, which `_edit_reload_inplace` also
+  clears — so it *does* get its exemption on a reload while these do not. That
+  predates this work and is left alone; the wording that claimed otherwise is
+  corrected.
+  `tests/test_kiosk_declared_not_typed.py` drives a real hosts file through
+  `parse_hosts_file` + `Application.__init__` and **assigns the flag nowhere**;
+  a test that did would be the bug again. Each of the seven mutations that
+  matter — flag never set, flag never cleared, exemption reverted, audit
+  removed, exemption widened to the reload, and the two that put the flag back
+  in front of `:source`'s path guard or remove that guard outright — was
+  verified to fail, and to fail on the right tests.
 - **Phase 22 (the probe strip reads like the ping strip)**: three things were
   wrong with `:set ping-view <probe>`, all reported from one screen showing
   twenty-eight satellites as a yellow `8`.
@@ -771,10 +821,14 @@ handed `commands: 'read-only'` and no CSRF value: the page draws its buttons
 from the first, so such a viewer gets a page without them rather than buttons
 that 401.
 
-Refused under kiosk, by the same reasoning that forces `web-commands` there:
-that model's threat is the person at the console, and a reader who never
-authenticates at all is further out again — with nobody for the audit trail to
-name.
+**Declared under kiosk, never typed** — the rule `:web start` already follows,
+and it is audited there like the bind. The
+first cut refused it outright, reasoning that a reader who never authenticates
+is further out than the console user. That is true and it is not the question:
+that mode's threat is the person at the *keyboard*, and the hosts file is the
+operator's own declaration. Refusing both is refusing the deployment the
+setting exists for. `web-commands` stays absolutely refused because it is a
+*write*, which no file should be able to hand to a console user either.
 
 **What it publishes cannot be narrowed afterwards**, so it is stated rather
 than discovered: every host name, address and `:resolv` alias, which together
@@ -1207,7 +1261,7 @@ the bar fits the screen, which is a layout guard with no meaning in a browser
 and is deliberately not mirrored.
 
 **Kiosk mode: declared, never typed.** `:web start` is refused at the console
-and allowed while `_loading_file` is set — the rule `:probe-source` already
+and allowed while `_loading_file` is set — the rule `:bind-key` already
 follows. Starting is audited. A port below 1024 is refused with the reason
 (`NoNewPrivileges=yes`), and port **0** is explicitly not that case: the
 kernel picks an ephemeral port well above 1024, which a first cut got wrong.
