@@ -13,6 +13,7 @@ them parsed it, so 153 web tests passed against a page that could not load.
 """
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -445,3 +446,228 @@ class TestBothPalettesDefineTheSameTokens:
         css = pb._WEB_CSS
         outside = re.sub(r'(:root|\[data-theme="light"\])\s*\{.*?\}', '', css, flags=re.S)
         assert not re.findall(r'#[0-9a-fA-F]{3,8}\b', outside)
+
+
+class TestPerViewerSortAndColumns:
+    """Ordering the list and putting a column away are this browser's too.
+
+    Sorting hides the section headers, which is what the terminal does: a
+    section says where a host sits in the configured order, so once the rows
+    are in a different order it describes an arrangement no longer on screen
+    (``_get_visible_entry_indices`` -- a section is visible only while
+    ``sort_by`` is ``'none'``).
+    """
+
+    RUNNER = r'''
+const sel = {value: 'none', addEventListener(){}};
+let store = JSON.parse(process.env.PREFS || '{}');
+// Every DOM member the client actually touches, enumerated from the source
+// rather than discovered one TypeError at a time: document.{activeElement,
+// addEventListener, createElement, createTextNode, documentElement,
+// getElementById, querySelectorAll} and element.{addEventListener,
+// appendChild, classList, focus, getAttribute, remove, replaceChildren,
+// setAttribute}.  A stub thin enough to throw is a stub that can also pass a
+// broken client.
+const mk = () => ({className:'', textContent:'', children:[], type:'', value:'',
+                   hidden:false,
+                   appendChild(c){this.children.push(c);}, setAttribute(){},
+                   getAttribute:()=>null, replaceChildren(...k){this.children=k;},
+                   addEventListener(){}, focus(){}, remove(){},
+                   classList:{add(){},remove(){},toggle(){}}});
+const colBar = mk();
+global.document = {
+  getElementById: (id) => (id === 'sort' ? sel : (id === 'col-bar' ? colBar : mk())),
+  createElement: mk, createTextNode: (t) => ({textContent: t}),
+  addEventListener(){}, body: mk(), activeElement: null,
+  documentElement: {setAttribute(){}, getAttribute:()=>null, removeAttribute(){}},
+  querySelectorAll: () => [],
+};
+global.window = { setTimeout(){return 0;}, clearTimeout(){}, addEventListener(){},
+  location:{href:''},
+  localStorage:{getItem:(k)=>(k in store ? store[k] : null), setItem(k,v){store[k]=v;}},
+  matchMedia: () => ({matches:false}) };
+global.fetch = () => Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({})});
+require(process.argv[2]);
+const rows = [
+  {kind:'section', title:'S1', level:1, badge:[], history:'', hist_class:[]},
+  {kind:'host', uid:'d', name:'delta',   alive:true,  down:false, latency:50, stats:{}, stat_class:{}, history:'', hist_class:[]},
+  {kind:'host', uid:'a', name:'alpha',   alive:false, down:true,  latency:null, stats:{}, stat_class:{}, history:'', hist_class:[]},
+  {kind:'host', uid:'c', name:'charlie', alive:true,  down:false, paused:true, latency:5, stats:{}, stat_class:{}, history:'', hist_class:[]},
+  {kind:'host', uid:'b', name:'bravo',   alive:true,  down:false, latency:12, stats:{}, stat_class:{}, history:'', hist_class:[]},
+];
+const label = (r) => (r.kind === 'section' ? '[' + r.title + ']' : r.name);
+const order = (v) => { sel.value = v; return global.sortRows(rows).map(label); };
+const result = {
+  none: order('none'), name: order('name'),
+  status: order('status'), latency: order('latency'),
+  source: rows.map(label),
+};
+sel.value = 'none';
+global.buildColBar(['Last', 'Avg', 'StDev']);
+result.colButtons = colBar.children.map((b) => b.textContent);
+const statRow = {kind:'host', uid:'x', name:'x', down:false, stats:{Last:'1', Avg:'2'},
+                 stat_class:{}, history:'', hist_class:[]};
+const statsOf = (el) => {
+  const s = el.children.find((c) => c.className === 'stats');
+  return s ? s.children.length : -1;
+};
+result.statsShown = statsOf(global.hostRow(statRow, 1));
+console.log(JSON.stringify(result));
+'''
+
+    def _run(self, pb, tmp_path, prefs=None):
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(_served_js(pb)
+                          .replace('\nfunction sortRows(', '\nglobal.sortRows = function sortRows(')
+                          .replace('\nfunction hostRow(', '\nglobal.hostRow = function hostRow(')
+                          .replace('\nfunction buildColBar(', '\nglobal.buildColBar = function buildColBar('))
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        env = dict(os.environ)
+        if prefs:
+            env['PREFS'] = json.dumps({'ping-bulk.view': json.dumps(prefs)})
+        r = subprocess.run(['node', str(runner), str(app_js)],
+                           capture_output=True, text=True, timeout=60, env=env)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_none_keeps_the_configured_order_and_the_sections(self, pb, tmp_path):
+        out = self._run(pb, tmp_path)
+        assert out['none'] == ['[S1]', 'delta', 'alpha', 'charlie', 'bravo']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_sorting_drops_the_section_headers(self, pb, tmp_path):
+        out = self._run(pb, tmp_path)
+        assert out['name'] == ['alpha', 'bravo', 'charlie', 'delta']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_status_matches_the_terminal_and_leads_with_what_is_up(self, pb, tmp_path):
+        """get_sorted_monitors keys on (m.alive is not True, m.host), so False
+        sorts first and the hosts that are up lead.
+
+        'What is broken first' is a reasonable thing to want from this word,
+        and it is what I wrote before checking -- but the browser and the
+        terminal answering the same word in opposite orders is the failure
+        this file keeps finding.  Changing it means changing both.
+        """
+        out = self._run(pb, tmp_path)
+        assert out['status'] == ['bravo', 'charlie', 'delta', 'alpha']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_paused_is_not_a_rank_of_its_own(self, pb, tmp_path):
+        """charlie is paused and up; the terminal does not separate it, so
+        neither does this -- it sorts among the other up hosts by name."""
+        out = self._run(pb, tmp_path)
+        assert out['status'].index('charlie') == 1
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_host_with_no_reading_sorts_last_by_latency(self, pb, tmp_path):
+        """It has not answered, which is not the same as being fast."""
+        out = self._run(pb, tmp_path)
+        assert out['latency'] == ['charlie', 'bravo', 'delta', 'alpha']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_sorting_does_not_reorder_the_snapshot(self, pb, tmp_path):
+        """sort() is in place and rows belongs to lastState, which is re-read
+        on every poll -- sorting it would make the order depend on how many
+        times the page had drawn."""
+        out = self._run(pb, tmp_path)
+        assert out['source'] == ['[S1]', 'delta', 'alpha', 'charlie', 'bravo']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_the_column_bar_comes_from_the_payload(self, pb, tmp_path):
+        """A viewer may hide a column the terminal shows, not add one it is
+        not computing."""
+        out = self._run(pb, tmp_path)
+        assert out['colButtons'] == ['Last', 'Avg', 'StDev']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_all_columns_render_by_default(self, pb, tmp_path):
+        assert self._run(pb, tmp_path)['statsShown'] == 2
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_hidden_column_is_not_rendered(self, pb, tmp_path):
+        out = self._run(pb, tmp_path, prefs={'col.Avg': True})
+        assert out['statsShown'] == 1
+
+
+class TestTheBrowserSortsLikeTheTerminal:
+    """The same word must not mean two orders.
+
+    ``sortRows`` in the client and ``get_sorted_monitors`` in the terminal are
+    two implementations of one rule, which is exactly the shape §9d keeps
+    finding wrong -- and it was wrong here first: ``status`` was written to put
+    what is broken at the top, while the terminal keys on
+    ``(m.alive is not True, m.host)`` and leads with what is up.  A structural
+    test cannot catch that.  Running both over the same hosts can.
+    """
+
+    HOSTS = [('delta', True, 50.0), ('alpha', False, None), ('charlie', True, 5.0),
+             ('bravo', True, 12.0), ('Echo', None, None), ('foxtrot', False, 3.0)]
+
+    RUNNER = r'''
+const sel = {value:'none', addEventListener(){}};
+const mk = () => ({className:'',textContent:'',children:[],value:'',hidden:false,
+  appendChild(){},setAttribute(){},getAttribute:()=>null,replaceChildren(){},
+  addEventListener(){},focus(){},remove(){},classList:{add(){},remove(){},toggle(){}}});
+global.document={getElementById:(i)=>(i==='sort'?sel:mk()),createElement:mk,
+  createTextNode:(t)=>({textContent:t}),addEventListener(){},body:mk(),
+  activeElement:null,documentElement:{setAttribute(){},getAttribute:()=>null,
+  removeAttribute(){}},querySelectorAll:()=>[]};
+global.window={setTimeout(){return 0;},clearTimeout(){},addEventListener(){},
+  location:{href:''},localStorage:{getItem:()=>null,setItem(){}},
+  matchMedia:()=>({matches:false})};
+global.fetch=()=>Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({})});
+require(process.argv[2]);
+const rows = JSON.parse(require('fs').readFileSync(process.argv[3],'utf8'));
+const got = {};
+['name','status','latency'].forEach((h)=>{ sel.value=h;
+  got[h]=global.sortRows(rows).map(r=>r.name); });
+console.log(JSON.stringify(got));
+'''
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_all_three_orders_agree(self, pb, tmp_path):
+        from unittest.mock import patch
+        cfg = tmp_path / 'cfg'
+        cfg.write_text('')
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application([('host', n) for n, _a, _l in self.HOSTS])
+        for m, (_n, alive, lat) in zip(app.monitors, self.HOSTS):
+            m.alive, m.latency = alive, lat
+
+        rows = tmp_path / 'rows.json'
+        rows.write_text(json.dumps([
+            {'kind': 'host', 'name': n, 'alive': a, 'latency': l,
+             'down': a is False}
+            for n, a, l in self.HOSTS]))
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(_served_js(pb).replace(
+            '\nfunction sortRows(', '\nglobal.sortRows = function sortRows('))
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        r = subprocess.run(['node', str(runner), str(app_js), str(rows)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        browser = json.loads(r.stdout.strip().splitlines()[-1])
+
+        for how in ('name', 'status', 'latency'):
+            app.sort_by = how
+            terminal = [m.host for m in app.get_sorted_monitors()]
+            assert browser[how] == terminal, (
+                f"':sort {how}' disagrees\\n"
+                f'  terminal: {terminal}\\n  browser : {browser[how]}')
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_case_is_compared_by_code_point_as_python_does(self, pb, tmp_path):
+        """localeCompare folds case and accents; Python's sorted() does not.
+        'Echo' before 'alpha' is the cheapest witness."""
+        from unittest.mock import patch
+        cfg = tmp_path / 'cfg'
+        cfg.write_text('')
+        with patch.object(pb, '_config_path', return_value=str(cfg)):
+            app = pb.Application([('host', n) for n, _a, _l in self.HOSTS])
+        app.sort_by = 'name'
+        terminal = [m.host for m in app.get_sorted_monitors()]
+        assert terminal.index('Echo') < terminal.index('alpha')

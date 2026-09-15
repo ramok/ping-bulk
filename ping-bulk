@@ -7730,7 +7730,18 @@ _WEB_HTML = """<!DOCTYPE html>
             aria-pressed="true">down</button>
     <button type="button" class="panel-toggle" data-panel="events"
             aria-pressed="true">events</button>
+    <label class="sort-label" for="sort">sort</label>
+    <select id="sort">
+      <option value="none">as configured</option>
+      <option value="name">name</option>
+      <option value="status">status</option>
+      <option value="latency">latency</option>
+    </select>
   </div>
+  <!-- Filled from the columns the server says it is sending, so a viewer can
+       only hide one the terminal is already showing.  Adding one would mean
+       asking the server for a stat it was not asked to compute. -->
+  <div id="col-bar" class="view-bar"></div>
 </header>
 <section id="login-wrap" hidden>
   <h2>Sign in</h2>
@@ -7808,6 +7819,12 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
   background: var(--field); color: var(--dim);
 }
 .view-bar button:hover { color: var(--fg); border-color: var(--dim); }
+.view-bar select {
+  font: inherit; font-size: 12px; padding: 2px 6px;
+  border: 1px solid var(--line); border-radius: 3px;
+  background: var(--field); color: var(--fg);
+}
+.sort-label { color: var(--dim); font-size: 12px; align-self: center; }
 /* Pressed is the state worth showing, and aria-pressed already carries it --
    so the style hangs off the attribute rather than a second class that could
    disagree with it. */
@@ -8002,6 +8019,87 @@ themeBtn.addEventListener('click', function () {
   applyTheme(next);
   setPref('theme', next);
 });
+
+// -- sort -------------------------------------------------------------------
+// Sorting HIDES the section headers, which is what the terminal does: a
+// section says where a host sits in the configured order, and once the rows
+// are in a different order it is describing an arrangement that is no longer
+// on screen.  (_get_visible_entry_indices: a section is visible only while
+// sort_by is 'none'.)
+var sortEl = document.getElementById('sort');
+sortEl.value = prefs.sort || 'none';
+
+sortEl.addEventListener('change', function () {
+  setPref('sort', sortEl.value);
+  if (lastState) { render(lastState); }
+});
+
+function sortRows(rows) {
+  var how = sortEl.value;
+  if (how === 'none') { return rows; }
+  // filter() is what makes the copy, and it has to: sort() works in place and
+  // rows belongs to lastState, which is re-read on every poll and on every
+  // control.  Sorting that would make the order depend on how many times the
+  // page had drawn.  Do not "optimise" this into rows.sort().
+  var hosts = rows.filter(function (r) { return r.kind === 'host'; });
+  // Each key mirrors get_sorted_monitors() exactly, because the browser and
+  // the terminal answering the same word differently is the failure this file
+  // keeps finding.  Where a nicer order suggests itself -- and 'what is broken
+  // first' is a reasonable thing to want from 'status' -- the fix is to change
+  // both, not to diverge here.
+  //
+  // byName is a plain comparison rather than localeCompare: Python's sorted()
+  // orders strings by code point, and localeCompare folds case and accents, so
+  // the two would disagree on exactly the names an operator gives a device.
+  var byName = function (a, b) {
+    return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+  };
+  return hosts.sort(function (a, b) {
+    if (how === 'name') { return byName(a, b); }
+    if (how === 'status') {
+      // key=(m.alive is not True, m.host): False sorts first, so the hosts
+      // that are up lead and everything else -- down, and not yet known --
+      // follows.  Paused and quiet are not a separate rank there, so they are
+      // not one here.
+      var ra = a.alive === true ? 0 : 1;
+      var rb = b.alive === true ? 0 : 1;
+      return ra !== rb ? ra - rb : byName(a, b);
+    }
+    // key=(latency if not None else inf, m.host): a host with no reading has
+    // not answered, which is not the same as being fast.
+    var la = typeof a.latency === 'number' ? a.latency : Infinity;
+    var lb = typeof b.latency === 'number' ? b.latency : Infinity;
+    return la !== lb ? la - lb : byName(a, b);
+  });
+}
+
+// -- columns ----------------------------------------------------------------
+// Hiding only.  The payload carries the columns ':set stats' asked for, so a
+// viewer can put away one they do not need; showing one the terminal is not
+// computing would mean asking the server for a different snapshot, which is
+// the shared kind of change this whole group of controls avoids.
+var colBar = document.getElementById('col-bar');
+var colBarFor = null;
+
+function colHidden(name) { return prefs['col.' + name] === true; }
+
+function buildColBar(columns) {
+  var key = columns.join('\u0001');
+  if (key === colBarFor) { return; }
+  colBarFor = key;
+  colBar.replaceChildren.apply(colBar, columns.map(function (name) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = name;
+    b.setAttribute('aria-pressed', colHidden(name) ? 'false' : 'true');
+    b.addEventListener('click', function () {
+      setPref('col.' + name, !colHidden(name));
+      b.setAttribute('aria-pressed', colHidden(name) ? 'false' : 'true');
+      if (lastState) { render(lastState); }
+    });
+    return b;
+  }));
+}
 
 // -- panels -----------------------------------------------------------------
 // 'down' is also hidden by render() when nothing is down, so the preference is
@@ -8205,6 +8303,7 @@ function hostRow(r, cellWidth) {
   var stats = document.createElement('span');
   stats.className = 'stats';
   Object.keys(r.stats).forEach(function (k) {
+    if (colHidden(k)) { return; }
     var cell = document.createElement('span');
     // The server's own verdict, not a guess from the text: a probe reading is
     // judged by its --warn and --crit, which only ping-bulk knows.
@@ -8276,8 +8375,11 @@ function render(state) {
   // Filtering happens here rather than through ':filter', which would change
   // what the terminal shows as well -- one person searching should not move
   // anybody else's screen.
+  buildColBar(state.columns || []);
+
   var needle = filterEl.value.trim().toLowerCase();
-  var shown = !needle ? state.rows : state.rows.filter(function (r) {
+  var ordered = sortRows(state.rows);
+  var shown = !needle ? ordered : ordered.filter(function (r) {
     return r.kind === 'host' && r.name.toLowerCase().indexOf(needle) !== -1;
   });
   rowsEl.replaceChildren.apply(rowsEl, shown.map(function (r) {

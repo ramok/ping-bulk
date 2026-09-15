@@ -1169,6 +1169,34 @@ returning null in a private window and where site data is blocked, and a
 viewer preference is not worth a dead page. A browser that refuses storage
 starts from the defaults each time, which is the correct degradation.
 
+**The browser's sort keys mirror `get_sorted_monitors` exactly**, and were
+written wrong first. `status` looked like it should lead with what is broken —
+that is the reason to ask for the order — but the terminal keys on
+`(m.alive is not True, m.host)`, so `False` sorts first and the hosts that are
+**up** lead; paused and quiet are not a rank of their own there, so they are
+not one here. `name` is a plain code-point comparison rather than
+`localeCompare`, because Python's `sorted()` orders by code point and
+`localeCompare` folds case and accents — they disagree on exactly the names an
+operator gives a device (`Echo` before `alpha` is the cheapest witness). If a
+different order is wanted, change both; a structural test cannot see a
+disagreement of this kind, so `tests/test_web_assets.py` runs the two
+implementations over the same hosts and compares.
+
+**Sorting hides the section headers**, which is what the terminal already does
+(`_get_visible_entry_indices`: a section is visible only while `sort_by` is
+`'none'`). A section says where a host sits in the configured order; once the
+rows are in a different order it is labelling an arrangement that is no longer
+on screen. Following the terminal here was cheaper than inventing a rule —
+"sort within each section" was the alternative, and it would have been a
+second answer to a question this program had already answered.
+
+**A column can be hidden, not added.** The payload carries the columns
+`:set stats` asked for, so hiding one is this browser's business; showing one
+the server is not computing would mean asking for a different snapshot, which
+is exactly the shared change these controls exist to avoid. The column bar is
+built from `state.columns` rather than from the keys of any one row, so a host
+missing a reading does not shorten it.
+
 **A section strip is drawn only when the section is folded**, as the terminal
 does — an open section's hosts are already drawing their own strips below, and
 summarising them again on the header put a second, coarser answer directly

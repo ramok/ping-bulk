@@ -2079,8 +2079,24 @@ Web interface
     once.
 
     The buttons beside the summary work the same way.  ``light``/``dark``
-    switches the palette, and the two panel buttons hide the *down* list and
-    the event log.  All of it is this browser's, kept in ``localStorage``, and
+    switches the palette, the two panel buttons hide the *down* list and the
+    event log, the ``sort`` menu reorders the list, and the row of column
+    names below hides columns you do not need.
+
+    Every order is the one ``:sort`` gives in the terminal, down to the
+    details: ``status`` leads with the hosts that are **up**, ``latency`` puts
+    a host that has not answered at the end rather than treating no reading as
+    nought, and ``name`` sorts by code point, so ``Echo`` comes before
+    ``alpha``.  Sorting also **hides the section headers**, again as ``:sort``
+    does — a section says where a host sits in the configured order, so once
+    the rows are in another order it describes an arrangement no longer on
+    screen.
+
+    A column can be hidden but not added: the payload carries the columns
+    ``:set stats`` asked for, and showing another would mean asking the server
+    for a different snapshot.
+
+    All of it is this browser's, kept in ``localStorage``, and
     none of it posts a command — so one viewer tidying their page leaves the
     terminal and every other viewer exactly as they were.  Without a stored
     choice the palette follows the system's, and a browser that refuses
