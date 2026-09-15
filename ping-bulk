@@ -5,6 +5,7 @@ import ctypes
 import ctypes.util
 import curses
 import difflib
+import errno
 import fnmatch
 import glob as _glob
 import hashlib
@@ -488,7 +489,7 @@ SET_PARAMS = [
                                  and all(m.paused for m in app.monitors)
                                  else 'off')),
     SetParam('web-listen', '_cmd_web_listen', '<host:port>',
-             'address the web interface binds to (a routable one needs a password file)',
+             'address the web interface binds to (trailing + = or the next free port)',
              getter=lambda app: app.web_listen),
     SetParam('web-allow', '_cmd_web_allow', '<cidr>[,<cidr>]|any',
              'client addresses allowed to reach the web interface',
@@ -1209,7 +1210,8 @@ _HELP_BINDINGS = [
     "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
     "  :set autosave on|off        save the config whenever a setting changes",
     "  :web \\[start|stop|status]   serve the host list over HTTP  (no arg reports)",
-    "  :set web-listen <host:port> where it binds (default 127.0.0.1:8765; a routable",
+    "  :set web-listen <host:port> where it binds (default 127.0.0.1:8765; trailing +",
+    "                              takes the next free port; a routable",
     "                              address needs :set web-password-file)",
     "  :set web-allow <cidr>,...   client addresses allowed to connect (default any)",
     "  :set web-commands <mode>    read-only | safe — whether a browser may pause a",
@@ -7093,13 +7095,34 @@ _WEB_SECURITY_HEADERS = (
 )
 
 
+#: How many consecutive ports a trailing '+' on ':set web-listen' may try.
+#: Bounded, because "keep going until something works" turns one stale process
+#: into a listener nobody can find.
+_WEB_PORT_SCAN = 16
+
+
+def _web_listen_tries(text):
+    """How many consecutive ports ``:set web-listen`` permits.
+
+    A trailing ``+`` means "this port, or the next free one".  Opt-in, and
+    deliberately not the default: the usual cause of ``Address already in use``
+    is a copy of this program that is already running, and quietly binding a
+    second listener somewhere else hides that — as well as leaving whatever
+    bookmark or firewall rule names the configured port pointing at nothing.
+    """
+    return _WEB_PORT_SCAN if (text or '').strip().endswith('+') else 1
+
+
 def _web_parse_listen(text):
     """Parse 'host:port' or ':port' into ``(host, port)``.
 
     Raises ValueError with a message worth showing the user.  IPv6 goes in
-    brackets, as everywhere else a host and port share one string.
+    brackets, as everywhere else a host and port share one string.  A trailing
+    '+' is the scan marker (_web_listen_tries) and not part of the port.
     """
     text = (text or '').strip()
+    if text.endswith('+'):
+        text = text[:-1].strip()
     if not text:
         raise ValueError('missing address; try 127.0.0.1:8765')
     if text.startswith('['):
@@ -13814,14 +13837,43 @@ class Application:
                            'does not grant (NoNewPrivileges=yes); use 1024 or '
                            'above')
             return
-        try:
-            server = _WebServer((host, port), self, allow_nets,
-                                self._web_allowed_hosts(host),
-                                password_hash=password_hash,
-                                tls_context=tls_context)
-        except OSError as exc:
-            self._refuse('cmd', f'web: cannot listen on {host}:{port}: {exc}')
+        # Only EADDRINUSE is worth another port.  A permission error or a
+        # bad address fails the same way sixteen times, and retrying it just
+        # buries the reason under the last attempt's port number.
+        server = None
+        for candidate in range(port, min(port + _web_listen_tries(
+                self.web_listen), 65536)):
+            try:
+                server = _WebServer((host, candidate), self, allow_nets,
+                                    self._web_allowed_hosts(host),
+                                    password_hash=password_hash,
+                                    tls_context=tls_context)
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE:
+                    self._refuse('cmd',
+                                 f'web: cannot listen on {host}:{candidate}: '
+                                 f'{exc}')
+                    return
+                last = exc
+        if server is None:
+            tried = _web_listen_tries(self.web_listen)
+            where = (f'{host}:{port}' if tried == 1
+                     else f'{host}:{port}-{port + tried - 1}')
+            self._refuse('cmd', f'web: cannot listen on {where}: {last}'
+                                + ('' if tried > 1 else
+                                   ' — another copy of this program is the '
+                                   'usual reason; ":set web-listen '
+                                   f'{host}:{port}+" would take the next '
+                                   'free port'))
             return
+        if server.server_address[1] != port and port != 0:
+            # Loud, because the configured port is what a bookmark, a firewall
+            # rule and ':set web-allow' were written against.
+            self.add_event('web',
+                           f'web: port {port} was busy — listening on '
+                           f'{server.server_address[1]} instead',
+                           level=LEVEL_NORMAL)
         self._web_server = server
         self._web_thread = _spawn(server.serve_forever, 'web')
         bound_host, bound_port = server.server_address[:2]
@@ -13892,7 +13944,11 @@ class Application:
         except ValueError as exc:
             self._refuse('cmd', f'web-listen: {exc}')
             return
-        self.web_listen = f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
+        # The '+' survives normalisation, or the scan marker would be dropped
+        # here and again by the ':save-config' that writes this string back.
+        scan = '+' if _web_listen_tries(value) > 1 else ''
+        self.web_listen = (f'[{host}]:{port}{scan}' if ':' in host
+                           else f'{host}:{port}{scan}')
         if self._monitoring_started:
             self.add_event('config', f'web-listen: {self.web_listen}')
         if self._web_running():

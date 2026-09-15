@@ -2118,6 +2118,16 @@ Web interface
     for any free port, which ``:web status`` and the status bar then report.
     IPv6 goes in brackets: ``[::1]:8765``.
 
+    **A trailing** ``+`` **takes the next free port** — ``0.0.0.0:8765+``
+    tries 8765 and then up to fifteen ports above it, reporting where it
+    landed.  It is opt-in on purpose: the usual reason for ``Address already
+    in use`` is a copy of this program that is already running, and quietly
+    binding a second listener elsewhere hides that while leaving whatever
+    bookmark, firewall rule or ``web-allow`` entry names the configured port
+    pointing at nothing.  Without the ``+`` a busy port is still refused, and
+    the refusal now names this as the alternative.  Unlike port ``0``, the
+    port stays predictable from one start to the next.
+
     **A non-loopback address needs a password.**  The start-up token dies
     with the process, which is fine for a tunnel and useless for a listener
     other machines keep coming back to, so binding anywhere but loopback is

@@ -659,3 +659,137 @@ class TestThePageCanShowIt:
         assert '<script>' not in html
         assert 'onclick=' not in html and 'onerror=' not in html
         assert 'addEventListener' in pb._WEB_JS
+
+
+class TestABusyPortCanStepAside:
+    """':set web-listen <addr>+' takes the next free port.
+
+    Opt-in, and deliberately not the default.  The usual cause of
+    ``Address already in use`` is a copy of this program that is already
+    running — quietly binding a second listener somewhere else hides that, and
+    leaves whatever bookmark, ``:set web-allow`` rule or firewall entry names
+    the configured port pointing at nothing.  So the plain form still refuses,
+    and now says what to type instead.
+
+    Port **0** is a different thing and already existed: the kernel picks, and
+    it picks a different one every start, which is useless for a listener
+    people come back to.
+    """
+
+    @staticmethod
+    def _squat(count=1):
+        """Hold `count` consecutive ports for real, and return the first."""
+        first = socket.socket()
+        first.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        first.bind(('127.0.0.1', 0))
+        first.listen(1)
+        port = first.getsockname()[1]
+        held = [first]
+        for p in range(port + 1, port + count):
+            s = socket.socket()
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(('127.0.0.1', p))
+                s.listen(1)
+                held.append(s)
+            except OSError:
+                s.close()
+        return port, held
+
+    def test_the_marker_is_not_part_of_the_port(self, pb):
+        assert pb._web_parse_listen('127.0.0.1:8765+') == ('127.0.0.1', 8765)
+        assert pb._web_listen_tries('127.0.0.1:8765+') > 1
+        assert pb._web_listen_tries('127.0.0.1:8765') == 1
+
+    def test_without_it_a_busy_port_still_refuses(self, pb, tmp_path):
+        port, held = self._squat()
+        try:
+            app = _make_app(pb, tmp_path)
+            app._dispatch_cmd(f':set web-listen 127.0.0.1:{port}')
+            app._dispatch_cmd(':web start')
+            assert app._web_server is None
+            assert 'already in use' in _events(app)
+        finally:
+            for s in held:
+                s.close()
+
+    def test_the_refusal_names_the_remedy(self, pb, tmp_path):
+        """A message that says only 'in use' leaves the reader to guess."""
+        port, held = self._squat()
+        try:
+            app = _make_app(pb, tmp_path)
+            app._dispatch_cmd(f':set web-listen 127.0.0.1:{port}')
+            app._dispatch_cmd(':web start')
+            assert f'127.0.0.1:{port}+' in _events(app)
+        finally:
+            for s in held:
+                s.close()
+
+    def test_with_it_the_listener_moves_on(self, pb, tmp_path):
+        port, held = self._squat()
+        try:
+            app = _make_app(pb, tmp_path)
+            app._dispatch_cmd(f':set web-listen 127.0.0.1:{port}+')
+            app._dispatch_cmd(':web start')
+            assert app._web_server is not None, _events(app)
+            assert app._web_server.server_address[1] != port
+        finally:
+            if app._web_server:
+                app._web_stop(quiet=True)
+            for s in held:
+                s.close()
+
+    def test_moving_is_reported_where_it_can_be_seen(self, pb, tmp_path):
+        """Silently binding elsewhere is the failure mode, not the feature:
+        the configured port is what everything else was written against."""
+        port, held = self._squat()
+        try:
+            app = _make_app(pb, tmp_path)
+            app._dispatch_cmd(f':set web-listen 127.0.0.1:{port}+')
+            app._dispatch_cmd(':web start')
+            moved = [e for e in app.events
+                     if 'was busy' in e.text and e.level <= pb.LEVEL_NORMAL]
+            assert moved, _events(app)
+            assert str(app._web_server.server_address[1]) in moved[-1].text
+        finally:
+            if app._web_server:
+                app._web_stop(quiet=True)
+            for s in held:
+                s.close()
+
+    def test_the_whole_span_busy_refuses_and_names_the_range(self, pb, tmp_path):
+        port, held = self._squat(pb._WEB_PORT_SCAN)
+        try:
+            app = _make_app(pb, tmp_path)
+            app._dispatch_cmd(f':set web-listen 127.0.0.1:{port}+')
+            app._dispatch_cmd(':web start')
+            assert app._web_server is None, 'the squat should have covered it'
+            assert f'{port}-{port + pb._WEB_PORT_SCAN - 1}' in _events(app)
+        finally:
+            for s in held:
+                s.close()
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason='root may bind port 80')
+    def test_an_error_that_is_not_in_use_is_not_retried(self, pb, tmp_path):
+        """Sixteen identical permission errors bury the reason under the last
+        attempt's port number.
+
+        Port 80 on loopback, because it fails with EACCES rather than
+        EADDRINUSE and still takes the loopback path — a non-loopback address
+        is refused for having no password file long before the bind.
+        """
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set web-listen 127.0.0.1:80+')
+        app._dispatch_cmd(':web start')
+        assert app._web_server is None
+        text = _events(app)
+        assert 'cannot listen on 127.0.0.1:80:' in text, text
+        assert ':81' not in text, 'it walked on after a non-EADDRINUSE error'
+
+    def test_the_marker_survives_the_setting_being_written_back(self, pb, tmp_path):
+        """':set' normalises the address, and ':save-config' writes that back —
+        so a marker dropped here is dropped for good."""
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set web-listen 127.0.0.1:8765+')
+        assert app.web_listen == '127.0.0.1:8765+'
+        assert ':set web-listen 127.0.0.1:8765+' in app._config_text()

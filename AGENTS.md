@@ -730,6 +730,19 @@ Each control below answers a specific way it could go wrong.
   own right.
 - **`allow_reuse_address`**, because the kiosk unit is `Restart=always` and a
   restart otherwise races its own `TIME_WAIT` sockets and the bind just fails.
+  With that already handled, an `EADDRINUSE` means something genuinely holds
+  the port — nearly always a second copy of this program — so the bind still
+  **refuses** by default rather than sliding to another port and hiding it. A
+  trailing `+` on `:set web-listen` opts into a bounded scan
+  (`_WEB_PORT_SCAN`, 16 ports) and reports where it landed at `LEVEL_NORMAL`,
+  because the configured port is what a bookmark, a firewall rule and `:set
+  web-allow` were written against. Only `EADDRINUSE` is walked past: retrying
+  a permission error sixteen times buries the reason under the last attempt's
+  port number. The marker has to survive `_cmd_web_listen`'s normalisation —
+  that function rebuilds the string as `host:port`, so the first cut dropped
+  the `+` there and again in the `:save-config` that writes it back, and the
+  scan silently never ran. Port `0` is a different thing and already existed:
+  the kernel picks, and picks a different one every start.
 - **Nothing reaches stderr.** `log_message` and `handle_error` are overridden
   to report into the event log: under curses the next redraw paints over
   stderr, which is exactly how "the log just stops" happened before (§8). A
