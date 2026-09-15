@@ -769,3 +769,128 @@ console.log(JSON.stringify(out));
         is safe to join on."""
         out = self._run(pb, tmp_path)
         assert out['collision']['second'] == ['a', 'b'], out['collision']
+
+
+class TestTheStatColumnsLineUp:
+    """Every cell in a column is the same width, and that width fits it.
+
+    The stats block used to be a plain flex row of content-sized cells, so a
+    column's left edge sat wherever the previous column's *value* happened to
+    end — different on every row, for the same column.  With ':set stats
+    gpsall,rtime,drift,down,last,avg,stdev' on a real 64-host file that made
+    seven ragged columns out of seven.
+
+    The width is measured over the whole visible list **before** any row is
+    built.  Measuring inside ``hostRow`` is the obvious shortcut and does not
+    work: the rows already emitted keep the narrower width until the next poll,
+    which is the raggedness this exists to remove.  The mutation test for that
+    is ``test_measuring_per_row_would_not_line_them_up``.
+    """
+
+    RUNNER = r'''
+let store = JSON.parse(process.env.PREFS || '{}');
+const mk = () => ({className:'', textContent:'', children:[], type:'', value:'',
+                   hidden:false, attrs:{},
+                   appendChild(c){this.children.push(c); return c;},
+                   setAttribute(k,v){this.attrs[k]=v;},
+                   getAttribute(k){return this.attrs[k]===undefined?null:this.attrs[k];},
+                   replaceChildren(...k){this.children=k;},
+                   addEventListener(){}, focus(){}, remove(){},
+                   classList:{add(){},remove(){},toggle(){}}});
+const byId = {};
+global.document = {
+  getElementById: (id) => (byId[id] || (byId[id] = mk())),
+  createElement: mk, createTextNode: (t) => ({textContent: t}),
+  addEventListener(){}, body: mk(), activeElement: null,
+  documentElement: {setAttribute(){}, getAttribute:()=>null, removeAttribute(){}},
+  querySelectorAll: () => [],
+};
+global.window = { setTimeout(){return 0;}, clearTimeout(){}, addEventListener(){},
+  location:{href:''},
+  localStorage:{getItem:(k)=>(k in store ? store[k] : null), setItem(k,v){store[k]=v;}},
+  matchMedia: () => ({matches:false}) };
+global.fetch = () => Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({})});
+require(process.argv[2]);
+
+// Deliberately ragged input: the same column carries a 1-character reading on
+// one host and a 13-character one on another, and the short one comes first.
+const host = (uid, gps, last) => ({
+  kind:'host', uid: uid, name: uid, down:false, cell_width:1,
+  stats:{'GPS s/off/sat': gps, 'Last': last}, stat_class:{},
+  history:'...', hist_class:[]});
+const state = {
+  time: 0, generation: 1, commands:'read-only', columns:['GPS s/off/sat','Last'],
+  view:{cell_width:1}, down:[], events:[],
+  rows:[host('a','-','5.0'), host('b','0/0/28','120.5'), host('c','12/3/7','7.25')],
+};
+global.render(state);
+
+const widths = {}, tooNarrow = [];
+for (const row of byId['rows'].children) {
+  const stats = row.children.find((c) => c.className === 'stats');
+  if (!stats) { continue; }
+  for (const cell of stats.children) {
+    const label = cell.children[0].textContent;
+    const value = cell.children[1].textContent;
+    const got = Number(cell.getAttribute('data-w'));
+    (widths[label.trim()] = widths[label.trim()] || []).push(got);
+    if (label.length + value.length > got) {
+      tooNarrow.push(label + value + ' needs ' + (label.length + value.length)
+                     + ' got ' + got);
+    }
+  }
+}
+const distinct = {};
+Object.keys(widths).forEach((k) => { distinct[k] = [...new Set(widths[k])]; });
+console.log(JSON.stringify({distinct: distinct, tooNarrow: tooNarrow,
+                            cells: Object.keys(widths).length}));
+'''
+
+    def _run(self, pb, tmp_path):
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(_served_js(pb).replace(
+            '\nfunction render(', '\nglobal.render = function render('))
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        r = subprocess.run(['node', str(runner), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_column_has_one_width_on_every_row(self, pb, tmp_path):
+        out = self._run(pb, tmp_path)
+        for name, seen in out['distinct'].items():
+            assert len(seen) == 1, f'{name} drew at widths {seen}'
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_the_width_fits_the_widest_reading(self, pb, tmp_path):
+        """Equal widths that clip the value would pass the test above."""
+        out = self._run(pb, tmp_path)
+        assert out['tooNarrow'] == [], out['tooNarrow']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_measuring_per_row_would_not_line_them_up(self, pb, tmp_path):
+        """The shortcut this design exists to avoid, run for real.
+
+        ``measureColumns`` is moved inside the row builder — the obvious place
+        — and the first row, which carries the short reading, keeps the narrow
+        width while the later ones widen.
+        """
+        app_js = tmp_path / 'app.js'
+        src = _served_js(pb).replace(
+            '\nfunction render(', '\nglobal.render = function render(')
+        assert '  measureColumns(shown);\n' in src
+        src = src.replace('  measureColumns(shown);\n', '')
+        old = "  var stats = document.createElement('span');\n  stats.className = 'stats';"
+        assert src.count(old) == 1
+        src = src.replace(old, old + '\n  measureColumns([r]);', 1)
+        app_js.write_text(src)
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        r = subprocess.run(['node', str(runner), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        ragged = [n for n, seen in out['distinct'].items() if len(seen) > 1]
+        assert ragged, 'the mutation must actually go ragged, or the test above proves nothing'
