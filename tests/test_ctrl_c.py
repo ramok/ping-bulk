@@ -15,7 +15,14 @@ second Ctrl+C  → app exits ("DNS:" disappears)
 other keys     → do nothing; message disappears after ~2 seconds
 """
 
+import os
+import signal
+import subprocess
+import time
+
 import pytest
+
+import tmux_helper
 
 # Substrings used as wait targets / absence markers.
 MENU_BAR       = 'DNS:'
@@ -127,3 +134,63 @@ class TestCtrlCInModals:
         tmux_app_40.wait_for_absence(CLEAR_PROMPT)
         tmux_app_40.wait_for(MENU_BAR)
 
+
+
+# ===========================================================================
+# TestCtrlCIsNeverATraceback
+# ===========================================================================
+
+class TestCtrlCIsNeverATraceback:
+    """A Ctrl+C must never reach the user as a Python traceback.
+
+    Only two calls in the draw loop ever caught ``KeyboardInterrupt`` --
+    ``stdscr.refresh()`` and ``stdscr.getch()`` -- and Python's default SIGINT
+    handler raises it wherever the signal lands.  Everything between those two
+    calls is the frame being drawn, and it was unguarded: a Ctrl+C pressed
+    there went straight past ``curses.wrapper`` and killed the process.
+    Measured from a real failure, the exception surfaced inside
+    ``_hint_text_segments``, drawing the help overlay.
+
+    Guarding those two calls harder cannot fix it -- the signal can land on any
+    bytecode boundary in between -- so the handler records instead of raising
+    and the loop reads the flag at the input step.
+
+    **This asserts only the absence of a traceback, not that the program
+    survives.**  A burst of Ctrl+C in normal mode legitimately quits (the
+    re-press pattern above), so "still running" is the wrong invariant; "exited
+    the way it meant to" is the right one.  The burst is sent as signals rather
+    than keystrokes because one ``send-keys`` per Ctrl+C is a subprocess each,
+    far too slow to land inside a 100 ms frame.
+
+    Verified to fail without the fix: 3 of 3 runs against the previous build
+    left ``KeyboardInterrupt`` on screen, and 5 of 5 against this one did not.
+    """
+
+    @staticmethod
+    def _app_pid(tmux_app):
+        """The ping-bulk process in the pane, not the shell that started it."""
+        pane = subprocess.run(
+            tmux_helper.tmux_cmd('list-panes', '-t', tmux_app.name,
+                                 '-F', '#{pane_pid}'),
+            capture_output=True, text=True, check=True).stdout.strip()
+        assert pane, 'no pane pid'
+        kids = subprocess.run(['pgrep', '-P', pane, '-f', 'ping-bulk'],
+                              capture_output=True, text=True)
+        return int((kids.stdout.split() or [pane])[0])
+
+    def test_a_burst_while_the_overlay_draws_leaves_no_traceback(self, tmux_app_40):
+        tmux_app_40.send_keys('?')
+        tmux_app_40.wait_for(HELP_MARKER)
+        pid = self._app_pid(tmux_app_40)
+        # Enough to cover many frames: the loop spends most of each 100 ms
+        # window inside getch, so a handful of signals would very likely all
+        # land in the one place that was already guarded.
+        for _ in range(300):
+            try:
+                os.kill(pid, signal.SIGINT)
+            except ProcessLookupError:
+                break
+        time.sleep(1.5)
+        screen = tmux_app_40.capture_pane()
+        assert 'Traceback' not in screen, screen
+        assert 'KeyboardInterrupt' not in screen, screen

@@ -9405,6 +9405,31 @@ class Application:
     # matter drive a real hosts file.
     _loading_file = False
 
+    #: Set by the SIGINT handler while the draw loop is running; the loop turns
+    #: it into key 3 at the input step.  A class attribute for the reason the
+    #: others here are: several tests build an Application through __new__.
+    _interrupted = False
+
+    def _note_interrupt(self, _signum, _frame):
+        """Record Ctrl+C instead of raising it.
+
+        Python's default SIGINT handler raises KeyboardInterrupt wherever the
+        signal happens to land, and only two calls in the draw loop caught it:
+        ``stdscr.refresh()`` and ``stdscr.getch()``.  Everything between them
+        — the whole frame — was unguarded, so a Ctrl+C pressed while the help
+        overlay was being drawn went straight past ``curses.wrapper`` and
+        killed the process, leaving a traceback where the user expected the
+        overlay to close.  Measured from a real one: the exception surfaced
+        inside ``_hint_text_segments``.
+
+        Guarding the two calls harder cannot fix that; the signal can land on
+        any bytecode boundary in between.  Recording it can: nothing is raised,
+        so nothing can escape, and the loop reads the flag within one
+        ``getch`` timeout (100 ms) and treats it as key 3 — which is what both
+        of the old handlers meant by it.
+        """
+        self._interrupted = True
+
     def _add_entry(self, entry):
         """Append *entry* to self.entries and invalidate layout caches."""
         self.entries.append(entry)
@@ -19101,6 +19126,15 @@ class Application:
         self._register_shift_tab_seqs()
         self._register_ctrl_arrow_seqs()
 
+        # Scoped to the loop, not the process: before the UI exists a Ctrl+C
+        # should still abandon the run the way it always has, and _note_interrupt
+        # would silently swallow it.  ValueError means we are not the main
+        # thread, where signal.signal is not allowed to be called at all.
+        try:
+            prev_sigint = signal.signal(signal.SIGINT, self._note_interrupt)
+        except (ValueError, OSError):
+            prev_sigint = None
+
         # Initialize colors
         curses.start_color()
         curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)    # Success
@@ -19246,6 +19280,20 @@ class Application:
                 try:
                     key = stdscr.getch()
                 except KeyboardInterrupt:
+                    # Only reachable when no handler could be installed; kept
+                    # so the behaviour is the same either way.
+                    key = 3
+                if self._interrupted:
+                    # It arrived while the frame was being drawn, or while a
+                    # command was running.  It is still a keystroke.
+                    self._interrupted = False
+                    if key != -1:
+                        # A real key pressed in the same 100 ms window is not
+                        # forfeit; it is read on the next pass.
+                        try:
+                            curses.ungetch(key)
+                        except Exception:
+                            pass
                     key = 3
                 if self.help_open:
                     if key == 3:  # Ctrl+C always closes overlays
@@ -19378,6 +19426,20 @@ class Application:
                         self._key_seq = []
 
         finally:
+            # Ignore, not restore.  Everything from here on is teardown --
+            # this method's own cleanup, then curses.wrapper's -- and a Ctrl+C
+            # arriving in it has nothing left to cancel, so the only thing the
+            # default handler can still do is turn a clean exit into a
+            # traceback.  Measured: a burst of SIGINTs while the help overlay
+            # was open quit the program correctly and then raised
+            # KeyboardInterrupt inside wrapper's own 'stdscr.keypad(0)'.
+            # 'curses.wrapper(main, ...)' is the last statement in this file,
+            # so there is no caller left to hand the signal back to.
+            if prev_sigint is not None:
+                try:
+                    signal.signal(signal.SIGINT, signal.SIG_IGN)
+                except (ValueError, OSError):
+                    pass
             # Close the listener before the process goes: ':quit' used to
             # leave it open until exit, and under systemd 'Restart=always'
             # that raced the next bind.

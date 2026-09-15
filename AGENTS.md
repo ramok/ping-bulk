@@ -115,6 +115,44 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 24 (Ctrl+C is a keystroke, not an exception)**: the draw loop caught
+  `KeyboardInterrupt` around exactly two calls — `stdscr.refresh()` and
+  `stdscr.getch()` — and Python's default SIGINT handler raises it *wherever
+  the signal lands*. Everything between those two calls is the frame being
+  drawn, and it was unguarded: a Ctrl+C pressed there went past
+  `curses.wrapper` and killed the process. Measured from a real failure, the
+  exception surfaced inside `_hint_text_segments`, drawing the help overlay —
+  so the user pressed the key that closes an overlay and got a traceback.
+  **Guarding those two calls harder cannot fix it**; the signal can land on any
+  bytecode boundary in between, and wrapping the loop body would mean
+  re-indenting a hundred lines. `_note_interrupt` records instead of raising,
+  so nothing can escape from anywhere, and the loop reads the flag at the input
+  step — within one `getch` timeout, 100 ms — and turns it into key 3, which is
+  what both of the old handlers already meant by it (`refresh`'s did
+  `:quit --confirm`; key 3 in normal mode *is* the quit confirmation). A real
+  key pressed in the same window is pushed back with `curses.ungetch` rather
+  than forfeited. Safe because `multikey_timeout` only ever *shortens* the
+  wait, so `getch` never blocks beyond a second.
+  **Scoped to the loop, and the exit is `SIG_IGN`, not the old handler.**
+  Before the UI exists Ctrl+C should still abandon the run, so the handler is
+  installed in `run()` rather than `main()`. Restoring the default on the way
+  out was wrong for the mirror-image reason, and measured: a burst of SIGINTs
+  quit the program correctly and then raised `KeyboardInterrupt` inside
+  `curses.wrapper`'s own `stdscr.keypad(0)`. Everything after the loop is
+  teardown with nothing left to cancel, and `curses.wrapper(main, ...)` is the
+  last statement in the file, so there is no caller to hand the signal back to.
+  **The invariant under test is "never a traceback", not "still running"** — a
+  burst in normal mode legitimately quits (the re-press pattern), so survival
+  is the wrong assertion. `tests/test_ctrl_c.py::TestCtrlCIsNeverATraceback`
+  sends 300 signals while the help overlay is open: 3 of 3 runs against the
+  previous build left `KeyboardInterrupt` on screen, 5 of 5 against this one
+  did not. Signals rather than keystrokes because one `send-keys` per Ctrl+C is
+  a subprocess each, far too slow to land inside a 100 ms frame.
+  This also removes a suite flake that had nothing obviously to do with it:
+  `test_ctrl_c.py` failed about one run in five under `-n auto` once this
+  session's new tests raised the scheduling pressure (measured 0/22 before them
+  and 7/33 after, with the production code exonerated at 0/10 against the old
+  test set). The race was always there; more load found it.
 - **Phase 23 (the kiosk exemption that was never switched on)**: `_loading_file`
   was read in three places — `:bind-key`, `:web start` and `:source` — and
   **assigned in none**. So the rule those three docstrings describe, *declared
