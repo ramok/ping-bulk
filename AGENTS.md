@@ -832,6 +832,22 @@ itself the bar says so instead of painting 29 of its 32 characters. **And there
 is no screen while a hosts file is still loading**, which is why the logged
 line names `:web status` rather than leaving the operator to guess.
 
+**And a wildcard bind is announced as a real address.** `0.0.0.0` is where to
+listen, not somewhere to browse: the banner read `http://0.0.0.0:8765/?t=…`,
+which the operator has to translate before the link is any use to anyone —
+against the whole reason it is on the status bar rather than in the log.
+`_web_display_host` substitutes the first `:set web-hosts` entry that is an
+address this machine holds, tested by binding it (the only answer that needs no
+interface list). The locality filter is not cosmetic: one hosts file may name
+both ends of a fleet so that it works on either, and the sensor-station file
+does exactly that, listing the kiosk's address before the workstation's.
+There is deliberately **no** check that the result is in `_web_allowed_hosts` —
+that would be a tautology, since that function's last act is to add every
+`web-hosts` entry — but the relationship is load-bearing (announce an address
+from anywhere else, such as the default-route source address, and the
+copy-paste ends in 421), so it is pinned by a test instead of by a guard that
+cannot fire.
+
 **The link got its own expiry**, `_WEB_LINK_SECONDS` (30 s), because the status
 bar's existing values are 3 s for a `:set` report and 4 s for a refusal — long
 enough to read a word, not long enough to transcribe a URL with a 32-character

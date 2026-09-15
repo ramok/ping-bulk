@@ -7170,6 +7170,33 @@ def _web_is_loopback(host):
         return host in ('localhost', '')
 
 
+#: Bind addresses meaning "every interface".  Fine to listen on, useless to
+#: print: nobody can type one into a browser on another machine.
+_WEB_WILDCARDS = ('0.0.0.0', '::', '')
+
+
+def _web_address_is_local(addr):
+    """True when *addr* is an address this machine actually holds.
+
+    Asked by binding it, which is the only answer that does not need a list of
+    the interfaces: the kernel refuses a bind to an address that is not ours.
+    Port 0, so nothing is reserved.
+    """
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            probe = socket.socket(family, socket.SOCK_STREAM)
+        except OSError:
+            continue
+        try:
+            probe.bind((addr, 0))
+            return True
+        except OSError:
+            continue
+        finally:
+            probe.close()
+    return False
+
+
 class _WebHandler(http.server.BaseHTTPRequestHandler):
     """Read-only HTTP for one request.
 
@@ -13522,6 +13549,44 @@ class Application:
         names.discard('')
         return names
 
+    def _web_display_host(self, bound_host):
+        """A host worth printing, for a socket bound to *bound_host*.
+
+        A wildcard bind is not an address anyone can be handed: the sign-in
+        banner announced ``http://0.0.0.0:8765/?t=…``, which the operator has
+        to translate before it is any use to a colleague — and the whole point
+        of putting the link on the status bar is that it can be read off and
+        typed somewhere else.
+
+        Whatever is chosen has to be a name this server will answer to, or the
+        copy-paste ends in 421 with nothing on screen saying why.  That is the
+        same failure the truncated-token rule exists to prevent, reached from
+        the other direction, so the candidate is checked against
+        ``_web_allowed_hosts`` rather than assumed.
+
+        ``:set web-hosts`` is the source, because it is already exactly "the
+        names this listener is reached by" — and it is filtered to addresses
+        this machine holds, since one hosts file may legitimately name both
+        ends of a fleet (the sensor-station file lists the kiosk's address and
+        the workstation's, so that one file works on either).  With nothing
+        declared there is nothing safe to invent, and the wildcard is printed
+        as before.
+        """
+        if bound_host not in _WEB_WILDCARDS:
+            return bound_host
+        # No check against _web_allowed_hosts here, because it would be a
+        # tautology: that function's last act is to add every ':set web-hosts'
+        # entry, so anything taken from this list is admitted by construction.
+        # The relationship is the load-bearing part, though — announce an
+        # address from anywhere else (this machine's default-route source
+        # address is the tempting one) and the copy-paste ends in 421 — so it
+        # is pinned by a test rather than by a guard that cannot fire.
+        for name in re.split(r'[,\s]+', self.web_hosts or ''):
+            name = name.strip()
+            if name and _web_address_is_local(name):
+                return name
+        return bound_host
+
     def _web_tls_context(self):
         """Build an SSLContext from the configured cert, or None.
 
@@ -13789,7 +13854,8 @@ class Application:
             # a second browser has to stop and restart the listener, which is
             # what would push somebody towards leaving the token live.
             server.token = secrets.token_urlsafe(24)
-        base = f'{"https" if server.is_tls else "http"}://{host}:{port}/'
+        shown = self._web_display_host(host)
+        base = f'{"https" if server.is_tls else "http"}://{shown}:{port}/'
         parts = [f'web: listening on {base}',
                  f'{server.request_count} request(s)',
                  'password login' if server.password_hash else 'token only',
@@ -13913,7 +13979,7 @@ class Application:
         # web-anonymous' lets it serve an unauthenticated one, so the link goes
         # to the status bar (_web_announce_link) and the event names the
         # command that re-shows it.
-        base = f'{scheme}://{bound_host}:{bound_port}/'
+        base = f'{scheme}://{self._web_display_host(bound_host)}:{bound_port}/'
         self.add_event('web',
                        f'web: listening on {base} '
                        f'({self._web_access_summary()}; '
@@ -13923,6 +13989,18 @@ class Application:
         if password_hash is not None:
             self.add_event('web', 'web: password login is also enabled',
                            level=LEVEL_INFO)
+        if (bound_host in _WEB_WILDCARDS
+                and self._web_display_host(bound_host) == bound_host):
+            # The link above still says '0.0.0.0', which nobody can type into a
+            # browser.  Say so once, and name the setting that fixes it —
+            # ':set web-hosts' has to be set for a LAN client's 'Host:' header
+            # to pass the pin anyway, so this is one setting, not two.
+            self.add_event('web',
+                           f'web: {bound_host} is every interface, not an '
+                           'address to hand out — set ":set web-hosts '
+                           '<this address>" to make the sign-in link usable '
+                           'from another machine',
+                           level=LEVEL_NORMAL)
         if not _web_is_loopback(bound_host) and tls_context is None:
             self.add_event('warn',
                            'warning: web is listening on '

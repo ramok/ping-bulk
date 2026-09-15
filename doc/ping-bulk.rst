@@ -2064,6 +2064,17 @@ Web interface
     spent token, so the link is always one command away.  On a terminal too
     narrow for the whole URL the token is shown on its own rather than cut.
 
+    **A wildcard bind is announced as a real address.**  ``0.0.0.0`` is where
+    to listen, not somewhere to browse, and the point of putting the link on
+    the status bar is that it can be read off and typed on another machine.
+    So for ``0.0.0.0`` or ``::`` the link names the first ``:set web-hosts``
+    entry that is an address this machine actually holds — which is also, by
+    construction, a name the ``Host`` pin accepts, so the link cannot lead to
+    a 421.  A shared hosts file may name both ends of a fleet, and the
+    non-local entries are skipped.  With no ``web-hosts`` there is nothing
+    safe to invent: the wildcard is printed as before, and a line says which
+    setting would fix it.
+
     The page leads with what is down, then shows the host rows with their
     sections, stats columns and history strips, then the event log.  It polls
     once every two seconds and collapses to a single column on a phone.

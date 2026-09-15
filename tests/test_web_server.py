@@ -793,3 +793,85 @@ class TestABusyPortCanStepAside:
         app._dispatch_cmd(':set web-listen 127.0.0.1:8765+')
         assert app.web_listen == '127.0.0.1:8765+'
         assert ':set web-listen 127.0.0.1:8765+' in app._config_text()
+
+
+class TestTheAnnouncedAddressIsOneYouCanType:
+    """A wildcard bind must not be advertised as '0.0.0.0'.
+
+    The sign-in link goes to the status bar precisely so it can be read off and
+    typed into another machine's browser, and ``http://0.0.0.0:8765/?t=…`` is
+    not an address any browser will reach this program on.  (Firefox turns it
+    into 127.0.0.1, which is the local case working by accident and no help at
+    all to the colleague the link was meant for.)
+
+    Whatever is announced has to be a name the ``Host`` pin will accept, or the
+    copy-paste ends in 421 with nothing on screen to explain it — the same
+    failure the truncated-token rule exists to prevent, arrived at from the
+    other side.  ``:set web-hosts`` is the source because it already means "the
+    names this listener is reached by", filtered to the ones this machine
+    actually holds: one hosts file may name both ends of a fleet so that it
+    works on either.
+    """
+
+    @staticmethod
+    def _password(tmp_path):
+        pw = tmp_path / 'pw'
+        pw.write_text('secret\n')
+        os.chmod(pw, 0o600)
+        return str(pw)
+
+    def test_a_local_address_is_told_apart_from_a_routable_one(self, pb):
+        assert pb._web_address_is_local('127.0.0.1')
+        # TEST-NET-1: valid syntax, not an address of this machine.
+        assert not pb._web_address_is_local('192.0.2.1')
+
+    def test_the_wildcard_is_replaced_by_a_declared_local_address(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(f':set web-password-file {self._password(tmp_path)}')
+        # The non-local entry comes first on purpose: it is the other machine's,
+        # which is exactly the shape a shared hosts file has.
+        app._dispatch_cmd(':set web-hosts 192.0.2.1,127.0.0.1')
+        app._dispatch_cmd(':set web-listen 0.0.0.0:0')
+        app._dispatch_cmd(':web start')
+        try:
+            assert app._web_server is not None, _events(app)
+            assert app._status_msg is not None
+            assert 'http://127.0.0.1:' in app._status_msg['text'], \
+                app._status_msg['text']
+            assert '0.0.0.0' not in app._status_msg['text']
+        finally:
+            app._web_stop(quiet=True)
+
+    def test_what_it_announces_is_a_host_the_server_answers_to(self, pb, tmp_path):
+        """Announcing a name outside the pin trades one dead end for another."""
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(f':set web-password-file {self._password(tmp_path)}')
+        app._dispatch_cmd(':set web-hosts 192.0.2.1,127.0.0.1')
+        shown = app._web_display_host('0.0.0.0')
+        assert shown.lower() in app._web_allowed_hosts('0.0.0.0')
+
+    def test_with_nothing_declared_it_says_so_rather_than_guessing(self, pb, tmp_path):
+        """There is no safe address to invent, so the wildcard stands — but the
+        operator is told which setting makes the link usable."""
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(f':set web-password-file {self._password(tmp_path)}')
+        app._dispatch_cmd(':set web-listen 0.0.0.0:0')
+        app._dispatch_cmd(':web start')
+        try:
+            assert app._web_display_host('0.0.0.0') == '0.0.0.0'
+            hint = [e for e in app.events
+                    if 'every interface' in e.text and e.level <= pb.LEVEL_NORMAL]
+            assert hint, _events(app)
+            assert 'web-hosts' in hint[-1].text
+        finally:
+            app._web_stop(quiet=True)
+
+    def test_a_loopback_bind_is_left_alone(self, pb, tmp_path):
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set web-listen 127.0.0.1:0')
+        app._dispatch_cmd(':web start')
+        try:
+            assert 'http://127.0.0.1:' in app._status_msg['text']
+            assert not [e for e in app.events if 'every interface' in e.text]
+        finally:
+            app._web_stop(quiet=True)
