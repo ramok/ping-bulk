@@ -7408,6 +7408,19 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             'pause':    ':pause-selected on',
             'resume':   ':pause-selected off',
             'no-alarm': ':no-alarm --toggle',
+            # A section uid rather than a host one.  `_web_index_for_uid`
+            # matches any entry carrying a uid, and ':fold open'/'close' resolve
+            # to zo/zc, which act on the highlighted SectionLabel — so
+            # `_web_drain` parking the cursor on that row is the whole
+            # mechanism, and it is the same one the write path already relies
+            # on for pause.
+            #
+            # Explicit verbs here for the reason above: the page's picture is
+            # up to a poll old, so a click on a section somebody else has since
+            # folded must not unfold it.  Sending 'fold' at an already-folded
+            # section is a no-op, which is the behaviour to want.
+            'fold':     ':fold close',
+            'unfold':   ':fold open',
         }
         if verb not in commands:
             self._send(404, b'no such action\n')
@@ -7957,6 +7970,17 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
          font-size: 12px; letter-spacing: 0; white-space: pre;
          overflow: hidden; flex: 1 1 auto; }
 .badge { color: var(--dim); font-size: 12px; }
+/* The fold marker is the terminal's '[+]'/'[-]', and doubles as the control.
+   It is a hit target, so it gets padding rather than sitting flush against
+   the title.  Under ':set web-commands read-only' it still shows the state --
+   a viewer needs to know a section is folded even when they cannot change
+   it -- but stops offering a click it would only be refused for. */
+.foldmark { color: var(--dim); font-size: 12px; cursor: pointer;
+            padding: 0 4px; user-select: none;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.foldmark:hover { color: var(--fg); }
+.foldmark.ro { cursor: default; }
+.foldmark.ro:hover { color: var(--dim); }
 .acts { display: flex; gap: 4px; }
 .acts button {
   font: inherit; font-size: 12px; padding: 2px 8px; cursor: pointer;
@@ -8447,6 +8471,20 @@ function hostRow(r, cellWidth) {
 function sectionRow(r, cellWidth) {
   var el = document.createElement('div');
   el.className = 'row section lvl' + r.level;
+  // The marker the terminal draws, and the control: '[+]' folded, '[-]' open.
+  // The verb is chosen from r.folded, which is up to one poll stale -- which
+  // is exactly why the verbs are explicit rather than a toggle. Clicking
+  // 'fold' at a section somebody else has already folded does nothing, where
+  // a toggle would open it.
+  var marker = span(r.folded ? '[+]' : '[-]', 'foldmark');
+  if (canWrite) {
+    marker.addEventListener('click', function () {
+      act(r.uid, r.folded ? 'unfold' : 'fold');
+    });
+  } else {
+    marker.classList.add('ro');
+  }
+  el.appendChild(marker);
   el.appendChild(span(r.title, 'name'));
   el.appendChild(badge(r.badge));
   // Only when folded, as the terminal does -- an open section's hosts are

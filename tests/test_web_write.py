@@ -550,3 +550,103 @@ class TestNothingLaundersItsWayIn:
         body = c.command(':mux sh')[1]
         assert b'full' not in body, body
 
+
+
+# ===========================================================================
+# Folding
+# ===========================================================================
+
+def _section(app, pb):
+    return next(e for e in app.entries if isinstance(e, pb.SectionLabel))
+
+
+class TestFoldingFromTheBrowser:
+    """A section is addressed by uid exactly as a host is.
+
+    Nothing new was needed on the way in: ``_web_index_for_uid`` matches any
+    entry carrying a uid and ``SectionLabel`` has one, while ':fold open' and
+    ':fold close' resolve to ``zo``/``zc``, which act on the **highlighted**
+    section — so ``_web_drain`` parking the cursor on that row is the whole
+    mechanism. What was missing was a verb and a control; the browser simply
+    had no way to ask.
+    """
+
+    def test_a_section_folds_and_unfolds(self, served, pb):
+        app, c = served
+        section = _section(app, pb)
+        assert not section.folded
+
+        c.action(section.uid, 'fold')
+        app._web_drain()
+        assert section.folded
+
+        c.action(section.uid, 'unfold')
+        app._web_drain()
+        assert not section.folded
+
+    def test_the_verbs_are_explicit_not_a_toggle(self, served, pb):
+        """The page is up to one poll stale, so a click carries what it wants,
+        not 'the other one'. Clicking fold at an already-folded section is a
+        no-op; a toggle would open it."""
+        app, c = served
+        section = _section(app, pb)
+        for _ in range(3):
+            c.action(section.uid, 'fold')
+            app._web_drain()
+            assert section.folded
+
+    def test_folding_hides_the_hosts_from_the_payload(self, served, pb):
+        """The visible-row rule is the server's, so the browser gets the same
+        answer the terminal draws rather than hiding rows on its own."""
+        app, c = served
+        assert len([r for r in app._web_state()['rows'] if r['kind'] == 'host']) == 3
+
+        c.action(_section(app, pb).uid, 'fold')
+        app._web_drain()
+        rows = app._web_state()['rows']
+        assert [r['kind'] for r in rows] == ['section']
+        assert rows[0]['folded'] is True
+
+    def test_read_only_refuses_it(self, pb, tmp_path):
+        """Folding moves the console's screen and every other viewer's, so it
+        is a write and goes through the same gate as pause."""
+        app = _make_app(pb, tmp_path)
+        app._dispatch_cmd(':set web-commands read-only')
+        app._dispatch_cmd(':set web-listen 127.0.0.1:0')
+        app._dispatch_cmd(':web start')
+        try:
+            c = Client(app).sign_in()
+            section = _section(app, pb)
+            status, _body = c.action(section.uid, 'fold')
+            assert status == 403
+            app._web_drain()
+            assert not section.folded
+        finally:
+            app._web_stop(quiet=True)
+
+    def test_an_unknown_fold_verb_is_still_404(self, served, pb):
+        app, c = served
+        assert c.action(_section(app, pb).uid, 'fold-everything')[0] == 404
+
+
+class TestTheFoldControlIsOnThePage:
+    """The server side worked before this; the browser had no affordance."""
+
+    def test_the_section_row_carries_a_marker(self, pb):
+        js = pb._WEB_JS
+        assert "'[+]'" in js and "'[-]'" in js, 'the terminal draws these'
+        assert 'foldmark' in pb._WEB_CSS
+
+    def test_the_verb_is_chosen_from_the_row_state(self, pb):
+        """Not from a toggle, and not from anything the client remembers."""
+        js = pb._WEB_JS
+        assert "act(r.uid, r.folded ? 'unfold' : 'fold')" in js
+
+    def test_a_read_only_viewer_still_sees_the_state(self, pb):
+        """Knowing a section is folded is not a write, so the marker stays and
+        only the click goes away."""
+        js = pb._WEB_JS
+        marker = js[js.index('function sectionRow'):js.index('function badge(')]
+        assert 'canWrite' in marker, 'the click must be gated'
+        assert marker.index("r.folded ? '[+]'") < marker.index('canWrite'), \
+            'the marker is built before the gate, so it renders either way'

@@ -405,9 +405,12 @@ console.log(JSON.stringify({folded: count(true), open: count(false)}));
                            capture_output=True, text=True, timeout=60)
         assert r.returncode == 0, r.stderr
         out = json.loads(r.stdout.strip().splitlines()[-1])
-        # name + badge, plus the strip only when folded
-        assert out['folded'] == 3, out
-        assert out['open'] == 2, out
+        # The property is the *difference*: a folded section gets one child
+        # more than an open one, and that child is the strip.  Asserting the
+        # totals instead (3 and 2) pinned the row's whole shape, so adding the
+        # fold marker broke a test that had no opinion about markers.
+        assert out['folded'] == out['open'] + 1, out
+        assert out['open'] >= 2, out        # at least the name and the badge
 
 
 class TestBothPalettesDefineTheSameTokens:
