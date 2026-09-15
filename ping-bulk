@@ -8084,7 +8084,11 @@ var colBarFor = null;
 function colHidden(name) { return prefs['col.' + name] === true; }
 
 function buildColBar(columns) {
-  var key = columns.join('\u0001');
+  // JSON, not a joined string: any separator can appear inside a column name,
+  // because ':probe --label' lets the operator choose it.  ['a\u0001b'] and
+  // ['a','b'] joined to the same key, so the second was cached away and the
+  // bar kept the first one's buttons.
+  var key = JSON.stringify(columns);
   if (key === colBarFor) { return; }
   colBarFor = key;
   colBar.replaceChildren.apply(colBar, columns.map(function (name) {

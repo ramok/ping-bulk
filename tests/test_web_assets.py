@@ -671,3 +671,101 @@ console.log(JSON.stringify(got));
         app.sort_by = 'name'
         terminal = [m.host for m in app.get_sorted_monitors()]
         assert terminal.index('Echo') < terminal.index('alpha')
+
+
+class TestTheViewControlsActuallyPersist:
+    """Each control has to write its choice, read it back, and not churn.
+
+    None of these had a test: a mutation removing the column button's write,
+    the sort's write, the sort's read-back, or the column bar's rebuild guard
+    each left the whole suite green.  The first means a click silently does
+    nothing; the last rebuilds the bar on every two-second poll, throwing away
+    the buttons and the focus of anyone tabbing through them.
+    """
+
+    RUNNER = r"""
+const sel = {value:'none', addEventListener(_e, fn){ sel.fire = fn; }};
+let store = JSON.parse(process.env.PREFS || '{}');
+const clicks = [];
+const mk = () => ({className:'',textContent:'',children:[],value:'',hidden:false,
+  appendChild(c){this.children.push(c);},setAttribute(){},getAttribute:()=>null,
+  replaceChildren(...k){this.children=k;},
+  addEventListener(_e, fn){ clicks.push({el:this, fn:fn}); },
+  focus(){},remove(){},classList:{add(){},remove(){},toggle(){}}});
+const colBar = mk();
+global.document={getElementById:(i)=>(i==='sort'?sel:(i==='col-bar'?colBar:mk())),
+  createElement:mk,createTextNode:(t)=>({textContent:t}),addEventListener(){},
+  body:mk(),activeElement:null,
+  documentElement:{setAttribute(){},getAttribute:()=>null,removeAttribute(){}},
+  querySelectorAll:()=>[]};
+global.window={setTimeout(){return 0;},clearTimeout(){},addEventListener(){},
+  location:{href:''},
+  localStorage:{getItem:(k)=>(k in store?store[k]:null),setItem(k,v){store[k]=v;}},
+  matchMedia:()=>({matches:false})};
+global.fetch=()=>Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({})});
+require(process.argv[2]);
+const out = {sortOnLoad: sel.value};
+global.buildColBar(['Last','Avg']);
+const first = colBar.children.slice();
+global.buildColBar(['Last','Avg']);
+out.barRebuilt = colBar.children.some((c, i) => c !== first[i]);
+global.buildColBar(['Last','Avg','StDev']);
+out.barGrew = colBar.children.length === 3;
+global.buildColBar(['a\u0001b']);
+const joined = colBar.children.map((b) => b.textContent);
+global.buildColBar(['a','b']);
+out.collision = {first: joined, second: colBar.children.map((b) => b.textContent)};
+global.buildColBar(['Last','Avg']);
+const hit = clicks.filter((c) => colBar.children.indexOf(c.el) === 0).pop();
+if (hit) { hit.fn(); }
+sel.value = 'latency';
+if (sel.fire) { sel.fire(); }
+out.store = store;
+console.log(JSON.stringify(out));
+"""
+
+    def _run(self, pb, tmp_path, prefs=None):
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(_served_js(pb).replace(
+            chr(10) + 'function buildColBar(',
+            chr(10) + 'global.buildColBar = function buildColBar('))
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        env = dict(os.environ)
+        env.pop('PREFS', None)
+        if prefs:
+            env['PREFS'] = json.dumps({'ping-bulk.view': json.dumps(prefs)})
+        r = subprocess.run(['node', str(runner), str(app_js)],
+                           capture_output=True, text=True, timeout=60, env=env)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_hiding_a_column_is_written_down(self, pb, tmp_path):
+        stored = json.loads(self._run(pb, tmp_path)['store']['ping-bulk.view'])
+        assert stored.get('col.Last') is True
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_choosing_a_sort_is_written_down(self, pb, tmp_path):
+        stored = json.loads(self._run(pb, tmp_path)['store']['ping-bulk.view'])
+        assert stored.get('sort') == 'latency'
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_stored_sort_is_applied_on_load(self, pb, tmp_path):
+        out = self._run(pb, tmp_path, prefs={'sort': 'status'})
+        assert out['sortOnLoad'] == 'status'
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_an_unchanged_column_list_does_not_rebuild_the_bar(self, pb, tmp_path):
+        """Rebuilding on every poll would discard the buttons twice a second,
+        taking the focus of anyone tabbing through them with it."""
+        out = self._run(pb, tmp_path)
+        assert out['barRebuilt'] is False
+        assert out['barGrew'] is True, 'but a real change must still rebuild'
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_separator_inside_a_column_name_cannot_hide_a_change(self, pb, tmp_path):
+        """':probe --label' lets the operator choose the name, so no character
+        is safe to join on."""
+        out = self._run(pb, tmp_path)
+        assert out['collision']['second'] == ['a', 'b'], out['collision']
