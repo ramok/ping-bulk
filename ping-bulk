@@ -6902,11 +6902,16 @@ _WEB_SAFE_COMMANDS = frozenset({
     'sync-history', 'autofold', 'layout', 'select',
 })
 _WEB_QUEUE_MAX = 64
-# Ceiling for the browser's name column, in characters.  Content-sizing alone
-# lets one long section title eat the row; the terminal clamps against the
-# screen it can measure, and the server cannot, so it caps and the client
-# narrows further if its own window is smaller.
-_WEB_MAX_NAME_COLS = 48
+# Ceiling for the browser's name column, in characters.  Deliberately far above
+# any real name: the binding limit is the client's `max-width` on `.row .name`,
+# which is a share of the actual row and therefore the only one that can
+# promise the strip room on the window somebody is really using.  This is the
+# sanity bound behind it, for a hosts file with an absurd title in it.
+#
+# It was 48, and 48 was wrong: a relayed host draws its whole jump chain, so
+# 'ses-wg-video → proxmox → nray-set2-slave (10.123.254.1)' is 55 characters
+# and was cut by the very setting meant to size the column to its content.
+_WEB_MAX_NAME_COLS = 120
 # History slots the browser may ask for.  The default is what the page used
 # before it could ask at all, so a client that says nothing is unchanged.
 _WEB_DEFAULT_HISTORY_COLS = 60
@@ -7829,6 +7834,7 @@ _WEB_HTML = """<!DOCTYPE html>
   <div id="view-bar" class="view-bar">
     <button type="button" id="theme-toggle"
             aria-label="switch to the light theme">light</button>
+    <button type="button" id="signin" hidden>sign in</button>
     <button type="button" class="panel-toggle" data-panel="down"
             aria-pressed="true">down</button>
     <button type="button" class="panel-toggle" data-panel="events"
@@ -7965,12 +7971,32 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .row.section { background: none; padding: 7px 0 1px; font-weight: 600; }
 .row.section .name { color: var(--dim); }
 /* Section nesting is not limited to three in the hosts file, so neither is
-   the indent here; level 1 needs none. */
-.row.lvl2 { padding-left: 16px; }
-.row.lvl3 { padding-left: 32px; }
-.row.lvl4 { padding-left: 48px; }
-.row.lvl5 { padding-left: 64px; }
-.row.lvl6 { padding-left: 80px; }
+   the indent here.
+
+   A host is stepped one level in from its own title, which is the terminal's
+   rule: a title sits at (level - 1) * 2 columns and a host at level * 2, so a
+   level-1 host is indented where its level-1 title is not.  Giving both the
+   same padding -- which this did at first -- distinguishes nesting depth and
+   loses the title-to-host step entirely, so every host stood flush with the
+   header above it.  A host outside any section is level 0 and matches no rule.
+
+   A section indents the whole row.  A host indents inside its NAME cell
+   instead -- `box-sizing: border-box` means the padding comes out of the
+   fixed name width, so every row's stats and strip stay in one column however
+   deep the host sits.  Indenting the host's row instead would push its stats
+   and strip right and undo the alignment that is the point of a fixed name
+   column. */
+.row.section.lvl2 { padding-left: 16px; }
+.row.section.lvl3 { padding-left: 32px; }
+.row.section.lvl4 { padding-left: 48px; }
+.row.section.lvl5 { padding-left: 64px; }
+.row.section.lvl6 { padding-left: 80px; }
+.row.host.lvl1 .name { padding-left: 16px; }
+.row.host.lvl2 .name { padding-left: 32px; }
+.row.host.lvl3 .name { padding-left: 48px; }
+.row.host.lvl4 .name { padding-left: 64px; }
+.row.host.lvl5 .name { padding-left: 80px; }
+.row.host.lvl6 .name { padding-left: 96px; }
 /* Fixed, not growing.  While the name absorbed every spare pixel, the stats
    block and the strip were pushed to the right edge and each row's columns
    started wherever that row's values happened to end -- so nothing lined up
@@ -7983,7 +8009,7 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
    now comes from the content.  max-width is the client's half of the clamp:
    the server caps at _WEB_MAX_NAME_COLS without knowing the window, and this
    stops a long name from crowding out the strip on a narrow one. */
-.row .name { flex: 0 0 var(--name-w, 24em); max-width: 45%;
+.row .name { flex: 0 0 var(--name-w, 24em); max-width: 50%;
              min-width: 0; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
 .row.down .name { color: var(--bad); }
@@ -8133,11 +8159,16 @@ var downList = document.getElementById('down');
 var rowsEl = document.getElementById('rows');
 var eventsEl = document.getElementById('events');
 var loginWrap = document.getElementById('login-wrap');
+var signinBtn = document.getElementById('signin');
 var loginForm = document.getElementById('login');
 var passwordEl = document.getElementById('password');
 var loginError = document.getElementById('login-error');
 var csrf = '';
 var canWrite = false;
+// An anonymous viewer and a signed-in one under ':set web-commands read-only'
+// both get canWrite false, and the way out differs: one signs in, the other
+// cannot fold at all.  Saying which is the whole value of the message.
+var anonymous = false;
 var filterEl = document.getElementById('filter');
 var detailWrap = document.getElementById('detail-wrap');
 var detailEl = document.getElementById('detail');
@@ -8442,10 +8473,23 @@ function detailText(d) {
     out.push('');
     d.probes.forEach(function (line) { out.push(line); });
   }
-  if (d.events && d.events.length) {
+  // A viewer with no session is not sent this host's own event list, because
+  // that one is not level-filtered.  Nothing has to be un-redacted to show
+  // them events: the global tail they already hold IS level-filtered and
+  // carries the category each line was filed under, so the same host's lines
+  // can be picked out of it.  The result is a subset, and says so.
+  var events = d.events;
+  var partial = false;
+  if (!events && lastState && lastState.events && d.event_key) {
+    events = lastState.events.filter(function (e) {
+      return e.category === d.event_key;
+    }).map(function (e) { return e.text; });
+    partial = true;
+  }
+  if (events && events.length) {
     out.push('');
-    out.push('Recent events:');
-    d.events.slice(-20).forEach(function (line) { out.push('  ' + line); });
+    out.push(partial ? 'Recent events (at this log level):' : 'Recent events:');
+    events.slice(-20).forEach(function (line) { out.push('  ' + line); });
   }
   return out.join('\\n');
 }
@@ -8506,7 +8550,7 @@ function button(label, cls, uid, verb) {
 
 function hostRow(r, cellWidth) {
   var el = document.createElement('div');
-  el.className = 'row';
+  el.className = 'row lvl' + r.level;
   if (r.down) { el.classList.add('down'); }
   if (r.paused) { el.classList.add('paused'); }
   if (r.no_alarm) { el.classList.add('quiet'); }
@@ -8514,6 +8558,16 @@ function hostRow(r, cellWidth) {
   if (r.uid === selectedUid) { el.classList.add('sel'); }
   el.addEventListener('click', function (ev) {
     if (ev.target.tagName === 'BUTTON') { return; }
+    // Clicking the open host again closes it, and closes it the same way the
+    // button and Escape do rather than inventing a third path.  selectedUid is
+    // read fresh because render() clears it when the selected host leaves the
+    // list, so a remembered copy could close something else.
+    if (r.uid === selectedUid) {
+      selectedUid = '';
+      detailWrap.hidden = true;
+      if (lastState) { render(lastState); }
+      return;
+    }
     showDetail(r.uid);
   });
   el.appendChild(span(r.name, 'name'));
@@ -8569,7 +8623,13 @@ function sectionRow(r, cellWidth) {
       act(r.uid, r.folded ? 'unfold' : 'fold');
     });
   } else {
+    // A refusal nobody can see is this project's oldest recurring bug (§9d).
+    // Without this the marker looks exactly the same, the click does nothing,
+    // and the page offers no reason -- which is precisely what was reported.
     marker.classList.add('ro');
+    marker.setAttribute('title', anonymous
+      ? 'sign in to fold sections (the button in the header)'
+      : 'folding is off: web-commands is read-only');
   }
   el.appendChild(marker);
   el.appendChild(span(r.title, 'name'));
@@ -8604,6 +8664,14 @@ function render(state) {
   lastState = state;
   csrf = state.csrf || '';
   canWrite = state.commands && state.commands !== 'read-only';
+  // No CSRF value means no session: this viewer is reading anonymously.
+  // ':set web-anonymous read-only' makes that succeed, so the 401 branch that
+  // used to be the only way to reach the sign-in form never fires -- a viewer
+  // could see the whole fleet with no hint that signing in offers more, which
+  // is how "the fold does nothing and there are no events" was reported.
+  anonymous = !state.csrf;
+  signinBtn.hidden = !anonymous;
+  if (!anonymous) { showLogin(false); }
   var up = 0, total = 0;
   state.rows.forEach(function (r) {
     if (r.kind === 'host') { total++; if (!r.down) { up++; } }
@@ -8684,6 +8752,8 @@ function showLogin(on) {
   loginWrap.hidden = !on;
   if (on) { passwordEl.focus(); }
 }
+
+signinBtn.addEventListener('click', function () { showLogin(true); });
 
 loginForm.addEventListener('submit', function (ev) {
   ev.preventDefault();
@@ -8802,7 +8872,6 @@ function poll() {
         return null;
       }
       if (!r.ok) { throw new Error('HTTP ' + r.status); }
-      showLogin(false);
       return r.json();
     })
     .then(function (state) { if (state) { render(state); } })
@@ -13848,7 +13917,10 @@ class Application:
     #:   connect  the 'c' binding expanded for this host: a command that is
     #:            ready to paste into a shell and log in
     #:   events   _host_event_lines, which is NOT level-filtered — it returns
-    #:            debug lines that '/api/state's own tail withholds
+    #:            debug lines that '/api/state's own tail withholds.  The
+    #:            viewer is not left with an empty pane: the client picks this
+    #:            host's lines out of that tail by 'event_key', which is the
+    #:            same set minus the levels they may not see.
     #:
     #: A denylist is right here and a blocklist was wrong for the event tail,
     #: because this dict is built field by field in one function: a new field
@@ -14569,11 +14641,18 @@ class Application:
             columns = [STATS_MODES[self.stats_mode]]
 
         rows, down = [], []
+        # The level of the section a host sits in, so the browser can indent it
+        # under its title the way the terminal does (`indent = level * 2` in
+        # `_get_name_col_width`).  `visible` is in entry order, so the most
+        # recent label seen is the immediate parent -- the same reading
+        # `_get_name_col_width` takes from the top of its stack.
+        host_level = 0
         for idx in visible:
             if idx >= len(entries):
                 continue        # the list shrank under us; skip rather than raise
             entry = entries[idx]
             if isinstance(entry, SectionLabel):
+                host_level = entry.level
                 members = self._get_section_monitors(idx)
                 # The badge counts every host under this section; the strip
                 # summarises only the ones folding has taken off the screen.
@@ -14657,6 +14736,7 @@ class Application:
             # client has one rule to follow instead of a global that is wrong
             # for section rows.
             row['cell_width'] = cell_width
+            row['level'] = host_level
             row['hist_class'] = self._history_cell_classes(
                 row['history'], cell_width, view_probe, mode)
             rows.append(row)
@@ -19192,6 +19272,13 @@ class Application:
                        if hasattr(monitor, '_build_ping_cmd') else '')
         data['connect'] = self._connect_preview(monitor)
         data['events'] = self._host_event_lines(monitor)
+        # The category '/api/state's event tail files this host's lines under.
+        # A viewer with no session is not sent 'events' — it is not
+        # level-filtered — but the tail already in their hands is, and it
+        # carries a category per line, so the client can pick the same host's
+        # lines out of what it has rather than being handed the unfiltered
+        # set.  'name' cannot serve: it follows the current ':set dns'.
+        data['event_key'] = monitor.get_display_name(dns_mode='off')
         return data
 
     def _draw_details_overlay(self, stdscr, height, width):

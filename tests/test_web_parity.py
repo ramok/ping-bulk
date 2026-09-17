@@ -531,11 +531,19 @@ class TestTheNameColumnIsSizedFromItsContent:
         assert app._web_state()['view']['name_width'] == \
             len('a-rather-long-host-name.example.com')
 
+    def test_a_relayed_name_is_not_cut(self, pb, tmp_path):
+        """A relayed host draws its whole jump chain, which runs well past any
+        plain hostname. The first cap was 48 and cut exactly this."""
+        name = 'ses-wg-video \u2192 proxmox \u2192 nray-set2-slave (10.123.254.1)'
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        app.entries[0].host = name
+        assert app._web_state()['view']['name_width'] >= len(name)
+
     def test_a_long_section_title_cannot_take_the_row(self, pb, tmp_path):
-        """The clamp, and the reason it is not a refinement: content-sizing
-        alone lets one title leave the strip nothing. The terminal met this
-        as a crash (AGENTS.md §8); here it would be silent."""
-        app = _app(pb, tmp_path, '## ' + 'T' * 65 + '\n10.0.0.1\n')
+        """The sanity bound still exists. The binding limit is the client's
+        max-width, which is a share of the real window; this only stops a
+        hosts file with an absurd title in it."""
+        app = _app(pb, tmp_path, '## ' + 'T' * 300 + '\n10.0.0.1\n')
         assert app._web_state()['view']['name_width'] == pb._WEB_MAX_NAME_COLS
 
     def test_a_folded_section_does_not_widen_it(self, pb, tmp_path):
@@ -621,3 +629,92 @@ class TestTheStripFillsTheWindow:
         pinned by the node harness (test_web_assets); this only keeps the
         deadband from being deleted as redundant-looking arithmetic."""
         assert 'wantCols' in pb._WEB_JS and '< 2' in pb._WEB_JS
+
+
+class TestAHostIsIndentedUnderItsSection:
+    """The terminal indents a host by its section's level (the `indent =
+    level * 2` in `_get_name_col_width`). The browser drew section titles
+    stepping right and left every host flush against the edge."""
+
+    def test_the_payload_carries_each_hosts_level(self, pb, tmp_path):
+        app = _app(pb, tmp_path,
+                   '## One\n10.0.0.1\n### Two\n10.0.0.2\n#### Three\n10.0.0.3\n')
+        rows = app._web_state()['rows']
+        got = [(r['kind'], r.get('level')) for r in rows]
+        assert got == [('section', 1), ('host', 1),
+                       ('section', 2), ('host', 2),
+                       ('section', 3), ('host', 3)], got
+
+    def test_a_host_outside_any_section_is_level_zero(self, pb, tmp_path):
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        assert app._web_state()['rows'][0]['level'] == 0
+
+    def test_the_level_follows_the_most_recent_title(self, pb, tmp_path):
+        """Entries are in order, so the last label seen is the immediate
+        parent — the same reading `_get_name_col_width` takes from its stack.
+        A host after a nested section belongs to that one, not its parent."""
+        app = _app(pb, tmp_path, '## Outer\n### Inner\n10.0.0.1\n')
+        host = next(r for r in app._web_state()['rows'] if r['kind'] == 'host')
+        assert host['level'] == 2
+
+
+class TestAnAnonymousViewerCanStillSeeAHostsEvents:
+    """The host pane ended after the readings, with no 'Recent events'.
+
+    Reported as "looks like frame window cut from buttom", and it was not a
+    layout bug: ``_WEB_ANON_WITHHELD`` drops ``events`` for a viewer with no
+    session, because ``_host_event_lines`` is **not** level-filtered and would
+    hand them the debug lines the global tail withholds.  So the section was
+    absent from the payload and the pane simply stopped early.
+
+    Nothing has to be un-redacted to fix it.  ``/api/state``'s tail is already
+    sent anonymously, is already level-filtered, and carries the category each
+    line was filed under — so the client can pick one host's lines out of what
+    it already holds.  That is *less* exposure than the redaction it replaces,
+    not more.
+
+    ``event_key`` is what makes it possible: ``name`` follows the current
+    ``:set dns`` and the category does not.
+    """
+
+    def test_the_key_is_the_category_host_events_are_filed_under(self, pb, tmp_path):
+        app = _app(pb, tmp_path, '10.0.0.1\n10.0.0.2 ##friendly-name\n')
+        for monitor in app.monitors:
+            app.add_event(monitor.get_display_name(dns_mode='off'), 'is down')
+
+        tail = app._web_state()['events']
+        for monitor in app.monitors:
+            data = app._web_host_detail(monitor.uid)
+            picked = [e['text'] for e in tail if e['category'] == data['event_key']]
+            assert picked == data['events'], (
+                'the client-side filter must select the same lines the '
+                "terminal's own host pane shows: " + repr(data['event_key']))
+
+    def test_the_key_survives_a_dns_mode_the_name_follows(self, pb, tmp_path):
+        """``name`` is rendered with ``DNS_MODES[self.dns_mode]``, so it moves
+        when the console operator presses ``D`` — and the category does not.
+        Keying the filter on ``name`` would empty every host's pane the moment
+        somebody else changed a shared setting."""
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        monitor = app.monitors[0]
+        monitor.resolved_hostname = 'named.example'
+        keys, names = set(), set()
+        for mode in range(len(pb.DNS_MODES)):
+            app.dns_mode = mode
+            data = app._web_host_detail(monitor.uid)
+            keys.add(data['event_key'])
+            names.add(data['name'])
+        # Without this the test passes on a fixture where nothing moved, which
+        # is how a guard becomes decoration.
+        assert len(names) > 1, 'the fixture must actually exercise :set dns'
+        assert len(keys) == 1, 'event_key must not follow :set dns: ' + repr(keys)
+
+    def test_the_redaction_is_untouched(self, pb, tmp_path):
+        """The point of the change is that it buys the events back *without*
+        widening what an anonymous viewer is sent."""
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        uid = app.monitors[0].uid
+        anon = app._web_host_detail(uid, redacted=True)
+        leaked = [f for f in app._WEB_ANON_WITHHELD if f in anon]
+        assert not leaked, leaked
+        assert 'event_key' in anon, 'the key itself must still reach the client'

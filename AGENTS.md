@@ -1314,6 +1314,98 @@ for, and a sustained drag stacked concurrent fetches against
 different door: **anything that can call `render()` from outside the poll chain
 is a place where a poll can be forked.**
 
+**The name column's real limit is the client's, not the server's.** The server
+caps at `_WEB_MAX_NAME_COLS` purely as a sanity bound; what actually protects
+the strip is `max-width` on `.row .name`, a share of the row, because only the
+client knows the window. The first cap was 48 and was wrong: a relayed host
+draws its whole jump chain, so `ses-wg-video → proxmox → nray-set2-slave
+(10.123.254.1)` is 55 characters and was cut by the setting whose entire
+purpose is to size the column to its content. **A server-side cap on something
+only the client can measure should be generous enough never to bind.**
+
+**A host is indented inside its name cell; a section indents its whole row.**
+The padding goes on the `.name` span rather than the row — with `box-sizing:
+border-box` it comes out of the fixed name width, so however deep a host sits
+its stats and strip stay in the same column. Indenting the row instead would
+push those right and undo the alignment a fixed name column exists for (5e535b2).
+
+**The step that matters is title-to-host, and the first cut lost exactly
+that.** The terminal puts a title at `(level - 1) * 2` columns and a host at
+`level * 2`, so a host is always one step inside the header above it —
+including at level 1, where the title has no indent at all. The browser gave a
+host at level *N* the same padding as a *section* at level *N*, which
+distinguishes nesting depth perfectly and leaves every host flush with its own
+header. So the report it answered ("host under a title should be aligned") came
+out half-fixed: right relative to the other hosts, wrong relative to the thing
+they sit under, which is the alignment that was being asked about. A host
+outside any section is level 0 and matches no rule; the client must pass that
+level through rather than coercing it to 1, or those hosts get indented under
+nothing.
+
+**Clicking the open host closes it**, through the same two lines the close
+button and Escape use rather than a third path, and reading `selectedUid`
+fresh — `render()` clears it when the selected host leaves the list, so a
+remembered copy could close something else.
+
+**An anonymous viewer had no way to sign in, and that is what two bug reports
+actually were.** `:set web-anonymous read-only` makes `/api/state` answer 200,
+and `showLogin(true)` fired only on a 401 — so the branch that reveals the
+sign-in form never ran, while `showLogin(false)` on every successful poll
+actively hid it. A viewer could watch the whole fleet with nothing on the page
+suggesting there was more to be had. Measured against a real listener:
+
+    ANON  /api/state  200  csrf=None   commands='read-only'
+    ANON  /api/host   200  events withheld
+    AUTH  /api/state  200  csrf set    commands='safe'
+    AUTH  /api/host   200  events present
+
+Both halves of the report — "the fold does nothing, and there is no pointer
+cursor" and "I do not see Recent events" — are that table's first two lines.
+Neither was a bug in folding or in the details pane, and answering "it works,
+you must be signed in" was true and useless, because the page offered no way to
+become signed in. There is now a `sign in` button, shown exactly when
+`state.csrf` is absent, and `showLogin(false)` no longer runs on a successful
+poll — with anonymous read that is the *normal* case, so it shut the form a
+couple of seconds after the viewer opened it.
+
+**The lesson is about where to look.** A capability that is withheld rather
+than broken produces symptoms indistinguishable from breakage: a control that
+does nothing, and a section that is simply absent. When a feature "does not
+work" for a user and the code says it should, check what their *session* is
+allowed to see before checking the feature again.
+
+**A read-only viewer is told why the fold marker does nothing.** Reported as
+"click on title still do not fold in firefox", and it was not a browser bug:
+measured under node, a signed-in client attaches the handler and a click on the
+*title* fires `POST /api/host/<uid>/fold`, while an anonymous one attaches
+nothing at all — `state.commands` is `'read-only'` for them (§"Who may read
+it"), so `canWrite` is false. The marker looked identical and the page gave no
+reason, which is this project's oldest recurring bug in its newest place. The
+two cases are distinguished, because the way out differs: an anonymous viewer
+signs in, a viewer under `:set web-commands read-only` cannot fold at all.
+
+**The events a redaction withheld are bought back without un-redacting it.**
+Reported as the host pane being "cut from the bottom": there is no
+`max-height` on it anywhere, and the pane simply ended early because
+`_WEB_ANON_WITHHELD` drops `events` and the section was therefore absent from
+the payload. Exactly the symptom above — withheld, not broken.
+
+The repair is the user's own suggestion and is strictly *safer* than relaxing
+the denylist. `/api/state`'s tail is already sent to these callers, is already
+level-filtered, and carries the category each line was filed under, so the
+client can select one host's lines out of what it is holding. Nothing new
+crosses the wire but the key to match on: `event_key`, which is
+`get_display_name(dns_mode='off')`. **`name` cannot serve** — it is rendered
+with `DNS_MODES[self.dns_mode]`, so under the common `:set dns ip+name` it
+reads `10.0.0.1 (named.example)` and would match no category at all, and it
+moves whenever the console operator presses `D`.
+
+The fallback fires only when the field is absent, so a viewer who signed in
+still gets the terminal's own list. That list is the wider one — matched by a
+substring over the whole line rather than on the category, and not
+level-filtered — which is why the narrower pane says `(at this log level)`
+rather than presenting itself as the whole story.
+
 **A section header folds on a click anywhere along it**, not just on the
 `[+]`/`[-]`. One handler on the row rather than one per child, so a click
 cannot fire twice. The verbs are `fold` and `unfold` rather than a toggle, for

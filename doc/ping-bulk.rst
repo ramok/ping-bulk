@@ -2086,9 +2086,18 @@ Web interface
     was.  Both views are rendered from one snapshot, so they cannot report a
     host differently.
 
-    Click a section header to fold or unfold it, as ``Space`` does in the
-    terminal.  A folded section summarises the hosts it hides — the counts,
-    and a strip whose worst reading per slot stands in for all of them.
+    Reading without signing in shows the list and the strips, but not a
+    host's command or connect line, and nothing can be changed — the
+    ``sign in`` button in the header is how you get the rest.  A host's
+    recent events are shown either way; without a session they are the ones
+    the page's own event list carries, so the log level applies to them.
+
+    Click a host again to close its details.  Click a section header to fold
+    or unfold it, as ``Space`` does in the terminal — a viewer who has not
+    signed in can see that a section is folded but not change it, and the
+    marker says so.  A folded section summarises the hosts it hides — the
+    counts, and a strip whose worst reading per slot stands in for all of
+    them.
 
     The box on the ``Hosts`` heading filters the list **in the browser**.
     ``/`` focuses it and ``Esc`` clears it, as in the terminal — but unlike

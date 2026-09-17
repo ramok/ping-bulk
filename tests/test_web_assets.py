@@ -14,6 +14,7 @@ them parsed it, so 153 web tests passed against a page that could not load.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -1086,3 +1087,271 @@ const tick = async (ms) => {
         assert out['timers'] == 1, out
         asked = [u['url'] for u in out['urls'][1:]]
         assert set(asked) == {'/api/state?cols=100'}, asked
+
+
+class TestClickingTheOpenHostClosesIt:
+    """Reported as: the pane opens, and clicking the same row opens it again."""
+
+    RUNNER = r'''
+let fetched = [];
+const mk = () => { const o = {
+  className:'', textContent:'', children:[], attrs:{}, listeners:{}, hidden:false,
+  style:{setProperty(){},removeProperty(){}},
+  appendChild(c){o.children.push(c); return c;}, replaceChildren(...k){o.children=k;},
+  setAttribute(k,v){o.attrs[k]=v;}, getAttribute(k){return o.attrs[k]===undefined?null:o.attrs[k];},
+  addEventListener(t,f){ (o.listeners[t] = o.listeners[t] || []).push(f); },
+  classList:{names:[],add(...n){this.names.push(...n);},remove(){},toggle(){},
+             contains(n){return this.names.indexOf(n)!==-1;}},
+  querySelector(){return {clientWidth:700};},
+  getBoundingClientRect(){return {width:(o.textContent||'').length*7};},
+  removeChild(){}, clientWidth:700, tagName:'SPAN', remove(){}, focus(){}, value:'',
+}; return o; };
+global.document = {getElementById: mk, createElement: mk,
+  createTextNode:(t)=>({textContent:t}), addEventListener(){}, body:mk(),
+  documentElement:{setAttribute(){},getAttribute:()=>null,removeAttribute(){}},
+  querySelectorAll:()=>[]};
+global.window = {setTimeout:()=>0, clearTimeout(){}, addEventListener(){},
+  location:{href:''}, localStorage:{getItem:()=>null,setItem(){}},
+  matchMedia:()=>({matches:false})};
+global.setTimeout = global.window.setTimeout;
+global.clearTimeout = global.window.clearTimeout;
+// A real state shape: the module-level poll() renders whatever this returns.
+const STATE = {rows:[], down:[], events:[], time:0, columns:[],
+               view:{cell_width:1, name_width:8}, commands:'safe', csrf:'x'};
+global.fetch = (u) => { fetched.push(String(u));
+  return Promise.resolve({ok:true, status:200,
+                          json:()=>Promise.resolve(STATE)}); };
+require(process.argv[2]);
+const row = {kind:'host', uid:'h1', name:'h1', level:1, history:'.',
+             hist_class:['g-ok'], cell_width:1, stats:{}, stat_class:{},
+             down:false, updown:'', paused:false, no_alarm:false};
+const fire = () => {
+  const el = global.hostRow(row, 1);
+  (el.listeners['click']||[]).forEach(f => f({target:{tagName:'SPAN'}}));
+};
+(async () => {
+  fire(); await Promise.resolve();          // first click: opens
+  const opened = global.readSelected();
+  fetched = [];
+  fire(); await Promise.resolve();          // second click on the same host
+  console.log(JSON.stringify({opened: opened, closed: global.readSelected(),
+                              refetched: fetched.length}));
+})();
+'''
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_second_click_closes_rather_than_reopening(self, pb, tmp_path):
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(
+            _served_js(pb).replace('\nfunction hostRow(', '\nglobal.hostRow = function hostRow(')
+            + '\nglobal.readSelected = function () { return selectedUid; };\n')
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        r = subprocess.run(['node', str(runner), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        assert out['opened'] == 'h1', out
+        assert out['closed'] == '', out
+        assert out['refetched'] == 0, 'closing must not re-fetch the detail'
+
+
+class TestAReadOnlyViewerIsToldWhy:
+    """A marker that looks identical and does nothing is the silent refusal
+    this project keeps re-inventing (AGENTS.md §9d)."""
+
+    def test_the_marker_explains_itself(self, pb):
+        js = _served_js(pb)
+        assert "setAttribute('title'" in js
+        assert 'sign in to fold sections' in js
+        assert 'web-commands is read-only' in js
+
+    def test_the_two_reasons_are_distinguished(self, pb):
+        """Anonymous and read-only both disable the click and the way out
+        differs: one signs in, the other cannot fold at all.
+
+        Asserting that the word ``anonymous`` appears somewhere in the script
+        is what this did first, and it could not fail: the word is in three
+        comments and two declarations, so deleting the whole ternary left it
+        passing.  The ternary itself is the thing under test.
+        """
+        js = _served_js(pb)
+        assert ("marker.setAttribute('title', anonymous\n"
+                "      ? 'sign in to fold sections") in js, (
+            'the two reasons must be selected by the anonymous flag, not '
+            'merged into one message')
+
+
+class TestAnAnonymousViewerCanStillSignIn:
+    """``:set web-anonymous read-only`` makes ``/api/state`` answer 200, so the
+    401 branch that used to be the only route to the sign-in form never fires.
+    A viewer could watch the whole fleet with no hint that signing in offers
+    anything — which is how "the fold does nothing and there are no events"
+    was reported, twice."""
+
+    def test_the_page_carries_a_sign_in_control(self, pb):
+        assert 'id="signin"' in pb._WEB_HTML
+        assert "signinBtn.addEventListener('click'" in _served_js(pb)
+
+    def test_it_is_shown_only_to_anonymous_viewers(self, pb):
+        assert 'signinBtn.hidden = !anonymous' in _served_js(pb)
+
+    def test_a_successful_poll_no_longer_closes_the_form(self, pb):
+        """showLogin(false) ran on every 200. With anonymous read that is the
+        normal case, so the form shut a couple of seconds after the viewer
+        opened it — the read succeeding is the whole point of the tier."""
+        js = _served_js(pb)
+        poll = js[js.index('function poll()'):]
+        poll = poll[:poll.index('\n}')]
+        assert 'showLogin(false)' not in poll, poll
+        assert 'if (!anonymous) { showLogin(false); }' in js
+
+
+class TestTheHostPaneFallsBackToTheTailItAlreadyHas:
+    """A viewer with no session is sent no ``events`` for a host, and the pane
+    used to end there — reported as the frame being cut off at the bottom.
+
+    The fallback filters ``/api/state``'s tail, which that viewer already
+    holds, by the category the server names in ``event_key``.  Two properties
+    matter and both are asserted: the fallback fires when the field is absent,
+    and it does **not** fire when it is present — a signed-in viewer must keep
+    seeing the terminal's own, unfiltered list rather than a narrower one.
+    """
+
+    RUNNER = r'''
+const mkEl = () => ({className: '', textContent: '', children: [], hidden: false,
+                     style: {setProperty(){}, removeProperty(){}},
+                     querySelector: () => null, getBoundingClientRect: () => ({width: 0}),
+                     clientWidth: 0,
+                     appendChild(c) { this.children.push(c); },
+                     setAttribute(){}, getAttribute: () => null,
+                     classList: {add(){}, remove(){}}});
+global.document = {
+  getElementById: () => Object.assign(mkEl(), {addEventListener(){},
+                                               replaceChildren(){}}),
+  createElement: mkEl,
+  addEventListener(){}, body: {}, documentElement: {
+    setAttribute(){}, getAttribute: () => null, removeAttribute(){}},
+  querySelectorAll: () => [],
+};
+global.window = {
+  setTimeout(){ return 0; }, clearTimeout(){}, addEventListener(){},
+  location: {href: ''},
+  localStorage: {getItem: () => null, setItem(){}},
+  matchMedia: () => ({matches: false}),
+};
+global.fetch = () => Promise.resolve({ok: true, status: 200,
+                                      json: () => Promise.resolve({})});
+require(process.argv[2]);
+
+global.setLastState({events: [
+  {level: 1, category: 'host-a', text: 'T   host-a is down', cls: ''},
+  {level: 1, category: 'host-b', text: 'T   host-b is down', cls: ''},
+  {level: 1, category: 'web',    text: 'T   web    a request', cls: ''},
+]});
+
+const base = {name: 'host-a', ip: null, cmd: '', connect: null, alive: true,
+              error: null, uptime: null, downtime: null, tx: 0, rx: 0, xx: 0,
+              loss_pct: null, lat_min: null, lat_max: null, lat_avg: null,
+              lat_stdev: null, clock_offset_ms: null, clock_state: null,
+              probes: [], event_key: 'host-a'};
+
+const anon = global.detailText(Object.assign({}, base));
+const auth = global.detailText(Object.assign({}, base,
+                               {events: ['T   host-a said something else']}));
+console.log(JSON.stringify({anon: anon, auth: auth}));
+'''
+
+    def _run(self, pb, tmp_path):
+        app_js = tmp_path / 'app.js'
+        # detailText reads lastState, which the poll assigns; nothing polls
+        # here, so the harness needs a way in.
+        app_js.write_text(_served_js(pb).replace(
+            '\nfunction detailText(', '\nglobal.detailText = function detailText(')
+            + '\nglobal.setLastState = function (s) { lastState = s; };\n')
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        r = subprocess.run(['node', str(runner), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_viewer_with_no_events_field_gets_the_matching_tail(self, pb, tmp_path):
+        out = self._run(pb, tmp_path)
+        assert 'Recent events' in out['anon'], out['anon']
+        assert 'host-a is down' in out['anon']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_the_fallback_takes_only_this_hosts_category(self, pb, tmp_path):
+        """The whole tail is in hand, so selecting nothing would look like
+        working code right up until a second host appeared in the pane."""
+        out = self._run(pb, tmp_path)
+        assert 'host-b' not in out['anon'], out['anon']
+        assert 'a request' not in out['anon'], out['anon']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_supplied_events_field_wins(self, pb, tmp_path):
+        """The server's list is the terminal's own and is not level-filtered;
+        replacing it with the narrower tail would be a silent downgrade for
+        the viewer who signed in to get it."""
+        out = self._run(pb, tmp_path)
+        assert 'said something else' in out['auth'], out['auth']
+        assert 'is down' not in out['auth'], out['auth']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_the_narrower_list_says_that_it_is_narrower(self, pb, tmp_path):
+        """Both panes are headed 'Recent events'; only one of them is the
+        whole story, and a reader cannot tell the difference by looking."""
+        out = self._run(pb, tmp_path)
+        assert 'at this log level' in out['anon'], out['anon']
+        assert 'at this log level' not in out['auth'], out['auth']
+
+
+class TestAHostIsSteppedInFromItsOwnTitle:
+    """The terminal puts a title at ``(level - 1) * 2`` columns and a host at
+    ``level * 2`` (`ping-bulk` `draw_hosts`), so a host is always one step
+    inside the header above it — including at level 1, where the title itself
+    has no indent.
+
+    Giving a host the *same* padding as a section at the same level — which is
+    what shipped first — distinguishes nesting depth and loses the
+    title-to-host step completely, so every host stood flush with its own
+    header. That is the reported symptom half-fixed: right relative to other
+    hosts, wrong relative to the thing it sits under.
+    """
+
+    STEP = 16   # px per terminal indent level
+
+    def _rules(self, pb, kind):
+        """{level: padding-px} for '.row.section.lvlN' or '.row.host.lvlN'."""
+        pattern = (r'\.row\.%s\.lvl(\d)(?: \.name)? \{ padding-left: (\d+)px; \}'
+                   % kind)
+        return {int(lvl): int(px) for lvl, px in re.findall(pattern, pb._WEB_CSS)}
+
+    def test_a_title_starts_one_step_left_of_its_hosts(self, pb):
+        sections = self._rules(pb, 'section')
+        hosts = self._rules(pb, 'host')
+        assert sections and hosts, (sections, hosts)
+        for level, host_px in sorted(hosts.items()):
+            # A level-1 section has no rule at all, which is 0px.
+            title_px = sections.get(level, 0)
+            assert host_px - title_px == self.STEP, (
+                'a level-%d host must sit one step inside its own title, not '
+                'level with it: title %dpx, host %dpx'
+                % (level, title_px, host_px))
+
+    def test_the_levels_the_terminal_can_produce_are_all_covered(self, pb):
+        """A host whose rule is missing falls back to no indent, which reads
+        as "top level" — a wrong answer rather than a missing one."""
+        hosts = self._rules(pb, 'host')
+        assert min(hosts) == 1, 'a level-1 host is indented; the terminal does'
+        assert set(hosts) == set(range(1, max(hosts) + 1)), sorted(hosts)
+
+    def test_a_host_in_no_section_matches_no_rule(self, pb):
+        """`_web_state` emits level 0 for those, and the class must carry it
+        through rather than being coerced to 1 — otherwise the level-1 rule
+        above would indent a host that sits under nothing."""
+        assert "'row lvl' + r.level" in pb._WEB_JS, (
+            'the host row class must use the level verbatim')
+        assert '(r.level || 1)' not in pb._WEB_JS
