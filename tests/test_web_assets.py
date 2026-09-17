@@ -372,6 +372,7 @@ const mkEl = () => ({className: '', textContent: '', children: [],
                      querySelector: () => null, getBoundingClientRect: () => ({width: 0}),
                      clientWidth: 0,
                      appendChild(c) { this.children.push(c); },
+                     addEventListener(){},
                      setAttribute(){}, getAttribute: () => null,
                      classList: {add(){}, remove(){}}});
 global.document = {
@@ -1156,30 +1157,30 @@ const fire = () => {
         assert out['refetched'] == 0, 'closing must not re-fetch the detail'
 
 
-class TestAReadOnlyViewerIsToldWhy:
-    """A marker that looks identical and does nothing is the silent refusal
-    this project keeps re-inventing (AGENTS.md §9d)."""
+class TestFoldingNeedsNoPermission:
+    """The marker used to be gated on ``canWrite`` and carried a message
+    saying why it was inert — "sign in to fold sections" for an anonymous
+    viewer, "web-commands is read-only" for a signed-in one.
 
-    def test_the_marker_explains_itself(self, pb):
+    Both messages are gone because the condition is. Folding is a view choice
+    made in this browser, so it needs no session: there is nothing left to
+    explain, which is a better answer than explaining it well. A refusal
+    nobody can see is this project's oldest recurring bug (AGENTS.md §9d) —
+    and the cure that landed first, explaining the refusal, was still a
+    refusal.
+    """
+
+    def test_no_message_survives(self, pb):
         js = _served_js(pb)
-        assert "setAttribute('title'" in js
-        assert 'sign in to fold sections' in js
-        assert 'web-commands is read-only' in js
+        assert 'sign in to fold sections' not in js
+        assert 'web-commands is read-only' not in js
 
-    def test_the_two_reasons_are_distinguished(self, pb):
-        """Anonymous and read-only both disable the click and the way out
-        differs: one signs in, the other cannot fold at all.
-
-        Asserting that the word ``anonymous`` appears somewhere in the script
-        is what this did first, and it could not fail: the word is in three
-        comments and two declarations, so deleting the whole ternary left it
-        passing.  The ternary itself is the thing under test.
-        """
-        js = _served_js(pb)
-        assert ("marker.setAttribute('title', anonymous\n"
-                "      ? 'sign in to fold sections") in js, (
-            'the two reasons must be selected by the anonymous flag, not '
-            'merged into one message')
+    def test_the_read_only_marker_style_went_with_it(self, pb):
+        """A '.ro' marker that nothing applies is dead style the next reader
+        would take for a live state."""
+        marker = pb._WEB_JS[pb._WEB_JS.index('function sectionRow'):
+                            pb._WEB_JS.index('function badge(')]
+        assert "classList.add('ro')" not in marker
 
 
 class TestAnAnonymousViewerCanStillSignIn:
@@ -1224,6 +1225,7 @@ const mkEl = () => ({className: '', textContent: '', children: [], hidden: false
                      querySelector: () => null, getBoundingClientRect: () => ({width: 0}),
                      clientWidth: 0,
                      appendChild(c) { this.children.push(c); },
+                     addEventListener(){},
                      setAttribute(){}, getAttribute: () => null,
                      classList: {add(){}, remove(){}}});
 global.document = {
@@ -1355,3 +1357,136 @@ class TestAHostIsSteppedInFromItsOwnTitle:
         assert "'row lvl' + r.level" in pb._WEB_JS, (
             'the host row class must use the level verbatim')
         assert '(r.level || 1)' not in pb._WEB_JS
+
+
+class TestTheBrowserFoldsForItself:
+    """The Python tests cover the payload; this covers the behaviour.
+
+    Folding reaches no request, so nothing on the server can show that it
+    works. What has to hold is that a click hides exactly the hosts the server
+    said that section owns, and that the strip appears — the strip being the
+    whole reason the rule stayed server-side.
+    """
+
+    RUNNER = r'''
+const mkEl = () => ({className: '', textContent: '', children: [], hidden: false,
+                     style: {setProperty(){}, removeProperty(){}},
+                     querySelector: () => null, getBoundingClientRect: () => ({width: 0}),
+                     clientWidth: 0,
+                     appendChild(c) { this.children.push(c); },
+                     addEventListener(type, fn) { (this.on = this.on || {})[type] = fn; },
+                     setAttribute(){}, getAttribute: () => null,
+                     classList: {add(){}, remove(){}}});
+global.document = {
+  // `value` matters: render() reads filterEl.value.trim().
+  getElementById: () => Object.assign(mkEl(), {addEventListener(){},
+                                               replaceChildren(){}, value: ''}),
+  createElement: mkEl,
+  addEventListener(){}, body: {}, documentElement: {
+    setAttribute(){}, getAttribute: () => null, removeAttribute(){}},
+  querySelectorAll: () => [],
+};
+global.window = {
+  setTimeout(){ return 0; }, clearTimeout(){}, addEventListener(){},
+  location: {href: ''},
+  localStorage: {getItem: () => null, setItem(){}},
+  matchMedia: () => ({matches: false}),
+};
+global.fetch = () => Promise.resolve({ok: true, status: 200,
+                                      json: () => Promise.resolve({})});
+require(process.argv[2]);
+
+// One section owning two hosts, and a third host under nothing.
+const section = {kind: 'section', uid: 'S', level: 1, title: 'S', folded: false,
+                 badge: [{text: '2', cls: 'b-up'}],
+                 history: '..........', hist_class: [], cell_width: 1};
+const host = (uid, parent) => ({kind: 'host', uid: uid, parent: parent,
+                                level: parent ? 1 : 0, name: uid, stats: {},
+                                stat_class: {}, history: '.', hist_class: [],
+                                cell_width: 1, updown: '', down: false});
+const rows = [section, host('a', 'S'), host('b', 'S'), host('loose', null)];
+const kinds = () => global.foldFilter(rows).map(r => r.uid);
+
+const out = {open: kinds()};
+// The click handler is what a viewer actually fires.
+const row = global.sectionRow(section, 1);
+out.markerOpen = row.children[0].textContent;
+out.stripWhenOpen = row.children.length;
+row.on.click({target: {tagName: 'DIV'}});
+out.folded = kinds();
+const row2 = global.sectionRow(section, 1);
+out.markerFolded = row2.children[0].textContent;
+out.stripWhenFolded = row2.children.length;
+row2.on.click({target: {tagName: 'DIV'}});
+out.reopened = kinds();
+// A sorted payload carries NO section rows at all, and a terminal ':filter'
+// drops the ones it does not match.  Neither may cost this viewer a fold.
+global.setFolded('S', true);
+global.render({rows: [host('a', 'S'), host('b', 'S')], down: [], events: [],
+               columns: [], view: {}, time: 0, commands: 'read-only'});
+out.survivesASortedPoll = global.isFolded(section);
+// Bounded, so it cannot grow for the life of the browser profile.
+for (var i = 0; i < 700; i++) { global.setFolded('s' + i, true); }
+out.capped = Object.keys(global.foldStore()).length;
+console.log(JSON.stringify(out));
+'''
+
+    def _run(self, pb, tmp_path):
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(_served_js(pb) + '\n' + '\n'.join(
+            'global.%s = %s;' % (n, n) for n in
+            ('sectionRow', 'foldFilter', 'isFolded', 'setFolded', 'foldStore',
+             'render')
+        ) + '\n')
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        r = subprocess.run(['node', str(runner), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_click_hides_exactly_that_sections_hosts(self, pb, tmp_path):
+        out = self._run(pb, tmp_path)
+        assert out['open'] == ['S', 'a', 'b', 'loose']
+        assert out['folded'] == ['S', 'loose'], (
+            'folding must hide the section\'s own hosts and nothing else')
+        assert out['reopened'] == ['S', 'a', 'b', 'loose'], 'and unfold again'
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_the_marker_follows_this_browser_not_the_payload(self, pb, tmp_path):
+        """`section.folded` stays false throughout — the payload is never
+        rewritten, so a marker that tracked it could not move at all."""
+        out = self._run(pb, tmp_path)
+        assert out['markerOpen'] == '[-]'
+        assert out['markerFolded'] == '[+]'
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_the_strip_appears_only_once_folded(self, pb, tmp_path):
+        """The reason the summary rule stayed on the server: a locally folded
+        section still gets the terminal's own strip rather than one the client
+        worked out for itself."""
+        out = self._run(pb, tmp_path)
+        assert out['stripWhenFolded'] == out['stripWhenOpen'] + 1
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_poll_without_section_rows_does_not_clear_the_folds(self, pb, tmp_path):
+        """The first cut dropped any uid the payload did not carry, which is
+        the obvious way to bound the store and reads absence wrongly.
+
+        A section is missing for reasons other than being gone: ``:set sort``
+        emits no section rows at all and a terminal ``:filter`` drops the ones
+        it does not match. Measured before the fix — two folded sections, one
+        sorted poll, store empty — and this user's own config carries
+        ``:set sort latency``, so it was one poll from happening.
+        """
+        out = self._run(pb, tmp_path)
+        assert out['survivesASortedPoll'] is True, (
+            'a poll carrying no section rows erased the viewer\'s folds')
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_the_store_is_bounded(self, pb, tmp_path):
+        """Which is what the pruning was actually for, and a bound cannot
+        misread why a row is absent."""
+        out = self._run(pb, tmp_path)
+        assert out['capped'] <= 500, out['capped']

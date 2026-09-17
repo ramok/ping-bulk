@@ -2093,11 +2093,19 @@ Web interface
     the page's own event list carries, so the log level applies to them.
 
     Click a host again to close its details.  Click a section header to fold
-    or unfold it, as ``Space`` does in the terminal — a viewer who has not
-    signed in can see that a section is folded but not change it, and the
-    marker says so.  A folded section summarises the hosts it hides — the
-    counts, and a strip whose worst reading per slot stands in for all of
-    them.
+    or unfold it, as ``Space`` does in the terminal.  A folded section
+    summarises the hosts it hides — the counts, and a strip whose worst
+    reading per slot stands in for all of them.
+
+    Folding happens **in the browser**, like the filter below: it changes
+    what you are looking at and moves nobody else's screen, not the
+    terminal's and not another viewer's.  So it needs no sign-in, and each
+    browser remembers its own.  A section you have never touched starts as
+    the hosts file left it.
+
+    Section headers are shown only while the order is the one the hosts file
+    gives, as in the terminal — with ``:set sort`` active there are no
+    headers, and so nothing to fold.
 
     The box on the ``Hosts`` heading filters the list **in the browser**.
     ``/`` focuses it and ``Esc`` clears it, as in the terminal — but unlike

@@ -1196,6 +1196,20 @@ thirds of which was answering read exactly like one that was entirely dead.
 the terminal bolds apart from a plain lost probe — stops arriving as the same
 red too.
 
+**The browser asks a fold-independent version of that question.** Folding is
+a view choice each browser makes for itself (below), so the server cannot know
+which sections a given viewer has closed and cannot compute `hidden` for them.
+`_web_state` passes `_get_direct_section_monitors(idx)` unconditionally instead
+— the hosts folding *that* section hides, whatever anybody else has folded.
+That is not an approximation: folding a section hides its direct hosts and
+nothing else, so the two agree exactly, which is asserted against
+`_get_visible_entry_indices` for every section rather than argued. The one
+place the browser and the terminal differ is a folded section holding a
+**folded** descendant: the terminal's parent strip absorbs the descendant's
+hosts as well, while the browser's rule is that each section summarises what
+folding *it* hides — no double counting, and the descendant's own strip is one
+row below. Everything below about the terminal's own population still holds.
+
 **And the strip must be handed the hosts folding actually hid.** `draw_hosts`
 passes `history_monitors=_get_hidden_section_monitors(...)`, which is a strict
 subset of the section's monitors whenever a folded section holds an *unfolded*
@@ -1374,15 +1388,62 @@ does nothing, and a section that is simply absent. When a feature "does not
 work" for a user and the code says it should, check what their *session* is
 allowed to see before checking the feature again.
 
-**A read-only viewer is told why the fold marker does nothing.** Reported as
-"click on title still do not fold in firefox", and it was not a browser bug:
-measured under node, a signed-in client attaches the handler and a click on the
-*title* fires `POST /api/host/<uid>/fold`, while an anonymous one attaches
-nothing at all — `state.commands` is `'read-only'` for them (§"Who may read
-it"), so `canWrite` is false. The marker looked identical and the page gave no
-reason, which is this project's oldest recurring bug in its newest place. The
-two cases are distinguished, because the way out differs: an anonymous viewer
-signs in, a viewer under `:set web-commands read-only` cannot fold at all.
+**Folding is a view choice, and it is made in the browser.** It shipped as
+`POST /api/host/<uid>/fold`, which was the wrong axis twice over: an anonymous
+viewer could not fold **at all** — reported as "click on title still do not
+fold in firefox", and measured under node, where a signed-in client attaches
+the handler and an anonymous one attaches nothing — and a signed-in viewer
+moved the console's screen and every other viewer's by tidying their own. The
+first repair explained the inert marker (*"sign in to fold sections"*), and
+that was still a refusal: a refusal nobody can act on, which is the same bug
+one layer out. Folding now decides what **this person** is looking at, like
+the filter, the sort, the columns and the palette, so it needs no session and
+no permission. The verbs are gone from `_WEB_SAFE_COMMANDS`' host table.
+
+**Three things keep the rule from being written twice**, which is the whole
+risk in moving a decision to the client:
+
+- **The summary stays server-side.** Each section carries the strip and the
+  per-cell classes it has when folded, so the client draws what it is handed.
+  Re-deriving `_worst_history_char` and `slot_ok_ratios` in JavaScript is
+  exactly the drift #18 existed to fix and that was got wrong twice in that
+  same cell.
+- **The nesting walk stays server-side.** Every host row names the section it
+  is hidden with (`parent`), taken from the stack `_web_state` already walks
+  for `level`. The client's entire fold rule is one lookup, not a copy of
+  `_get_visible_entry_indices`.
+- **The payload carries every host**, via `_get_visible_entry_indices(
+  include_folded=True)` — a parameter rather than a second walk, because that
+  function also applies the sort and the terminal's `:filter`. While the
+  serializer took the terminal's visible rows, a section the *console* had
+  folded had no hosts in the payload, so a browser could not un-fold it
+  however local its own state was.
+
+The state lives in `localStorage` beside the other view preferences, keyed by
+section uid — which survives an `:edit` and a restart (§9c). A section this
+viewer has never touched follows the hosts file, so a `:fold close` in it is
+what the page opens showing.
+
+**The store is bounded, not pruned against the payload**, and the difference
+is a bug that was written as a virtue first. Dropping any uid the latest poll
+did not carry is the obvious way to stop it growing, and it reads absence as
+"removed" when absence also means "not listed this time": `:set sort` emits no
+section rows **at all** (the sort branch of `_get_visible_entry_indices`
+returns monitors only), and a terminal `:filter` drops the sections it does not
+match. Measured under node against the real script — two sections folded, one
+sorted poll, store empty and both reopened — and the config this was found
+against carries `:set sort latency`, so it was one poll away. A cap is what the
+pruning was actually for, and a cap cannot misread why a row is missing; a
+stale entry costs a few bytes and brings the viewer's own choice back with its
+section.
+
+**The name column stopped narrowing when you fold**, and that is the price.
+It is sized from the rows the payload carries, which is now every host; a
+width that followed the *console's* fold state would be answering somebody
+else's question, and the server cannot know this viewer's. The column no
+longer jumps as you fold, `max-width: 50%` still stops it taking the row, and
+a column that is too generous cuts no name — which is the failure it exists to
+avoid.
 
 **The events a redaction withheld are bought back without un-redacting it.**
 Reported as the host pane being "cut from the bottom": there is no
@@ -1408,13 +1469,12 @@ rather than presenting itself as the whole story.
 
 **A section header folds on a click anywhere along it**, not just on the
 `[+]`/`[-]`. One handler on the row rather than one per child, so a click
-cannot fire twice. The verbs are `fold` and `unfold` rather than a toggle, for
-the reason every write here is explicit: the page is showing a picture up to a
-poll old, and a toggle applied to that does the opposite of what was clicked.
-Nothing new was needed on the way in — `_web_index_for_uid` already matched any
-entry carrying a uid, `SectionLabel` has one, and `:fold open`/`close` resolve
-to `zo`/`zc`, which act on the highlighted section that `_web_drain` has
-already parked the cursor on. What was missing was a verb and a control.
+cannot fire twice; the marker stays as the affordance saying the row does
+something. A toggle is right here where it is wrong for a write: the state
+being toggled is this browser's own and is never a poll stale, which is the
+whole difference from `pause`. The row is redrawn on the click rather than at
+the next poll — waiting two seconds for your own click reads as a dead
+control.
 
 **The details pane sits in the row list, under the host it describes.** It is
 the same node moved rather than a new one built: a node has one parent, so
@@ -1426,8 +1486,9 @@ pane until another fetch returned.
 every other viewer's; one person searching should not drag anybody else's
 screen with them. A test asserts the client never posts `:filter`.
 
-**So is every other view choice**, for the same reason: the palette and which
-panels are shown live in `localStorage` under one key and reach no request.
+**So is every other view choice**, for the same reason: folding, the palette
+and which panels are shown live in `localStorage` under one key and reach no
+request.
 The rule is that anything describing *how this person reads the page* stays in
 the browser, and only things describing *what the fleet is doing* go to the
 server. `:set` is shared by every viewer and the console, so it is the wrong

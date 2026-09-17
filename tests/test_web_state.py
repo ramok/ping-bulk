@@ -247,13 +247,22 @@ class TestItAgreesWithTheTerminal:
         got = app._web_state()['rows'][0]['stats']['Avg']
         assert got == app._compute_stat(m, 'Avg').strip()
 
-    def test_folding_hides_rows_exactly_as_the_terminal_does(self, pb,
-                                                             tmp_path):
+    def test_folding_does_not_take_rows_out_of_the_payload(self, pb,
+                                                           tmp_path):
+        """Folding is a view choice each browser makes for itself, so the
+        payload carries every host and the page decides what it is showing —
+        the same shape as the client-side filter.
+
+        While the serializer took the terminal's visible rows, a section the
+        console had folded had no hosts in the payload at all, so a browser
+        could not *un*fold it however local its own state was.
+        """
         app = _app(pb, tmp_path, BASE)
         assert len(app._web_state()['rows']) == 4     # section + 3 hosts
         app.entries[0].folded = True
-        assert len(app._web_state()['rows']) == len(
-            app._get_visible_entry_indices())
+        assert len(app._web_state()['rows']) == 4
+        # ... and the terminal is unchanged: it still hides them.
+        assert len(app._get_visible_entry_indices()) == 1
 
     def test_the_view_block_reports_the_display_settings(self, pb, tmp_path):
         app = _app(pb, tmp_path, BASE)
@@ -331,7 +340,7 @@ class TestItIsSafeToReadFromAnotherThread:
         visible = app._get_visible_entry_indices()
         real = app._get_visible_entry_indices
 
-        def stale():
+        def stale(include_folded=False):
             del app.entries[1:]       # shrink after the indices were computed
             return visible
 

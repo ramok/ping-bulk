@@ -452,18 +452,17 @@ class TestTheBadgeKeepsItsColours:
 
 
 class TestTheStripSummarisesOnlyWhatFoldingHid:
-    """The badge counts every host; the strip summarises the *hidden* ones.
+    """The badge counts every host; the strip summarises the ones folding
+    *this* section takes off the screen — its **direct** hosts.
 
-    Those are different sets whenever a folded section holds an **unfolded**
-    subsection — that subsection's hosts are drawn in their own right, so a
-    summary that repeats them answers the wrong question. ``draw_hosts`` passes
-    ``history_monitors=_get_hidden_section_monitors(...)`` for exactly this;
-    ``_web_state`` did not.
+    Those are different sets whenever a section holds a subsection, because
+    folding hides a section's direct hosts and nothing else: the subsection
+    keeps its header and its own hosts. A summary that repeats what is visible
+    beside it answers the wrong question.
 
     It cost nothing while every lost slot was painted the same red. It began to
-    cost a wrong reading the moment the ``> 0.5`` branch became reachable,
-    which is what the commit before this one did: the browser could call a
-    section degraded where the terminal calls it down.
+    cost a wrong reading the moment the ``> 0.5`` branch became reachable: the
+    browser could call a section degraded where the terminal calls it down.
     """
 
     @pytest.fixture
@@ -494,7 +493,7 @@ class TestTheStripSummarisesOnlyWhatFoldingHid:
         idx = next(i for i, e in enumerate(app.entries)
                    if isinstance(e, pb.SectionLabel))
         assert len(app._get_section_monitors(idx)) == 3
-        assert len(app._get_hidden_section_monitors(idx)) == 2
+        assert len(app._get_direct_section_monitors(idx)) == 2
 
     def test_a_half_lost_slot_is_not_called_degraded(self, app):
         row, _ = _section_row(app, history_len=1)
@@ -503,6 +502,54 @@ class TestTheStripSummarisesOnlyWhatFoldingHid:
             'the strip counted a host the viewer can already see, which '
             'turned an even split into a majority'
         )
+
+    def test_direct_hosts_are_exactly_what_folding_hides(self, app, pb):
+        """The claim the whole client-side fold rests on.
+
+        If these two ever disagree, a browser that folds locally draws a
+        summary of a different set of hosts than the ones it just hid — and
+        the disagreement is silent, because both are plausible strips.
+        """
+        def visible():
+            return {app.entries[i].host
+                    for i in app._get_visible_entry_indices()
+                    if isinstance(app.entries[i], pb.Monitor)}
+
+        labels = [e for e in app.entries if isinstance(e, pb.SectionLabel)]
+        for label in labels:
+            label.folded = False
+        wide_open = visible()
+
+        for idx, entry in enumerate(app.entries):
+            if not isinstance(entry, pb.SectionLabel):
+                continue
+            entry.folded = True
+            hidden = wide_open - visible()
+            entry.folded = False
+            direct = {m.host for m in app._get_direct_section_monitors(idx)}
+            assert hidden == direct, (
+                'folding %r hides %s but its strip would summarise %s'
+                % (entry.title, sorted(hidden), sorted(direct)))
+
+    def test_the_strip_does_not_depend_on_anybody_s_fold_state(self, app):
+        """Folding is a view choice each browser makes for itself, so the
+        server cannot know which sections a given viewer has closed. One
+        precomputed strip per section is only enough if it is the same strip
+        whatever anybody has folded — which is what makes the rule safe to
+        keep server-side instead of writing it again in JavaScript.
+        """
+        import itertools
+        labels = [e for e in app.entries
+                  if hasattr(e, 'folded') and hasattr(e, 'title')]
+        seen = set()
+        for states in itertools.product([False, True], repeat=len(labels)):
+            for label, state in zip(labels, states):
+                label.folded = state
+            row, _ = _section_row(app, history_len=1)
+            seen.add((row['history'], tuple(row['hist_class'])))
+        assert len(seen) == 1, (
+            'the section strip changed with somebody else\'s fold state: '
+            + repr(sorted(seen)))
 
 
 class TestAProcessErrorIsNotAPlainLoss:
@@ -546,17 +593,27 @@ class TestTheNameColumnIsSizedFromItsContent:
         app = _app(pb, tmp_path, '## ' + 'T' * 300 + '\n10.0.0.1\n')
         assert app._web_state()['view']['name_width'] == pb._WEB_MAX_NAME_COLS
 
-    def test_a_folded_section_does_not_widen_it(self, pb, tmp_path):
-        """Hosts nobody can see must not size a column for the ones they can.
-        Measuring from the emitted rows gets this for free — they are not in
-        the payload — which is the other reason not to reuse the terminal's
-        cached helper."""
+    def test_it_is_sized_over_every_row_the_payload_carries(self, pb, tmp_path):
+        """Which is now every host, folded or not.
+
+        It used to narrow when a section folded, because a folded section's
+        hosts were not in the payload to measure. They are now — folding is a
+        view choice each browser makes for itself, so the server cannot know
+        which rows a given viewer is looking at, and a width that followed the
+        *console's* fold state would be answering somebody else's question.
+
+        The cost is that the column no longer narrows when you fold; the gain
+        is that it does not jump as you do, and `max-width: 50%` still stops it
+        taking the row. A width that is too generous cuts no name, which is the
+        failure this column exists to avoid.
+        """
         app = _app(pb, tmp_path,
                    '## S\nshort\n' + 'x' * 40 + '.example.com\n')
         wide = app._web_state()['view']['name_width']
         for label in [e for e in app.entries if isinstance(e, pb.SectionLabel)]:
             label.folded = True
-        assert app._web_state()['view']['name_width'] < wide
+        assert app._web_state()['view']['name_width'] == wide
+        assert wide >= 52, 'the long name must still be what sizes it'
 
     def test_reading_the_state_still_mutates_nothing(self, pb, tmp_path):
         """_get_name_col_width caches into _name_col_cache and clears

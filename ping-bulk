@@ -7453,19 +7453,12 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
             'pause':    ':pause-selected on',
             'resume':   ':pause-selected off',
             'no-alarm': ':no-alarm --toggle',
-            # A section uid rather than a host one.  `_web_index_for_uid`
-            # matches any entry carrying a uid, and ':fold open'/'close' resolve
-            # to zo/zc, which act on the highlighted SectionLabel — so
-            # `_web_drain` parking the cursor on that row is the whole
-            # mechanism, and it is the same one the write path already relies
-            # on for pause.
-            #
-            # Explicit verbs here for the reason above: the page's picture is
-            # up to a poll old, so a click on a section somebody else has since
-            # folded must not unfold it.  Sending 'fold' at an already-folded
-            # section is a no-op, which is the behaviour to want.
-            'fold':     ':fold close',
-            'unfold':   ':fold open',
+            # There is deliberately no 'fold' verb.  Folding is a view choice
+            # and is made in the browser, like the filter, the sort, the
+            # columns and the palette — see §9d, "Filtering is client-side".
+            # Shipping it as a write meant a viewer with no session could not
+            # fold at all, and a viewer with one moved the console's screen by
+            # tidying their own.
         }
         if verb not in commands:
             self._send(404, b'no such action\n')
@@ -8062,7 +8055,6 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .foldmark { color: var(--dim); font-size: 12px;
             padding: 0 4px; user-select: none;
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.foldmark.ro { color: var(--dim); }
 /* The whole header is the hit target; the marker only says so. */
 .row.section.foldable { cursor: pointer; }
 .row.section.foldable:hover .foldmark,
@@ -8201,6 +8193,65 @@ var prefs = readPrefs();
 function setPref(key, value) {
   prefs[key] = value;
   writePrefs(prefs);
+}
+
+// -- folding ----------------------------------------------------------------
+// Folding decides what THIS person is looking at, so it belongs with the
+// filter, the sort, the columns and the palette: in this browser, reaching no
+// request.  It used to POST ':fold', which moved the terminal's view and every
+// other viewer's, and which a viewer who had not signed in could not do at all
+// -- so they were shown a marker that did nothing.
+//
+// The rule is never re-implemented here.  The server names the section each
+// host is hidden with (r.parent) and sends every section the strip it has when
+// folded, so this file only ever asks 'has this viewer closed that uid?'.
+function foldStore() {
+  var f = prefs.fold;
+  return (f && typeof f === 'object') ? f : {};
+}
+
+// A section this viewer has never touched follows the hosts file, so ':fold
+// close' in the file is what the page opens showing.
+function isFolded(row) {
+  var f = foldStore();
+  return Object.prototype.hasOwnProperty.call(f, row.uid)
+    ? !!f[row.uid] : !!row.folded;
+}
+
+// Bounded, and never trimmed by what a poll happens to contain.  Dropping a
+// uid the payload did not carry looks like the obvious way to stop this
+// growing, and it is wrong: a section is missing for reasons other than being
+// gone.  ':set sort' emits no section rows at all, and a terminal ':filter'
+// drops the ones it does not match -- so the first cut deleted every fold the
+// moment either was switched on.  Measured against this script under node:
+// two sections folded, one sorted poll, store empty and both reopened.
+//
+// A bound is what the pruning was actually for, and a bound cannot misread
+// why a row is absent.  A stale entry costs a few bytes and, if its section
+// comes back, brings this viewer's own choice back with it.
+var FOLD_MAX = 500;
+
+function setFolded(uid, state) {
+  var f = foldStore();
+  f[uid] = !!state;
+  // Object key order is insertion order for keys that are not array indices,
+  // and a uid is 's' plus a hash, so the oldest choices are evicted first.
+  var keys = Object.keys(f);
+  while (keys.length > FOLD_MAX) { delete f[keys.shift()]; }
+  setPref('fold', f);
+}
+
+// One pass to find the closed sections, then one lookup per host.  A section
+// header is never hidden -- the terminal keeps them navigable whatever is
+// folded, which is also why folding a section hides its direct hosts only.
+function foldFilter(rows) {
+  var closed = {};
+  rows.forEach(function (r) {
+    if (r.kind === 'section' && isFolded(r)) { closed[r.uid] = true; }
+  });
+  return rows.filter(function (r) {
+    return r.kind === 'section' || !closed[r.parent];
+  });
 }
 
 // -- theme ------------------------------------------------------------------
@@ -8604,33 +8655,28 @@ function hostRow(r, cellWidth) {
 function sectionRow(r, cellWidth) {
   var el = document.createElement('div');
   el.className = 'row section lvl' + r.level;
+  var folded = isFolded(r);
   // The marker the terminal draws, and the control: '[+]' folded, '[-]' open.
-  // The verb is chosen from r.folded, which is up to one poll stale -- which
-  // is exactly why the verbs are explicit rather than a toggle. Clicking
-  // 'fold' at a section somebody else has already folded does nothing, where
-  // a toggle would open it.
-  var marker = span(r.folded ? '[+]' : '[-]', 'foldmark');
-  if (canWrite) {
-    // The whole header is the hit target, not just the marker -- a section
-    // title is what the eye goes to, and a three-character marker is a poor
-    // thing to ask for on a phone.  One handler on the row rather than one
-    // per child, so a click cannot fire twice; the marker is left as the
-    // affordance that says the row does something.  Buttons are skipped the
-    // way hostRow skips them, in case a section ever grows one.
-    el.classList.add('foldable');
-    el.addEventListener('click', function (ev) {
-      if (ev.target.tagName === 'BUTTON') { return; }
-      act(r.uid, r.folded ? 'unfold' : 'fold');
-    });
-  } else {
-    // A refusal nobody can see is this project's oldest recurring bug (§9d).
-    // Without this the marker looks exactly the same, the click does nothing,
-    // and the page offers no reason -- which is precisely what was reported.
-    marker.classList.add('ro');
-    marker.setAttribute('title', anonymous
-      ? 'sign in to fold sections (the button in the header)'
-      : 'folding is off: web-commands is read-only');
-  }
+  //
+  // No write gate.  Folding changes nothing anybody else can see, so it needs
+  // no session and no permission -- which is the whole point: an anonymous
+  // viewer can fold, and a signed-in one no longer moves the console's screen
+  // by tidying their own.
+  var marker = span(folded ? '[+]' : '[-]', 'foldmark');
+  // The whole header is the hit target, not just the marker -- a section title
+  // is what the eye goes to, and a three-character marker is a poor thing to
+  // ask for on a phone.  One handler on the row rather than one per child, so
+  // a click cannot fire twice; the marker is left as the affordance that says
+  // the row does something.  Buttons are skipped the way hostRow skips them,
+  // in case a section ever grows one.
+  el.classList.add('foldable');
+  el.addEventListener('click', function (ev) {
+    if (ev.target.tagName === 'BUTTON') { return; }
+    setFolded(r.uid, !folded);
+    // Redraw now rather than at the next poll: a fold is this viewer's own
+    // click and waiting two seconds for it reads as a dead control.
+    if (lastState) { render(lastState); }
+  });
   el.appendChild(marker);
   el.appendChild(span(r.title, 'name'));
   el.appendChild(badge(r.badge));
@@ -8640,7 +8686,7 @@ function sectionRow(r, cellWidth) {
   // (The terminal's condition also tests that the bar fits the screen; that
   // half is a layout guard with no meaning here.)  The server sends the strip
   // either way, which costs a few bytes and keeps the serializer simple.
-  if (r.folded) {
+  if (folded) {
     el.appendChild(strip(r.history, r.hist_class, cellWidth));
   }
   return el;
@@ -8696,7 +8742,7 @@ function render(state) {
   buildColBar(state.columns || []);
 
   var needle = filterEl.value.trim().toLowerCase();
-  var ordered = sortRows(state.rows);
+  var ordered = foldFilter(sortRows(state.rows));
   var shown = !needle ? ordered : ordered.filter(function (r) {
     return r.kind === 'host' && r.name.toLowerCase().indexOf(needle) !== -1;
   });
@@ -11979,12 +12025,20 @@ class Application:
 
         return badge_parts, history, slot_ok_ratios
 
-    def _get_visible_entry_indices(self):
+    def _get_visible_entry_indices(self, include_folded=False):
         """Return a list of self.entries indices that are currently visible.
 
         An entry is visible if:
-        - It's a section label AND sort_by == 'none' AND no ancestor section is folded
-        - It's a monitor AND (sort_by != 'none' OR no ancestor section is folded)
+        - It's a section label AND sort_by == 'none'
+        - It's a monitor AND (sort_by != 'none' OR its immediate parent
+          section is not folded)
+
+        *include_folded* keeps the monitors folding would hide.  The browser
+        folds per viewer (§9d), so the payload has to carry every host and let
+        each page decide what it is showing — exactly as the client-side filter
+        already works.  It is a parameter rather than a second walk because
+        this function also applies the sort and the terminal's ':filter', and
+        a copy of those rules is the drift this program keeps paying for.
 
         When a filter is active (_filter_query is set), only entries in
         _filter_visible are included.
@@ -12013,7 +12067,7 @@ class Application:
                     section_stack.append(entry)
                 else:
                     # Monitor: visible only if its immediate parent section is not folded.
-                    if not (section_stack and section_stack[-1].folded):
+                    if include_folded or not (section_stack and section_stack[-1].folded):
                         if not self._filter_query or idx in self._filter_visible:
                             visible.append(idx)
             return visible
@@ -14617,7 +14671,7 @@ class Application:
         """
         render_time, sync = self._history_render_time()
         entries = list(self.entries)
-        visible = self._get_visible_entry_indices()
+        visible = self._get_visible_entry_indices(include_folded=True)
         # The same three questions draw_hosts asks, and answered by the same
         # helpers.  ':set ping-view <probe>' puts a probe series in the strip
         # instead of the ping results, and a probe cell is wider than one
@@ -14647,19 +14701,22 @@ class Application:
         # recent label seen is the immediate parent -- the same reading
         # `_get_name_col_width` takes from the top of its stack.
         host_level = 0
+        host_parent = None
         for idx in visible:
             if idx >= len(entries):
                 continue        # the list shrank under us; skip rather than raise
             entry = entries[idx]
             if isinstance(entry, SectionLabel):
                 host_level = entry.level
+                host_parent = entry.uid
                 members = self._get_section_monitors(idx)
                 # The badge counts every host under this section; the strip
-                # summarises only the ones folding has taken off the screen.
-                # Those are different sets whenever a folded section holds an
-                # *unfolded* subsection, because that subsection's hosts are
-                # already drawn in their own right — and a summary that repeats
-                # what is visible beside it answers the wrong question.
+                # summarises only the ones folding it takes off the screen.
+                # Those are different sets whenever a section holds a
+                # subsection, because folding a section hides its *direct*
+                # hosts and nothing else — a subsection keeps its header and
+                # its own hosts, and a summary that repeats what is visible
+                # beside it answers the wrong question.
                 #
                 # Passing `members` for both is only harmless while every lost
                 # slot is painted the same: it changes `slot_ok_ratios`, so the
@@ -14668,8 +14725,16 @@ class Application:
                 # Measured on a folded parent (one host down, one up) holding
                 # an unfolded child (one up): 0.50 and red against 0.67 and
                 # yellow.
-                hidden = (self._get_hidden_section_monitors(idx)
-                          if entry.folded else None)
+                #
+                # Unconditional, and independent of anybody's fold state:
+                # folding is a view choice each browser makes for itself, so
+                # the server cannot know which sections a given viewer has
+                # closed.  `_get_direct_section_monitors` is exactly the set
+                # folding this section hides — verified against
+                # `_get_visible_entry_indices` — which is why one precomputed
+                # strip per section is enough and the rule never has to be
+                # written a second time in JavaScript.
+                hidden = self._get_direct_section_monitors(idx)
                 badge, hist, slot_ok_ratios = self._section_summary(
                     members, history_len, self.history_offset,
                     sync=sync, end_time=render_time,
@@ -14737,6 +14802,12 @@ class Application:
             # for section rows.
             row['cell_width'] = cell_width
             row['level'] = host_level
+            # The section this host is hidden with.  The server already walks
+            # the nesting stack to get `level`, so naming the parent costs one
+            # assignment and saves the client walking it again — a second
+            # implementation of `_get_visible_entry_indices`' rule is exactly
+            # what folding in the browser must not become.
+            row['parent'] = host_parent
             row['hist_class'] = self._history_cell_classes(
                 row['history'], cell_width, view_probe, mode)
             rows.append(row)

@@ -560,93 +560,99 @@ def _section(app, pb):
     return next(e for e in app.entries if isinstance(e, pb.SectionLabel))
 
 
-class TestFoldingFromTheBrowser:
-    """A section is addressed by uid exactly as a host is.
+class TestFoldingIsNotAWrite:
+    """Folding moved from the server to the browser, and the verbs came out.
 
-    Nothing new was needed on the way in: ``_web_index_for_uid`` matches any
-    entry carrying a uid and ``SectionLabel`` has one, while ':fold open' and
-    ':fold close' resolve to ``zo``/``zc``, which act on the **highlighted**
-    section — so ``_web_drain`` parking the cursor on that row is the whole
-    mechanism. What was missing was a verb and a control; the browser simply
-    had no way to ask.
+    It was shipped as ``POST /api/host/<uid>/fold`` and that was the wrong
+    axis: a viewer with no session could not fold **at all** — they were shown
+    a marker that did nothing — and a viewer with one moved the console's
+    screen and every other viewer's by tidying their own. Folding decides what
+    *this person* is looking at, which is the rule the filter, the sort, the
+    columns and the palette already follow (AGENTS.md §9d, "Filtering is
+    client-side").
     """
 
-    def test_a_section_folds_and_unfolds(self, served, pb):
+    def test_the_verbs_are_gone(self, served, pb):
         app, c = served
         section = _section(app, pb)
-        assert not section.folded
-
-        c.action(section.uid, 'fold')
+        for verb in ('fold', 'unfold'):
+            assert c.action(section.uid, verb)[0] == 404, verb
         app._web_drain()
-        assert section.folded
+        assert not section.folded, 'no request may move the console\'s fold'
 
-        c.action(section.uid, 'unfold')
-        app._web_drain()
-        assert not section.folded
+    def test_the_payload_carries_the_hosts_a_fold_would_hide(self, served, pb):
+        """The property the whole client-side fold rests on.
 
-    def test_the_verbs_are_explicit_not_a_toggle(self, served, pb):
-        """The page is up to one poll stale, so a click carries what it wants,
-        not 'the other one'. Clicking fold at an already-folded section is a
-        no-op; a toggle would open it."""
+        While the serializer took the terminal's visible rows, a section the
+        console had folded simply had no hosts in the payload — so a browser
+        could not *un*fold it however local its own state was. The page filters
+        what it is sent, exactly as it does for the search box.
+        """
         app, c = served
         section = _section(app, pb)
-        for _ in range(3):
-            c.action(section.uid, 'fold')
-            app._web_drain()
-            assert section.folded
+        before = [r['kind'] for r in app._web_state()['rows']]
+        assert before.count('host') == 3, before
 
-    def test_folding_hides_the_hosts_from_the_payload(self, served, pb):
-        """The visible-row rule is the server's, so the browser gets the same
-        answer the terminal draws rather than hiding rows on its own."""
+        section.folded = True
+        after = app._web_state()['rows']
+        assert [r['kind'] for r in after] == before, (
+            'the console folding a section must not empty the browser\'s list')
+
+    def test_the_section_still_reports_the_consoles_state(self, served, pb):
+        """A viewer who has never touched a section follows the hosts file, so
+        a ':fold close' in it is what the page opens showing."""
         app, c = served
-        assert len([r for r in app._web_state()['rows'] if r['kind'] == 'host']) == 3
+        section = _section(app, pb)
+        section.folded = True
+        row = next(r for r in app._web_state()['rows'] if r['kind'] == 'section')
+        assert row['folded'] is True
 
-        c.action(_section(app, pb).uid, 'fold')
-        app._web_drain()
+    def test_every_host_names_the_section_it_is_hidden_with(self, served, pb):
+        """So the client needs one lookup rather than its own copy of the
+        nesting walk in ``_get_visible_entry_indices``."""
+        app, c = served
         rows = app._web_state()['rows']
-        assert [r['kind'] for r in rows] == ['section']
-        assert rows[0]['folded'] is True
-
-    def test_read_only_refuses_it(self, pb, tmp_path):
-        """Folding moves the console's screen and every other viewer's, so it
-        is a write and goes through the same gate as pause."""
-        app = _make_app(pb, tmp_path)
-        app._dispatch_cmd(':set web-commands read-only')
-        app._dispatch_cmd(':set web-listen 127.0.0.1:0')
-        app._dispatch_cmd(':web start')
-        try:
-            c = Client(app).sign_in()
-            section = _section(app, pb)
-            status, _body = c.action(section.uid, 'fold')
-            assert status == 403
-            app._web_drain()
-            assert not section.folded
-        finally:
-            app._web_stop(quiet=True)
-
-    def test_an_unknown_fold_verb_is_still_404(self, served, pb):
-        app, c = served
-        assert c.action(_section(app, pb).uid, 'fold-everything')[0] == 404
+        section = next(r for r in rows if r['kind'] == 'section')
+        hosts = [r for r in rows if r['kind'] == 'host']
+        assert hosts and all('parent' in r for r in hosts)
+        assert any(r['parent'] == section['uid'] for r in hosts)
 
 
 class TestTheFoldControlIsOnThePage:
-    """The server side worked before this; the browser had no affordance."""
+    """The marker is the affordance; the click must not be gated."""
 
     def test_the_section_row_carries_a_marker(self, pb):
         js = pb._WEB_JS
         assert "'[+]'" in js and "'[-]'" in js, 'the terminal draws these'
         assert 'foldmark' in pb._WEB_CSS
 
-    def test_the_verb_is_chosen_from_the_row_state(self, pb):
-        """Not from a toggle, and not from anything the client remembers."""
-        js = pb._WEB_JS
-        assert "act(r.uid, r.folded ? 'unfold' : 'fold')" in js
-
-    def test_a_read_only_viewer_still_sees_the_state(self, pb):
-        """Knowing a section is folded is not a write, so the marker stays and
-        only the click goes away."""
+    def test_the_click_is_not_gated_on_being_able_to_write(self, pb):
+        """Gating it is what made an anonymous viewer's marker inert, and the
+        message explaining why was true and useless — the page offered no way
+        to become able to fold. Now there is nothing to explain."""
         js = pb._WEB_JS
         marker = js[js.index('function sectionRow'):js.index('function badge(')]
-        assert 'canWrite' in marker, 'the click must be gated'
-        assert marker.index("r.folded ? '[+]'") < marker.index('canWrite'), \
-            'the marker is built before the gate, so it renders either way'
+        assert 'canWrite' not in marker, 'folding needs no permission'
+        assert 'act(' not in marker, 'folding must not post a command'
+
+    def test_the_state_comes_from_this_browser(self, pb):
+        js = pb._WEB_JS
+        marker = js[js.index('function sectionRow'):js.index('function badge(')]
+        assert 'isFolded(r)' in marker
+        assert 'setFolded(r.uid' in marker
+
+    def test_the_only_thing_that_posts_is_a_button(self, pb):
+        """The companion of the ':filter' guard: a view choice that reaches the
+        server is a view choice that moves somebody else's screen.
+
+        Asserting that the string ``:fold`` is absent from the script is what
+        this did first, and it is the wrong shape twice over — it fails on a
+        comment that merely mentions the command, and it would pass on a fold
+        posted under any other spelling. ``act`` is the one function that
+        issues a write, so the question is who calls it.
+        """
+        js = pb._WEB_JS
+        callers = [line.strip() for line in js.split('\n')
+                   if 'act(' in line and 'function act(' not in line]
+        assert callers == ["b.addEventListener('click', function () "
+                           "{ act(uid, verb); });"], callers
