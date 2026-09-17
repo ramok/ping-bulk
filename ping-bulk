@@ -12025,7 +12025,8 @@ class Application:
 
         return badge_parts, history, slot_ok_ratios
 
-    def _get_visible_entry_indices(self, include_folded=False):
+    def _get_visible_entry_indices(self, include_folded=False,
+                                  ignore_sort=False):
         """Return a list of self.entries indices that are currently visible.
 
         An entry is visible if:
@@ -12033,24 +12034,29 @@ class Application:
         - It's a monitor AND (sort_by != 'none' OR its immediate parent
           section is not folded)
 
-        *include_folded* keeps the monitors folding would hide.  The browser
-        folds per viewer (§9d), so the payload has to carry every host and let
-        each page decide what it is showing — exactly as the client-side filter
-        already works.  It is a parameter rather than a second walk because
-        this function also applies the sort and the terminal's ':filter', and
-        a copy of those rules is the drift this program keeps paying for.
+        *include_folded* keeps the monitors folding would hide, and
+        *ignore_sort* keeps the entry order, and the section labels with it.
+        Both exist for the browser, which decides its own view (§9d): it folds
+        per viewer and it has its own sort control, so the payload has to carry
+        every host, in file order, with the headers — exactly as the
+        client-side filter already works.  Parameters rather than a second
+        walk, because this function also applies the terminal's ':filter', and
+        a copy of these rules is the drift this program keeps paying for.
 
         When a filter is active (_filter_query is set), only entries in
         _filter_visible are included.
 
-        Folding is hierarchical: folding a level-1 section hides its level-2
-        subsections and all hosts underneath.  A section stack tracks ancestors
-        — when a level-N section is encountered, all stack entries with
-        level >= N are popped first.
+        Folding is NOT hierarchical, whatever this docstring said for years:
+        a section label is always navigable and a monitor is hidden only when
+        its *immediate* parent is folded, which is what the loop below does and
+        what the comments in it say.  Folding a section hides its direct hosts;
+        a subsection keeps its header and its own hosts.  A section stack
+        tracks ancestors — when a level-N section is encountered, all stack
+        entries with level >= N are popped first.
 
         Returns indices in display order (sorted when sort_by != 'none').
         """
-        if self.sort_by == 'none':
+        if ignore_sort or self.sort_by == 'none':
             visible = []
             section_stack = []  # list of SectionLabel, shallowest first
             for idx, entry in enumerate(self.entries):
@@ -14671,7 +14677,8 @@ class Application:
         """
         render_time, sync = self._history_render_time()
         entries = list(self.entries)
-        visible = self._get_visible_entry_indices(include_folded=True)
+        visible = self._get_visible_entry_indices(include_folded=True,
+                                                  ignore_sort=True)
         # The same three questions draw_hosts asks, and answered by the same
         # helpers.  ':set ping-view <probe>' puts a probe series in the strip
         # instead of the ping results, and a probe cell is wider than one

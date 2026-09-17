@@ -2103,9 +2103,12 @@ Web interface
     browser remembers its own.  A section you have never touched starts as
     the hosts file left it.
 
-    Section headers are shown only while the order is the one the hosts file
-    gives, as in the terminal — with ``:set sort`` active there are no
-    headers, and so nothing to fold.
+    The order is the browser's too.  The page is always sent the hosts file's
+    own order with the section headers in it, whatever ``:set sort`` the
+    terminal is using, and the ``sort`` control beside the filter reorders
+    your copy.  Sorting hides the headers while it is on, as in the terminal
+    — a section says where a host sits in the configured order, so it means
+    nothing once the rows are somewhere else.
 
     The box on the ``Hosts`` heading filters the list **in the browser**.
     ``/`` focuses it and ``Esc`` clears it, as in the terminal — but unlike

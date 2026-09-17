@@ -264,6 +264,32 @@ class TestItAgreesWithTheTerminal:
         # ... and the terminal is unchanged: it still hides them.
         assert len(app._get_visible_entry_indices()) == 1
 
+    def test_a_console_sort_does_not_empty_the_browsers_list(self, pb,
+                                                            tmp_path):
+        """':set sort' makes the terminal drop every section header, and the
+        serializer inherited that — so with a sort on the console the browser
+        received hosts in the console's order and **no sections at all**.
+
+        The browser has its own sort control and its own fold state, so the
+        order and the headers are its business: the payload is always the
+        file's order with the labels in it. The terminal is untouched.
+        """
+        app = _app(pb, tmp_path, BASE)
+        in_order = [r.get('uid') for r in app._web_state()['rows']]
+        assert any(r['kind'] == 'section' for r in app._web_state()['rows'])
+
+        app._dispatch_cmd(':set sort latency')
+        rows = app._web_state()['rows']
+        assert [r.get('uid') for r in rows] == in_order, (
+            'the console\'s sort must not reorder the browser')
+        assert any(r['kind'] == 'section' for r in rows), (
+            'and must not take the section headers away, which is what left '
+            'nothing to fold'
+        )
+        # The terminal still sorts, and still hides its headers while it does.
+        assert all(not isinstance(app.entries[i], pb.SectionLabel)
+                   for i in app._get_visible_entry_indices())
+
     def test_the_view_block_reports_the_display_settings(self, pb, tmp_path):
         app = _app(pb, tmp_path, BASE)
         app._dispatch_cmd(':set dns hostname')
@@ -340,7 +366,7 @@ class TestItIsSafeToReadFromAnotherThread:
         visible = app._get_visible_entry_indices()
         real = app._get_visible_entry_indices
 
-        def stale(include_folded=False):
+        def stale(include_folded=False, ignore_sort=False):
             del app.entries[1:]       # shrink after the indices were computed
             return visible
 

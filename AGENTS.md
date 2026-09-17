@@ -1412,12 +1412,19 @@ risk in moving a decision to the client:
   is hidden with (`parent`), taken from the stack `_web_state` already walks
   for `level`. The client's entire fold rule is one lookup, not a copy of
   `_get_visible_entry_indices`.
-- **The payload carries every host**, via `_get_visible_entry_indices(
-  include_folded=True)` — a parameter rather than a second walk, because that
-  function also applies the sort and the terminal's `:filter`. While the
-  serializer took the terminal's visible rows, a section the *console* had
-  folded had no hosts in the payload, so a browser could not un-fold it
-  however local its own state was.
+- **The payload carries every host, in the file's own order, with the
+  headers** — `_get_visible_entry_indices(include_folded=True,
+  ignore_sort=True)`, parameters rather than a second walk, because that
+  function also applies the terminal's `:filter`. While the serializer took
+  the terminal's visible rows it inherited both of that view's subtractions:
+  a section the *console* had folded had no hosts in the payload, so a browser
+  could not un-fold it however local its own state was — and a console
+  `:set sort` dropped **every section header**, so there was nothing to fold
+  at all. The second was not hypothetical: the config this was developed
+  against carries `:set sort latency`, which made the whole feature
+  unreachable for the person who asked for it. The browser has had its own
+  sort control since the view preferences landed, so the order was already
+  its business; the payload had simply not caught up.
 
 The state lives in `localStorage` beside the other view preferences, keyed by
 section uid — which survives an `:edit` and a restart (§9c). A section this
