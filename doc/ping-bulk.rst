@@ -2081,13 +2081,23 @@ Web interface
 
     Click a row for the same figures the ``Enter`` overlay shows in the
     terminal — command, connect line, uptime, packet and latency statistics,
-    remote clock, probe sparklines and that host's recent events.  Both are
-    rendered from one snapshot, so they cannot report a host differently.
+    remote clock, probe sparklines and that host's recent events.  They open
+    directly beneath the row you clicked, so the answer is where the question
+    was.  Both views are rendered from one snapshot, so they cannot report a
+    host differently.
 
-    The box above the list filters it **in the browser**.  ``/`` focuses it
-    and ``Esc`` clears it, as in the terminal — but unlike ``:filter`` it
-    moves nobody else's screen, which matters when two people are looking at
-    once.
+    Click a section header to fold or unfold it, as ``Space`` does in the
+    terminal.  A folded section summarises the hosts it hides — the counts,
+    and a strip whose worst reading per slot stands in for all of them.
+
+    The box on the ``Hosts`` heading filters the list **in the browser**.
+    ``/`` focuses it and ``Esc`` clears it, as in the terminal — but unlike
+    ``:filter`` it moves nobody else's screen, which matters when two people
+    are looking at once.
+
+    The list is sized to what it holds: the name column is as wide as the
+    longest name on show, and the history strip takes the rest of the window,
+    following it as the window or the font changes.
 
     The buttons beside the summary work the same way.  ``light``/``dark``
     switches the palette, the two panel buttons hide the *down* list and the

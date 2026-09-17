@@ -367,6 +367,9 @@ class TestTheSectionStripFollowsTheFold:
 // Each created element keeps its OWN children, so counting the row's does not
 // also count the spans badge() appends inside its own wrapper.
 const mkEl = () => ({className: '', textContent: '', children: [],
+                     style: {setProperty(){}, removeProperty(){}},
+                     querySelector: () => null, getBoundingClientRect: () => ({width: 0}),
+                     clientWidth: 0,
                      appendChild(c) { this.children.push(c); },
                      setAttribute(){}, getAttribute: () => null,
                      classList: {add(){}, remove(){}}});
@@ -612,6 +615,9 @@ class TestTheBrowserSortsLikeTheTerminal:
     RUNNER = r'''
 const sel = {value:'none', addEventListener(){}};
 const mk = () => ({className:'',textContent:'',children:[],value:'',hidden:false,
+                   style:{setProperty(){},removeProperty(){}},
+                   querySelector:()=>null, getBoundingClientRect:()=>({width:0}),
+                   clientWidth:0,
   appendChild(){},setAttribute(){},getAttribute:()=>null,replaceChildren(){},
   addEventListener(){},focus(){},remove(){},classList:{add(){},remove(){},toggle(){}}});
 global.document={getElementById:(i)=>(i==='sort'?sel:mk()),createElement:mk,
@@ -691,6 +697,9 @@ const sel = {value:'none', addEventListener(_e, fn){ sel.fire = fn; }};
 let store = JSON.parse(process.env.PREFS || '{}');
 const clicks = [];
 const mk = () => ({className:'',textContent:'',children:[],value:'',hidden:false,
+                   style:{setProperty(){},removeProperty(){}},
+                   querySelector:()=>null, getBoundingClientRect:()=>({width:0}),
+                   clientWidth:0,
   appendChild(c){this.children.push(c);},setAttribute(){},getAttribute:()=>null,
   replaceChildren(...k){this.children=k;},
   addEventListener(_e, fn){ clicks.push({el:this, fn:fn}); },
@@ -794,6 +803,9 @@ class TestTheStatColumnsLineUp:
 let store = JSON.parse(process.env.PREFS || '{}');
 const mk = () => ({className:'', textContent:'', children:[], type:'', value:'',
                    hidden:false, attrs:{},
+                   style:{setProperty(){}, removeProperty(){}},
+                   querySelector:()=>null, getBoundingClientRect:()=>({width:0}),
+                   clientWidth:0,
                    appendChild(c){this.children.push(c); return c;},
                    setAttribute(k,v){this.attrs[k]=v;},
                    getAttribute(k){return this.attrs[k]===undefined?null:this.attrs[k];},
@@ -897,3 +909,180 @@ console.log(JSON.stringify({distinct: distinct, tooNarrow: tooNarrow,
         out = json.loads(r.stdout.strip().splitlines()[-1])
         ragged = [n for n, seen in out['distinct'].items() if len(seen) > 1]
         assert ragged, 'the mutation must actually go ragged, or the test above proves nothing'
+
+
+class TestTheDetailPaneSitsUnderItsHost:
+    """It used to be a section after the whole list.
+
+    With fifty hosts, clicking one near the top put the answer off the bottom
+    of the page — the click appeared to do nothing until you scrolled.
+    """
+
+    def test_it_is_placed_in_the_row_list(self, pb):
+        js = _served_js(pb)
+        assert 'built.push(detailWrap)' in js, \
+            'the pane is inserted among the rows, not left as a page section'
+
+    def test_it_follows_the_selected_host(self, pb):
+        js = _served_js(pb)
+        assert "r.uid === selectedUid" in js
+
+    def test_the_same_node_is_moved_rather_than_rebuilt(self, pb):
+        """The row list is cleared every poll. A rebuilt pane would blank
+        until the next fetch returned; re-parenting the existing node keeps
+        its text, and is why no second fetch is needed."""
+        js = _served_js(pb)
+        assert 'detailWrap = document.getElementById' in js
+        # Nothing may create a second details element.
+        assert js.count("createElement('section')") == 0
+
+    def test_opening_one_places_it_immediately(self, pb):
+        """Without this the pane appears in its old place until the next poll,
+        up to a full interval later."""
+        js = _served_js(pb)
+        detail = js[js.index('function showDetail'):js.index('function num(')]
+        assert 'place()' in detail
+
+
+class TestTheListIsDense:
+    """The user's ask: see as many hosts at once as possible."""
+
+    def test_rows_are_tighter_than_the_original_five_pixels(self, pb):
+        css = pb._WEB_CSS
+        block = css[css.index('.row { display: flex'):]
+        block = block[:block.index('}')]
+        assert 'padding: 1px 8px' in block, block
+
+    def test_the_filter_shares_the_heading_line(self, pb):
+        """A full-width box above the rows cost a whole row of hosts."""
+        assert '<div class="head">' in pb._WEB_HTML
+        css = pb._WEB_CSS
+        assert '.head { display: flex' in css
+        assert '.head h2 { margin: 0' in css
+
+    def test_the_filter_no_longer_reserves_a_line_of_its_own(self, pb):
+        css = pb._WEB_CSS
+        block = css[css.index('#filter {'):]
+        block = block[:block.index('}')]
+        assert 'width: 100%' not in block, block
+        assert 'margin-bottom' not in block, block
+
+
+class TestTheMeasuredWidthIsAskedForAtOnce:
+    """The correction must not wait out a poll interval.
+
+    ``measureCols`` runs from ``render()``, which runs inside ``poll()``'s
+    promise chain — and that chain's tail arms the next poll. Since
+    ``schedulePoll`` clears whatever is pending first, a timer armed inside
+    ``measureCols`` was cancelled a moment later by the tail, and the measured
+    width arrived a full ``POLL_MS`` after the page had already drawn the
+    server's default. The page looked right eventually, so no string-matching
+    test could see it; this one runs the real client under a virtual clock and
+    watches *when* the second request goes out.
+    """
+
+    HARNESS = r'''
+let now = 0, timers = [], nextId = 1;
+const urls = [];                 // [{at, url}] -- when, not just what
+const CH = 7;                    // px per character in the probe's font
+const STRIP_PX = 700;            // so 100 cells fit, against a default of 60
+const mk = (tag) => ({
+  tag: tag, className: '', textContent: '', children: [], value: '',
+  hidden: false, attrs: {},
+  style: {setProperty(){}, removeProperty(){}},
+  appendChild(c) { this.children.push(c); return c; },
+  removeChild(){}, remove(){},
+  replaceChildren(...k) { this.children = k; },
+  setAttribute(k, v) { this.attrs[k] = v; },
+  getAttribute(k) { return this.attrs[k] === undefined ? null : this.attrs[k]; },
+  addEventListener(){}, focus(){},
+  classList: {add(){}, remove(){}, toggle(){}},
+  // The font probe measures itself; a monospace face is CH per character.
+  getBoundingClientRect() { return {width: this.textContent.length * CH}; },
+  // Whatever the row list is asked for, hand back a strip of a known width.
+  querySelector() { return {clientWidth: STRIP_PX}; },
+  clientWidth: STRIP_PX,
+});
+const byId = {};
+global.document = {
+  getElementById: (id) => (byId[id] || (byId[id] = mk(id))),
+  createElement: mk, createTextNode: (t) => ({textContent: t}),
+  addEventListener(){}, body: mk('body'), activeElement: null,
+  documentElement: {setAttribute(){}, getAttribute: () => null,
+                    removeAttribute(){}},
+  querySelectorAll: () => [],
+};
+const store = {};
+global.window = {
+  setTimeout(fn, ms) { const id = nextId++; timers.push({id, at: now + (ms||0), fn}); return id; },
+  clearTimeout(id) { timers = timers.filter(t => t.id !== id); },
+  addEventListener(){}, location: {href: ''},
+  localStorage: {getItem: (k) => (k in store ? store[k] : null),
+                 setItem(k, v) { store[k] = String(v); }},
+  matchMedia: () => ({matches: false}),
+};
+global.setTimeout = global.window.setTimeout;
+global.clearTimeout = global.window.clearTimeout;
+global.fetch = (url) => {
+  urls.push({at: now, url: String(url)});
+  return Promise.resolve({ok: true, status: 200, json: () => Promise.resolve({
+    rows: [{kind: 'host', uid: 'h1', name: 'h1', history: '.', hist_class: ['g-ok'],
+            cell_width: 1, stats: {}, stat_class: {}, down: false, updown: '',
+            paused: false, no_alarm: false}],
+    down: [], events: [], time: 0, columns: [],
+    view: {cell_width: 1, name_width: 8}, commands: 'safe', csrf: 'x'})});
+};
+const drain = async () => { for (let i = 0; i < 80; i++) await Promise.resolve(); };
+const tick = async (ms) => {
+  const end = now + ms;
+  for (;;) {
+    const due = timers.filter(t => t.at <= end).sort((a, b) => a.at - b.at)[0];
+    if (!due) break;
+    timers = timers.filter(t => t !== due);
+    now = due.at; due.fn(); await drain();
+  }
+  now = end;
+};
+(async () => {
+  require(process.argv[2]);
+  await drain();
+  await tick(300);              // well under one poll interval
+  console.log(JSON.stringify({urls: urls, timers: timers.length}));
+})();
+'''
+
+    @pytest.mark.skipif(shutil.which('node') is None,
+                        reason='node not installed; this check needs a JS engine')
+    def test_the_second_request_carries_cols_without_waiting(self, pb, tmp_path):
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(_served_js(pb))
+        harness = tmp_path / 'harness.js'
+        harness.write_text(self.HARNESS)
+        r = subprocess.run(['node', str(harness), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        urls = out['urls']
+
+        assert len(urls) >= 2, f'no correcting request inside 300 ms: {urls}'
+        assert '?cols=' not in urls[0]['url'], 'nothing is measured yet'
+        assert '?cols=100' in urls[1]['url'], urls
+        # The whole point: it does not wait out POLL_MS (2000).
+        assert urls[1]['at'] < 500, f"correction arrived at {urls[1]['at']}ms"
+
+    def test_it_settles_rather_than_asking_again_every_poll(self, pb, tmp_path):
+        """Once the width is known the request stops changing — otherwise the
+        measure and the reply chase each other for the life of the page."""
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(_served_js(pb))
+        harness = tmp_path / 'harness.js'
+        harness.write_text(self.HARNESS.replace('await tick(300);',
+                                                'await tick(12000);'))
+        r = subprocess.run(['node', str(harness), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        # One chain, and every request after the correction asks for the same.
+        assert out['timers'] == 1, out
+        asked = [u['url'] for u in out['urls'][1:]]
+        assert set(asked) == {'/api/state?cols=100'}, asked

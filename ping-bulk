@@ -6902,6 +6902,16 @@ _WEB_SAFE_COMMANDS = frozenset({
     'sync-history', 'autofold', 'layout', 'select',
 })
 _WEB_QUEUE_MAX = 64
+# Ceiling for the browser's name column, in characters.  Content-sizing alone
+# lets one long section title eat the row; the terminal clamps against the
+# screen it can measure, and the server cannot, so it caps and the client
+# narrows further if its own window is smaller.
+_WEB_MAX_NAME_COLS = 48
+# History slots the browser may ask for.  The default is what the page used
+# before it could ask at all, so a client that says nothing is unchanged.
+_WEB_DEFAULT_HISTORY_COLS = 60
+_WEB_MIN_HISTORY_COLS = 8          # _MIN_HIST_COLS, the terminal's own floor
+_WEB_MAX_HISTORY_COLS = 600
 
 _WEB_SESSION_TTL = 12 * 3600.0      # a browser tab left open overnight
 _WEB_SESSION_MAX = 64               # bound the dict; oldest are dropped first
@@ -6915,6 +6925,36 @@ _WEB_COOKIE = 'pb_session'
 # a ':set' report (3 s) because it is a URL with a 32-character credential
 # in it and the operator has to read it across to a browser.
 _WEB_LINK_SECONDS = 30.0
+
+
+def _web_history_cols(query):
+    """Slots the browser asked for in '?cols=', clamped, or the default.
+
+    The number sizes a payload built on every poll, from a value the client
+    supplies — so it is clamped **here**, not in the page.  §9d's own history
+    is an unauthenticated client manufacturing work at 1117/s; a `cols` nobody
+    bounded is the same shape of mistake, one deque at a time.
+
+    The ceiling is `_WEB_MAX_HISTORY_COLS` rather than something the window
+    could justify: a browser wide enough for 2000 cells is not a reason to
+    build 2000 per host per poll, and the strip stops being readable long
+    before that.
+
+    Anything unparseable falls back rather than raising.  This runs on the
+    server thread in a request handler, where an exception is a 500 and an
+    event for every browser watching, every couple of seconds — and a garbled
+    query string is not worth that.
+    """
+    for part in query.split('&'):
+        name, _, value = part.partition('=')
+        if name != 'cols':
+            continue
+        try:
+            n = int(value)
+        except ValueError:
+            break
+        return max(_WEB_MIN_HISTORY_COLS, min(n, _WEB_MAX_HISTORY_COLS))
+    return _WEB_DEFAULT_HISTORY_COLS
 
 
 def _web_constant_eq(a, b):
@@ -7620,7 +7660,7 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                     self._send(401, b'{"error":"login required"}',
                                'application/json; charset=utf-8')
                     return
-                state = app._web_state()
+                state = app._web_state(history_len=_web_history_cols(query))
                 if self._authenticated():
                     state['csrf'] = self.server.csrf_for(
                         self._cookie(_WEB_COOKIE))
@@ -7820,9 +7860,11 @@ _WEB_HTML = """<!DOCTYPE html>
   <ul id="down"></ul>
 </section>
 <section>
-  <h2>Hosts</h2>
-  <input id="filter" type="search" autocomplete="off" spellcheck="false"
-         placeholder="filter hosts  ( / )" aria-label="filter hosts">
+  <div class="head">
+    <h2>Hosts</h2>
+    <input id="filter" type="search" autocomplete="off" spellcheck="false"
+           placeholder="filter hosts  ( / )" aria-label="filter hosts">
+  </div>
   <div id="rows" class="rows"></div>
 </section>
 <section id="detail-wrap" hidden>
@@ -7880,7 +7922,7 @@ header { display: flex; flex-wrap: wrap; align-items: baseline;
 header .summary { margin-right: auto; }
 h1 { margin: 0; font-size: 18px; font-weight: 600; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
-     color: var(--dim); margin: 24px 0 8px; font-weight: 600; }
+     color: var(--dim); margin: 14px 0 5px; font-weight: 600; }
 .summary { color: var(--dim); font-size: 13px; }
 .view-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .view-bar button {
@@ -7912,10 +7954,15 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 #down li { padding: 6px 12px; background: var(--down-bg); margin-bottom: 2px; }
 #down .name { font-weight: 600; }
 #down .since { color: var(--dim); margin-left: 8px; font-size: 13px; }
+/* Tight on purpose: this page answers what the fleet is doing, and that
+   answer is worth more the more of it fits on screen at once.  The row keeps
+   its background so the eye can still separate one from the next without
+   spacing having to do that job. */
 .rows { display: flex; flex-direction: column; gap: 1px; }
 .row { display: flex; align-items: center; gap: 12px;
-       padding: 5px 8px; background: var(--panel); border-radius: 3px; }
-.row.section { background: none; padding: 12px 0 2px; font-weight: 600; }
+       padding: 1px 8px; background: var(--panel); border-radius: 2px;
+       line-height: 1.35; }
+.row.section { background: none; padding: 7px 0 1px; font-weight: 600; }
 .row.section .name { color: var(--dim); }
 /* Section nesting is not limited to three in the hosts file, so neither is
    the indent here; level 1 needs none. */
@@ -7930,7 +7977,14 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
    down the page, and widening the window moved all three zones.  Now the name
    is the same width on every row, the stat columns below are too, and the
    strip is the one that takes the extra space. */
-.row .name { flex: 0 0 24em; min-width: 0; overflow: hidden;
+/* Sized from the longest name the server can see, not a guess.  Still a
+   fixed basis rather than a growing one -- letting the name take the slack is
+   what made every row's columns start in a different place -- but the number
+   now comes from the content.  max-width is the client's half of the clamp:
+   the server caps at _WEB_MAX_NAME_COLS without knowing the window, and this
+   stops a long name from crowding out the strip on a narrow one. */
+.row .name { flex: 0 0 var(--name-w, 24em); max-width: 45%;
+             min-width: 0; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
 .row.down .name { color: var(--bad); }
 .row.paused .name, .row.quiet .name { color: var(--quiet); }
@@ -7963,24 +8017,30 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .stats b { color: var(--fg); font-weight: 500; }
 /* The flexible zone, and clipped rather than scrolled: the newest sample is
    on the LEFT (as in the terminal), so a narrow window should drop the oldest
-   cells off the right instead of growing a scrollbar on every row.  The strip
-   the server sends is a fixed 60 cells, so past that width the row simply runs
-   out of history to show. */
+   cells off the right instead of growing a scrollbar on every row. */
+/* flex-basis 0, not auto: the strip takes exactly the space the other columns
+   leave, and its width therefore does NOT depend on how many cells it holds.
+   That is what makes it safe to measure the element in order to decide how
+   many cells to ask the server for -- with basis auto the new text would
+   change the width, which would change the next request, and the two would
+   chase each other every poll. */
 .strip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
          font-size: 12px; letter-spacing: 0; white-space: pre;
-         overflow: hidden; flex: 1 1 auto; }
+         overflow: hidden; flex: 1 1 0; min-width: 0; }
 .badge { color: var(--dim); font-size: 12px; }
 /* The fold marker is the terminal's '[+]'/'[-]', and doubles as the control.
    It is a hit target, so it gets padding rather than sitting flush against
    the title.  Under ':set web-commands read-only' it still shows the state --
    a viewer needs to know a section is folded even when they cannot change
    it -- but stops offering a click it would only be refused for. */
-.foldmark { color: var(--dim); font-size: 12px; cursor: pointer;
+.foldmark { color: var(--dim); font-size: 12px;
             padding: 0 4px; user-select: none;
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.foldmark:hover { color: var(--fg); }
-.foldmark.ro { cursor: default; }
-.foldmark.ro:hover { color: var(--dim); }
+.foldmark.ro { color: var(--dim); }
+/* The whole header is the hit target; the marker only says so. */
+.row.section.foldable { cursor: pointer; }
+.row.section.foldable:hover .foldmark,
+.row.section.foldable:hover .name { color: var(--fg); }
 .acts { display: flex; gap: 4px; }
 .acts button {
   font: inherit; font-size: 12px; padding: 2px 8px; cursor: pointer;
@@ -8013,8 +8073,12 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
    one of the hosts behind this count has a failed ping process, which is what
    the terminal's bold means there. */
 .b-err { font-weight: 800; }
-#filter { width: 100%; margin-bottom: 6px; font: inherit; padding: 6px 10px;
-          border-radius: 3px; border: 1px solid var(--line);
+/* The filter shares the heading's line: it is the control for this list, and
+   a full-width box above the rows cost a whole line of hosts for nothing. */
+.head { display: flex; align-items: baseline; gap: 10px; }
+.head h2 { margin: 0; flex: 0 0 auto; }
+#filter { flex: 1 1 auto; min-width: 0; font: inherit; font-size: 13px;
+          padding: 2px 8px; border-radius: 3px; border: 1px solid var(--line);
           background: var(--field); color: var(--fg); }
 .row.host { cursor: pointer; }
 .row.host:hover { background: var(--panel-hi); }
@@ -8026,6 +8090,13 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .detail { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 12px; white-space: pre-wrap; word-break: break-word;
           background: var(--panel); padding: 10px; border-radius: 3px; margin: 0; }
+/* The pane sits in the row list, directly under the host it describes, so it
+   has to read as a continuation of that row rather than as another page
+   section: no 24px heading margin, and a left rule tying it to the row above.
+   The heading stays -- it carries the close button. */
+#detail-wrap { margin: 0 0 1px; border-left: 3px solid var(--dim);
+               padding-left: 8px; }
+#detail-wrap h2 { margin: 6px 0 6px; }
 .stats .warn b { color: var(--slow); }
 .stats .error b { color: var(--bad); }
 .stats .stale b { color: var(--quiet); }
@@ -8042,7 +8113,10 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
   .row { flex-wrap: wrap; }
   /* 'flex', not 'flex-basis': the desktop rule above is a flex shorthand, so a
      bare basis here would be overridden by its grow/shrink values. */
-  .row .name { flex: 0 0 100%; }
+  /* max-width is NOT part of the `flex` shorthand, so the desktop cap
+     survives this rule unless it is reset -- which would hold the name to
+     45% on exactly the screen the full-width wrap exists for. */
+  .row .name { flex: 0 0 100%; max-width: none; }
   .strip { flex: 1 1 100%; }
 }
 """
@@ -8323,11 +8397,16 @@ function showDetail(uid) {
     .then(function (d) {
       detailWrap.hidden = false;
       detailEl.textContent = detailText(d);
+      place();
     })
     .catch(function (err) {
       detailWrap.hidden = false;
       detailEl.textContent = 'could not load details: ' + err.message;
+      place();
     });
+  // Re-run the row build so the pane is moved under its host now, rather than
+  // staying where the document put it until the next poll comes round.
+  function place() { if (lastState) { render(lastState); } }
 }
 
 function num(v, unit) {
@@ -8478,7 +8557,15 @@ function sectionRow(r, cellWidth) {
   // a toggle would open it.
   var marker = span(r.folded ? '[+]' : '[-]', 'foldmark');
   if (canWrite) {
-    marker.addEventListener('click', function () {
+    // The whole header is the hit target, not just the marker -- a section
+    // title is what the eye goes to, and a three-character marker is a poor
+    // thing to ask for on a phone.  One handler on the row rather than one
+    // per child, so a click cannot fire twice; the marker is left as the
+    // affordance that says the row does something.  Buttons are skipped the
+    // way hostRow skips them, in case a section ever grows one.
+    el.classList.add('foldable');
+    el.addEventListener('click', function (ev) {
+      if (ev.target.tagName === 'BUTTON') { return; }
       act(r.uid, r.folded ? 'unfold' : 'fold');
     });
   } else {
@@ -8546,14 +8633,43 @@ function render(state) {
     return r.kind === 'host' && r.name.toLowerCase().indexOf(needle) !== -1;
   });
   measureColumns(shown);
-  rowsEl.replaceChildren.apply(rowsEl, shown.map(function (r) {
+  // One custom property rather than a style on every row: the width is a
+  // property of the list, and setting it per row would be N writes a poll.
+  rowsEl.style.setProperty('--name-w', (state.view.name_width || 24) + 'ch');
+  var built = [];
+  var placed = false;
+  shown.forEach(function (r) {
     // The width the row itself declares, not the view-wide one: a section
     // strip is one character per slot whatever ping-view is showing, and
     // slicing it by the wider figure drew four blobs against ten cells on the
     // rows below.
     var w = r.cell_width || state.view.cell_width;
-    return r.kind === 'section' ? sectionRow(r, w) : hostRow(r, w);
-  }));
+    built.push(r.kind === 'section' ? sectionRow(r, w) : hostRow(r, w));
+    // The details pane belongs under the host it describes, not under the
+    // whole list -- with fifty hosts the answer to a click near the top
+    // appeared off the bottom of the page.
+    //
+    // detailWrap is the SAME node every time, moved here rather than rebuilt:
+    // a node has one parent, so appending it re-parents it out of its place in
+    // the document. That is what keeps its text across the poll, which clears
+    // this container every couple of seconds -- rebuilding it would blank the
+    // pane until the next fetch returned.
+    if (r.kind === 'host' && r.uid === selectedUid && !detailWrap.hidden) {
+      built.push(detailWrap);
+      placed = true;
+    }
+  });
+  // The selected host has gone -- filtered out, or removed by an ':edit'
+  // reload.  replaceChildren has just detached the pane from the document, so
+  // leaving selectedUid set and hidden false would have the state claim a pane
+  // is open that nobody can see, and clearing the filter would bring it back
+  // holding whatever the host said before it left.  Close it instead.
+  if (selectedUid && !placed) {
+    selectedUid = '';
+    detailWrap.hidden = true;
+  }
+  rowsEl.replaceChildren.apply(rowsEl, built);
+  measureCols(state.view.cell_width);
 
   eventsEl.replaceChildren.apply(eventsEl, state.events.slice(-120).map(
     function (e) {
@@ -8608,9 +8724,77 @@ function schedulePoll(ms) {
   pollTimer = window.setTimeout(poll, ms);
 }
 
+// Slots the strip has room for, 0 until measured -- the server's default
+// stands in until then, so a first paint is never empty.
+var wantCols = 0;
+// Set by measureCols when the width it measured differs from what was last
+// asked for; read and cleared by poll()'s tail.
+var colsWanted = false;
+// True while a request is in flight, so measureCols can tell whether a tail
+// is coming that will schedule for it.
+var polling = false;
+
+// The strip is monospace, so one measurement covers every cell.  Measured from
+// a probe carrying the real class rather than assuming a pixel width: the
+// page's font size follows the browser's, and a hardcoded figure would size
+// every request wrongly for a reader who has changed it.
+function stripCellPx() {
+  var probe = document.createElement('span');
+  probe.className = 'strip';
+  probe.style.position = 'absolute';
+  probe.style.visibility = 'hidden';
+  probe.style.whiteSpace = 'pre';
+  var sample = '';
+  for (var i = 0; i < 100; i++) { sample += '0'; }
+  probe.textContent = sample;
+  document.body.appendChild(probe);
+  var w = probe.getBoundingClientRect().width / 100;
+  document.body.removeChild(probe);
+  return w;
+}
+
+// Called after every render: the columns beside the strip can change width
+// (a longer name, a column switched on), so what fits is not answered once.
+function measureCols(cellWidth) {
+  var el = rowsEl.querySelector('.strip');
+  if (!el) { return; }
+  var ch = stripCellPx();
+  if (!(ch > 0)) { return; }
+  var fits = Math.floor(el.clientWidth / ch / (cellWidth > 1 ? cellWidth : 1));
+  if (fits < 1) { return; }
+  // A slot either way is not worth a round trip, and rounding at the edge of
+  // a fractional character width would otherwise flip back and forth.
+  if (Math.abs(fits - wantCols) < 2) { return; }
+  wantCols = fits;
+  // A flag rather than schedulePoll(0) here.  render() runs inside poll()'s
+  // promise chain, whose tail arms the next poll -- and schedulePoll clears
+  // whatever is pending first, so a timer armed here was cancelled a moment
+  // later and the measured width arrived a whole interval late.  Letting the
+  // tail decide is the only way the immediate re-poll survives.
+  colsWanted = true;
+  // Outside that chain (a resize) there is no tail to do it, so ask directly.
+  if (!polling) { schedulePoll(0); }
+}
+
+// Debounced: a drag delivers these at screen rate, and each one rebuilds every
+// row and forces two synchronous layouts (clientWidth, and the font probe).
+// Worse, a render from here is NOT inside poll()'s promise chain, so nothing
+// clears the re-poll it asks for -- a sustained drag stacked concurrent
+// fetches against _WEB_MAX_CONNECTIONS.  One render once the window settles.
+var resizeTimer = null;
+window.addEventListener('resize', function () {
+  if (resizeTimer) { window.clearTimeout(resizeTimer); }
+  resizeTimer = window.setTimeout(function () {
+    resizeTimer = null;
+    if (lastState) { render(lastState); }
+  }, 150);
+});
+
 function poll() {
   pollTimer = null;            // running now; nothing is pending
-  fetch('/api/state', { headers: { 'Accept': 'application/json' } })
+  polling = true;
+  fetch('/api/state' + (wantCols ? '?cols=' + wantCols : ''),
+        { headers: { 'Accept': 'application/json' } })
     .then(function (r) {
       if (r.status === 401) {
         showLogin(true);
@@ -8626,7 +8810,15 @@ function poll() {
       summary.classList.add('stale');
       summary.textContent = 'not updating: ' + err.message;
     })
-    .then(function () { schedulePoll(POLL_MS); });
+    .then(function () {
+      polling = false;
+      // Straight away when the strip turned out to be a different width than
+      // we asked for, so the first paint corrects itself rather than showing
+      // the server's default for a full interval.
+      var soon = colsWanted;
+      colsWanted = false;
+      schedulePoll(soon ? 0 : POLL_MS);
+    });
 }
 
 poll();
@@ -14482,6 +14674,29 @@ class Application:
             for e in self._events_snapshot() if e.level <= self.loglevel
         ][-event_tail:]
 
+        # The name column, sized from content the way the terminal sizes its
+        # own — but measured from the rows **this payload carries**, not
+        # through `_get_name_col_width`.  That helper caches into
+        # `_name_col_cache` and clears `_name_col_dirty`, and this method runs
+        # on the server thread under a documented promise not to mutate; the
+        # purity test caught it doing exactly that.  Measuring here is also the
+        # better population: a folded section's hosts are not in `visible`, so
+        # a column nobody is reading cannot widen the one they are.
+        #
+        # Clamped, and the clamp is the requirement rather than a refinement.
+        # Sized purely from content, one 65-character section title takes the
+        # whole row and leaves the strip nothing; the terminal met this exactly
+        # (§8, 'A section title wider than the terminal killed the display')
+        # and answered it the same way.  There it crashed, which at least said
+        # so — here it would be silent, which is worse.  The client narrows
+        # further on a small window, being the only side that knows one.
+        name_width = min(_WEB_MAX_NAME_COLS, max(
+            [len('Hostname')]
+            + [len(r['name']) for r in rows if r['kind'] == 'host']
+            # A section also carries its indent and the fold marker.
+            + [len(r['title']) + 2 * r['level'] + 4
+               for r in rows if r['kind'] == 'section']))
+
         return {
             'generation': self._entries_generation,
             'time': time.time(),
@@ -14490,6 +14705,7 @@ class Application:
                 'sort': self.sort_by,
                 'ping_view': mode,
                 'cell_width': cell_width,
+                'name_width': name_width,
                 'sync': bool(sync),
                 'layout': self.layout,
                 'loglevel': self._LOGLEVEL_LABELS.get(self.loglevel, 'normal'),

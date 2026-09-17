@@ -515,3 +515,109 @@ class TestAProcessErrorIsNotAPlainLoss:
         row, _ = _section_row(app, history_len=1)
         assert row['history'] == '?'
         assert row['hist_class'] == ['g-err']
+
+
+class TestTheNameColumnIsSizedFromItsContent:
+    """A fixed 24em was a guess: too wide for a list of IPs, too narrow for
+    long names. The terminal sizes this column from what is in it, and now so
+    does the browser."""
+
+    def test_short_names_get_a_narrow_column(self, pb, tmp_path):
+        app = _app(pb, tmp_path, '10.0.0.1\n10.0.0.2\n')
+        assert app._web_state()['view']['name_width'] == len('Hostname')
+
+    def test_a_longer_name_widens_it(self, pb, tmp_path):
+        app = _app(pb, tmp_path, 'a-rather-long-host-name.example.com\n')
+        assert app._web_state()['view']['name_width'] == \
+            len('a-rather-long-host-name.example.com')
+
+    def test_a_long_section_title_cannot_take_the_row(self, pb, tmp_path):
+        """The clamp, and the reason it is not a refinement: content-sizing
+        alone lets one title leave the strip nothing. The terminal met this
+        as a crash (AGENTS.md §8); here it would be silent."""
+        app = _app(pb, tmp_path, '## ' + 'T' * 65 + '\n10.0.0.1\n')
+        assert app._web_state()['view']['name_width'] == pb._WEB_MAX_NAME_COLS
+
+    def test_a_folded_section_does_not_widen_it(self, pb, tmp_path):
+        """Hosts nobody can see must not size a column for the ones they can.
+        Measuring from the emitted rows gets this for free — they are not in
+        the payload — which is the other reason not to reuse the terminal's
+        cached helper."""
+        app = _app(pb, tmp_path,
+                   '## S\nshort\n' + 'x' * 40 + '.example.com\n')
+        wide = app._web_state()['view']['name_width']
+        for label in [e for e in app.entries if isinstance(e, pb.SectionLabel)]:
+            label.folded = True
+        assert app._web_state()['view']['name_width'] < wide
+
+    def test_reading_the_state_still_mutates_nothing(self, pb, tmp_path):
+        """_get_name_col_width caches into _name_col_cache and clears
+        _name_col_dirty. _web_state runs on the server thread under a promise
+        not to mutate, and the first cut of this feature broke it."""
+        app = _app(pb, tmp_path, '## S\n10.0.0.1\n')
+        before = dict(app.__dict__)
+        app._web_state()
+        assert dict(app.__dict__) == before
+
+
+class TestTheStripFillsTheWindow:
+    """It was a fixed 60 cells, so a wide window had dead space after it and a
+    narrow one cut the strip off. The client now says how many fit."""
+
+    @pytest.mark.parametrize('query,expected', [
+        ('',              60),      # a client that says nothing is unchanged
+        ('cols=120',     120),
+        ('t=x&cols=200', 200),      # not the first parameter
+        ('cols=99999',   600),      # clamped: the ceiling is the server's
+        ('cols=-5',        8),
+        ('cols=abc',      60),      # garbage falls back, never raises
+        ('cols=',         60),
+        ('colsx=9',       60),      # not our parameter
+    ])
+    def test_the_request_is_parsed_and_clamped(self, pb, query, expected):
+        assert pb._web_history_cols(query) == expected
+
+    def test_the_ceiling_is_the_servers_alone(self, pb, tmp_path):
+        """The number sizes a payload built on every poll from a value the
+        client supplies. §9d's own history is an unauthenticated client
+        manufacturing work at 1117/s; clamping in the page would be no clamp.
+
+        Asserted against the strip that actually comes back, and against an
+        absolute bound — comparing the parser's output to the constant it
+        divides by would pass for any ceiling, including none.
+        """
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        asked = pb._web_history_cols('cols=10000000')
+        assert asked <= 2000
+        got = app._web_state(history_len=asked)['rows'][0]['history']
+        assert len(got) == asked <= 2000
+
+    def test_asking_for_more_gets_more(self, pb, tmp_path):
+        app = _app(pb, tmp_path, '10.0.0.1\n')
+        short = app._web_state(history_len=20)['rows'][0]['history']
+        long_ = app._web_state(history_len=90)['rows'][0]['history']
+        assert len(short) == 20 and len(long_) == 90
+
+    def test_the_client_asks_for_what_fits(self, pb):
+        """Only that the machinery exists. What it *does* — correcting the
+        width without waiting out a poll, and then settling — is asserted by
+        running the real client, in
+        test_web_assets.TestTheMeasuredWidthIsAskedForAtOnce."""
+        assert 'function measureCols' in pb._WEB_JS
+
+    def test_the_strip_width_does_not_depend_on_its_text(self, pb):
+        """The loop only settles because the element's width is the space the
+        other columns leave. With `flex: 1 1 auto` the new text would resize
+        it, which would change the next request, for ever."""
+        css = pb._WEB_CSS
+        block = css[css.index('.strip {'):]
+        block = block[:block.index('}')]
+        assert 'flex: 1 1 0' in block, block
+        assert 'min-width: 0' in block, block
+
+    def test_it_does_not_ask_again_once_it_has_settled(self, pb):
+        """Rounding at the edge of a fractional character width would
+        otherwise flip the request back and forth every poll. The behaviour is
+        pinned by the node harness (test_web_assets); this only keeps the
+        deadband from being deleted as redundant-looking arithmetic."""
+        assert 'wantCols' in pb._WEB_JS and '< 2' in pb._WEB_JS

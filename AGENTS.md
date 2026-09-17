@@ -1265,6 +1265,71 @@ because that is what a keypress means.
 the answer changes when the cursor moves, which `tests/test_web_parity.py`
 does for every cursor position including None.
 
+**The page is sized from what it holds, and the client is what knows the
+window.** Three numbers used to be constants and are not any more.
+
+`name_width` is the longest name among the rows the payload actually carries.
+It is measured **there**, not through `_get_name_col_width` — that helper
+caches into `_name_col_cache` and clears `_name_col_dirty`, and `_web_state`
+runs on the server thread under a documented promise not to mutate. The purity
+test caught it doing exactly that. Measuring from the emitted rows is also the
+right population: a folded section's hosts are not in `visible`, so a column
+nobody is reading cannot widen the one they are. Clamped, and **the clamp is
+the requirement**: sized purely from content, one 65-character section title
+takes the row and leaves the strip nothing — the terminal met this as
+`addwstr() returned ERR` (§8), where at least it said so.
+
+`cols` is how many history slots the browser has room for, and it sizes a
+payload built on every poll **from a value the client supplies**. So it is
+clamped on the server, parsed defensively, and falls back rather than raising —
+this runs in a request handler where an exception is a 500 and an event for
+every browser, every couple of seconds. §9d's own history is an
+unauthenticated client manufacturing work at 1117/s; an unbounded `cols` is
+that mistake again, one deque at a time.
+
+**`.strip` has `flex: 1 1 0`, and that is load-bearing rather than cosmetic.**
+The client measures the strip to decide how many cells to ask for. With
+`flex-basis: auto` the returned text would resize the element, which would
+change the next request, which would change the width again — the two chasing
+each other every poll, for ever. With basis `0` the width is exactly the space
+the other columns leave and does not depend on the content at all, so the loop
+settles in one step. A one-slot difference is ignored on top of that, because
+rounding at the edge of a fractional character width flips back and forth.
+
+**Two things about that loop were wrong in review, and neither was visible in
+the source.** `measureCols` runs from `render()`, which runs *inside*
+`poll()`'s promise chain — and that chain's tail arms the next poll, while
+`schedulePoll` clears whatever is pending first. So a `schedulePoll(0)` asked
+for by `measureCols` was cancelled by the tail a moment later, and the measured
+width arrived a whole interval after the page had drawn the server's default.
+The page looked right eventually, which is why no string-matching test saw it;
+what caught it was running the real client under a virtual clock and asking
+*when* the second request went out. The tail now decides, from a flag.
+
+And the `resize` handler was undebounced. Each event rebuilt every row and
+forced two synchronous layouts — but the real fault is that a render from there
+is **not** inside the promise chain, so nothing cleared the re-poll it asked
+for, and a sustained drag stacked concurrent fetches against
+`_WEB_MAX_CONNECTIONS`. That is the same failure b1d1775 fixed, arriving by a
+different door: **anything that can call `render()` from outside the poll chain
+is a place where a poll can be forked.**
+
+**A section header folds on a click anywhere along it**, not just on the
+`[+]`/`[-]`. One handler on the row rather than one per child, so a click
+cannot fire twice. The verbs are `fold` and `unfold` rather than a toggle, for
+the reason every write here is explicit: the page is showing a picture up to a
+poll old, and a toggle applied to that does the opposite of what was clicked.
+Nothing new was needed on the way in — `_web_index_for_uid` already matched any
+entry carrying a uid, `SectionLabel` has one, and `:fold open`/`close` resolve
+to `zo`/`zc`, which act on the highlighted section that `_web_drain` has
+already parked the cursor on. What was missing was a verb and a control.
+
+**The details pane sits in the row list, under the host it describes.** It is
+the same node moved rather than a new one built: a node has one parent, so
+appending it re-parents it, and that is what keeps its text across the poll
+that clears the list every couple of seconds. Rebuilding it would blank the
+pane until another fetch returned.
+
 **Filtering is client-side.** `:filter` would move the terminal's view and
 every other viewer's; one person searching should not drag anybody else's
 screen with them. A test asserts the client never posts `:filter`.
