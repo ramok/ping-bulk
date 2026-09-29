@@ -107,7 +107,7 @@ const store = {};
 global.window = {
   setTimeout(fn, ms) { const id = nextId++; timers.push({id, at: now + (ms||0), fn}); return id; },
   clearTimeout(id) { timers = timers.filter(t => t.id !== id); },
-  addEventListener(){}, location: {href: ''},
+  addEventListener(){}, location: {href: '', reload(){ global.__reloaded = (global.__reloaded||0)+1; }},
   localStorage: {
     getItem: (k) => (k in store ? store[k] : null),
     setItem: (k, v) => { store[k] = String(v); },
@@ -238,7 +238,7 @@ let store = {};
 global.STORE_THROWS = false;
 global.window = {
   setTimeout(){ return 0; }, clearTimeout(){},
-  addEventListener(){}, location: {href: ''},
+  addEventListener(){}, location: {href: '', reload(){ global.__reloaded = (global.__reloaded||0)+1; }},
   localStorage: {
     getItem(k) { if (global.STORE_THROWS) { throw new Error('blocked'); }
                  return k in store ? store[k] : null; },
@@ -385,7 +385,7 @@ global.document = {
 };
 global.window = {
   setTimeout(){ return 0; }, clearTimeout(){}, addEventListener(){},
-  location: {href: ''},
+  location: {href: '', reload(){ global.__reloaded = (global.__reloaded||0)+1; }},
   localStorage: {getItem: () => null, setItem(){}},
   matchMedia: () => ({matches: false}),
 };
@@ -491,7 +491,7 @@ global.document = {
   querySelectorAll: () => [],
 };
 global.window = { setTimeout(){return 0;}, clearTimeout(){}, addEventListener(){},
-  location:{href:''},
+  location:{href:'',reload(){global.__reloaded=(global.__reloaded||0)+1;}},
   localStorage:{getItem:(k)=>(k in store ? store[k] : null), setItem(k,v){store[k]=v;}},
   matchMedia: () => ({matches:false}) };
 global.fetch = () => Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({})});
@@ -627,7 +627,7 @@ global.document={getElementById:(i)=>(i==='sort'?sel:mk()),createElement:mk,
   activeElement:null,documentElement:{setAttribute(){},getAttribute:()=>null,
   removeAttribute(){}},querySelectorAll:()=>[]};
 global.window={setTimeout(){return 0;},clearTimeout(){},addEventListener(){},
-  location:{href:''},localStorage:{getItem:()=>null,setItem(){}},
+  location:{href:'',reload(){global.__reloaded=(global.__reloaded||0)+1;}},localStorage:{getItem:()=>null,setItem(){}},
   matchMedia:()=>({matches:false})};
 global.fetch=()=>Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({})});
 require(process.argv[2]);
@@ -713,7 +713,7 @@ global.document={getElementById:(i)=>(i==='sort'?sel:(i==='col-bar'?colBar:mk())
   documentElement:{setAttribute(){},getAttribute:()=>null,removeAttribute(){}},
   querySelectorAll:()=>[]};
 global.window={setTimeout(){return 0;},clearTimeout(){},addEventListener(){},
-  location:{href:''},
+  location:{href:'',reload(){global.__reloaded=(global.__reloaded||0)+1;}},
   localStorage:{getItem:(k)=>(k in store?store[k]:null),setItem(k,v){store[k]=v;}},
   matchMedia:()=>({matches:false})};
 global.fetch=()=>Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({})});
@@ -823,7 +823,7 @@ global.document = {
   querySelectorAll: () => [],
 };
 global.window = { setTimeout(){return 0;}, clearTimeout(){}, addEventListener(){},
-  location:{href:''},
+  location:{href:'',reload(){global.__reloaded=(global.__reloaded||0)+1;}},
   localStorage:{getItem:(k)=>(k in store ? store[k] : null), setItem(k,v){store[k]=v;}},
   matchMedia: () => ({matches:false}) };
 global.fetch = () => Promise.resolve({ok:true,status:200,json:()=>Promise.resolve({})});
@@ -1019,7 +1019,7 @@ const store = {};
 global.window = {
   setTimeout(fn, ms) { const id = nextId++; timers.push({id, at: now + (ms||0), fn}); return id; },
   clearTimeout(id) { timers = timers.filter(t => t.id !== id); },
-  addEventListener(){}, location: {href: ''},
+  addEventListener(){}, location: {href: '', reload(){ global.__reloaded = (global.__reloaded||0)+1; }},
   localStorage: {getItem: (k) => (k in store ? store[k] : null),
                  setItem(k, v) { store[k] = String(v); }},
   matchMedia: () => ({matches: false}),
@@ -1114,7 +1114,7 @@ global.document = {getElementById: mk, createElement: mk,
   documentElement:{setAttribute(){},getAttribute:()=>null,removeAttribute(){}},
   querySelectorAll:()=>[]};
 global.window = {setTimeout:()=>0, clearTimeout(){}, addEventListener(){},
-  location:{href:''}, localStorage:{getItem:()=>null,setItem(){}},
+  location:{href:'',reload(){global.__reloaded=(global.__reloaded||0)+1;}}, localStorage:{getItem:()=>null,setItem(){}},
   matchMedia:()=>({matches:false})};
 global.setTimeout = global.window.setTimeout;
 global.clearTimeout = global.window.clearTimeout;
@@ -1240,7 +1240,7 @@ global.document = {
 };
 global.window = {
   setTimeout(){ return 0; }, clearTimeout(){}, addEventListener(){},
-  location: {href: ''},
+  location: {href: '', reload(){ global.__reloaded = (global.__reloaded||0)+1; }},
   localStorage: {getItem: () => null, setItem(){}},
   matchMedia: () => ({matches: false}),
 };
@@ -1390,7 +1390,7 @@ global.document = {
 };
 global.window = {
   setTimeout(){ return 0; }, clearTimeout(){}, addEventListener(){},
-  location: {href: ''},
+  location: {href: '', reload(){ global.__reloaded = (global.__reloaded||0)+1; }},
   localStorage: {getItem: () => null, setItem(){}},
   matchMedia: () => ({matches: false}),
 };
@@ -1708,3 +1708,75 @@ try {
         out = self._measure(pb, tmp_path, 'read-only', None)
         assert out['nameWidth'][0] == out['nameWidth'][1], out['nameWidth']
         assert out['nameLeft'][0] == out['nameLeft'][1], out['nameLeft']
+
+
+class TestTheOpenTabReloadsItself:
+    """The client half of the restart check."""
+
+    RUNNER = r'''
+const mkEl = () => ({className: '', textContent: '', children: [], hidden: false,
+                     style: {setProperty(){}, removeProperty(){}},
+                     querySelector: () => null, getBoundingClientRect: () => ({width: 0}),
+                     clientWidth: 0,
+                     appendChild(c) { this.children.push(c); },
+                     addEventListener(){},
+                     setAttribute(){}, getAttribute: () => null,
+                     classList: {add(){}, remove(){}}});
+global.document = {
+  getElementById: () => Object.assign(mkEl(), {addEventListener(){},
+                                               replaceChildren(){}, value: ''}),
+  createElement: mkEl,
+  addEventListener(){}, body: {}, documentElement: {
+    setAttribute(){}, getAttribute: () => null, removeAttribute(){}},
+  querySelectorAll: () => [],
+};
+global.__reloaded = 0;
+global.window = {
+  setTimeout(){ return 0; }, clearTimeout(){}, addEventListener(){},
+  location: {href: '', reload(){ global.__reloaded++; }},
+  localStorage: {getItem: () => null, setItem(){}},
+  matchMedia: () => ({matches: false}),
+};
+global.fetch = () => Promise.resolve({ok: true, status: 200,
+                                      json: () => Promise.resolve({})});
+require(process.argv[2]);
+
+const poll = (run) => global.render({
+  rows: [], down: [], events: [], columns: [], view: {}, time: 0,
+  commands: 'read-only', run: run});
+
+const out = {};
+poll('aaa'); poll('aaa'); poll('aaa');
+out.sameRun = global.__reloaded;        // the normal case: never reload
+poll('bbb');
+out.afterRestart = global.__reloaded;   // exactly one reload
+poll('bbb'); poll('bbb');
+out.settled = global.__reloaded;        // and it does not keep firing
+global.__reloaded = 0;
+console.log(JSON.stringify(out));
+'''
+
+    def _run(self, pb, tmp_path):
+        app_js = tmp_path / 'app.js'
+        app_js.write_text(_served_js(pb) + '\nglobal.render = render;\n')
+        runner = tmp_path / 'run.js'
+        runner.write_text(self.RUNNER)
+        r = subprocess.run(['node', str(runner), str(app_js)],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_steady_program_never_reloads_the_page(self, pb, tmp_path):
+        """The half that would be intolerable to get wrong: a page that
+        reloads on its own every couple of seconds is worse than a stale one,
+        and a first poll has no baseline to compare against."""
+        assert self._run(pb, tmp_path)['sameRun'] == 0
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_a_new_run_id_reloads_once(self, pb, tmp_path):
+        out = self._run(pb, tmp_path)
+        assert out['afterRestart'] == 1, out
+        assert out['settled'] == 1, (
+            'the reload must not repeat while the answer keeps changing: '
+            'a real page records the new id as its own baseline')

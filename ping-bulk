@@ -7140,6 +7140,21 @@ _WEB_SECURITY_HEADERS = (
 )
 
 
+#: Identifies this *process* to the browser, and changes only by restarting.
+#:
+#: '_WEB_HTML', '_WEB_CSS' and '_WEB_JS' are constants loaded at import, so a
+#: page carries whatever the process it loaded from was serving.  A tab left
+#: open across a restart keeps those and re-polls only '/api/state', which
+#: means it shows **live data in an old layout** with nothing on screen saying
+#: so.  That is not a cache and 'Cache-Control: no-store' does not touch it:
+#: it is the document already loaded.  It cost two "it still does not work"
+#: reports against a layout bug that was already fixed.
+#:
+#: Per process rather than per listener, because ':web stop' and ':web start'
+#: do not re-import this file — only a restart changes what the assets are.
+_WEB_RUN_ID = secrets.token_hex(8)
+
+
 #: How many consecutive ports a trailing '+' on ':set web-listen' may try.
 #: Bounded, because "keep going until something works" turns one stale process
 #: into a listener nobody can find.
@@ -8759,8 +8774,32 @@ function badge(segments) {
   return box;
 }
 
+// The process the assets came from.  Recorded on the first poll and never
+// reassigned: a later poll reporting a different one means this document was
+// loaded from a program that is no longer running, so the layout and the
+// script are whatever that one shipped -- live data drawn by an old page,
+// which is indistinguishable from a bug and was twice reported as one.
+//
+// Reloading is the whole fix; a notice would leave the viewer to act on it,
+// and the case that matters is a wall display nobody is standing at.  It can
+// only fire once per restart, because the fresh document records the new id
+// as its own baseline.
+var loadedRun = null;
+
+function checkRestarted(run) {
+  if (!run) { return; }
+  if (loadedRun === null) { loadedRun = run; return; }
+  if (run === loadedRun) { return; }
+  // Adopt it before asking, so this fires once per restart even where the
+  // reload does not replace the document immediately -- a browser may defer
+  // one, and re-requesting it on every poll would be a loop nobody asked for.
+  loadedRun = run;
+  window.location.reload();
+}
+
 function render(state) {
   lastState = state;
+  checkRestarted(state.run);
   csrf = state.csrf || '';
   canWrite = state.commands && state.commands !== 'read-only';
   // No CSRF value means no session: this viewer is reading anonymously.
@@ -14930,6 +14969,10 @@ class Application:
 
         return {
             'generation': self._entries_generation,
+            # Not 'generation': that counts ':edit' reloads and starts from the
+            # same value in every process, so it cannot say "you are talking to
+            # a program that has been restarted under you".
+            'run': _WEB_RUN_ID,
             'time': time.time(),
             'view': {
                 'dns': DNS_MODES[self.dns_mode],

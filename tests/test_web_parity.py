@@ -775,3 +775,36 @@ class TestAnAnonymousViewerCanStillSeeAHostsEvents:
         leaked = [f for f in app._WEB_ANON_WITHHELD if f in anon]
         assert not leaked, leaked
         assert 'event_key' in anon, 'the key itself must still reach the client'
+
+
+class TestAPageKnowsItsProgramWasRestarted:
+    """``_WEB_HTML``/``_WEB_CSS``/``_WEB_JS`` are constants loaded at import, so
+    a tab carries whatever the process it loaded from was serving. Left open
+    across a restart it keeps them and re-polls only ``/api/state`` — live data
+    in an old layout, with nothing on screen saying so.
+
+    That is not a cache and ``Cache-Control: no-store`` does not reach it: it
+    is the document already loaded. It cost two "it still does not work"
+    reports against a layout bug that was already fixed, and one of them
+    arrived as "works in Chrome, not Firefox" — one browser had been reopened
+    and the other had not.
+    """
+
+    def test_the_payload_names_the_process(self, pb, tmp_path):
+        app = _app(pb, tmp_path)
+        assert app._web_state()['run'] == pb._WEB_RUN_ID
+
+    def test_it_does_not_change_while_the_program_runs(self, pb, tmp_path):
+        """A value that moved on its own would reload every viewer on a timer."""
+        app = _app(pb, tmp_path)
+        first = app._web_state()['run']
+        app._dispatch_cmd(':set dns hostname')
+        _reload_entries = app._web_state()['run']
+        assert _reload_entries == first
+
+    def test_generation_could_not_have_served(self, pb, tmp_path):
+        """``generation`` counts ':edit' reloads and starts from the same value
+        in every process, so it says nothing about *which* program answered —
+        which is why a second field exists rather than reusing it."""
+        app = _app(pb, tmp_path)
+        assert app._web_state()['generation'] != app._web_state()['run']

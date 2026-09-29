@@ -1555,6 +1555,31 @@ whole difference from `pause`. The row is redrawn on the click rather than at
 the next poll — waiting two seconds for your own click reads as a dead
 control.
 
+**A page whose program has been restarted reloads itself.** `_WEB_HTML`,
+`_WEB_CSS` and `_WEB_JS` are constants loaded at import, so a document carries
+whatever the process it loaded from was serving — and a tab left open across a
+restart keeps them while re-polling only `/api/state`. The result is **live
+data drawn by an old page**, which is indistinguishable from a bug and was
+reported as one twice in a row against a layout fix that had already landed;
+the second time as *"works in Chrome, not Firefox"*, which was simply one
+browser reopened and the other not. It is not a cache and
+`Cache-Control: no-store` does not reach it: the document is already loaded.
+
+`_WEB_RUN_ID` is minted once per **process** — not per listener, since
+`:web stop`/`:web start` do not re-import this file — and rides in `/api/state`
+as `run`. The client records the first value it sees and reloads when a later
+poll differs. **`generation` could not have served**: it counts `:edit`
+reloads and starts from the same value in every process, so it says nothing
+about *which* program answered.
+
+Two details are load-bearing. **Never on the first poll** — there is no
+baseline then, and a page that reloads itself every couple of seconds is worse
+than a stale one. And **the new id is adopted before the reload is requested**,
+so this fires once per restart even where the document is not replaced at once;
+a browser may defer a reload, and asking again on every poll would be a loop.
+A notice was the alternative and was rejected: the case that matters is a wall
+display with nobody standing at it.
+
 **The details pane sits in the row list, under the host it describes.** It is
 the same node moved rather than a new one built: a node has one parent, so
 appending it re-parents it, and that is what keeps its text across the poll

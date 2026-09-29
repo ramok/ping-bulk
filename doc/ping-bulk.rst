@@ -2110,6 +2110,11 @@ Web interface
     — a section says where a host sits in the configured order, so it means
     nothing once the rows are somewhere else.
 
+    If ping-bulk is restarted while the page is open, the page reloads
+    itself within a poll.  An open tab keeps the stylesheet and script it
+    first loaded, so without this it would go on drawing live readings with
+    an old page and give no sign of it.
+
     The box on the ``Hosts`` heading filters the list **in the browser**.
     ``/`` focuses it and ``Esc`` clears it, as in the terminal — but unlike
     ``:filter`` it moves nobody else's screen, which matters when two people
