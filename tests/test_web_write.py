@@ -632,7 +632,12 @@ class TestTheFoldControlIsOnThePage:
         to become able to fold. Now there is nothing to explain."""
         js = pb._WEB_JS
         marker = js[js.index('function sectionRow'):js.index('function badge(')]
-        assert 'canWrite' not in marker, 'folding needs no permission'
+        # Not "canWrite is absent from the function" -- it legitimately appears
+        # further down, reserving the box a host's action buttons occupy so the
+        # strips line up. What must hold is that no gate stands between the
+        # start of the row and the handler.
+        before = marker[:marker.index("el.addEventListener('click'")]
+        assert 'canWrite' not in before, 'folding needs no permission'
         assert 'act(' not in marker, 'folding must not post a command'
 
     def test_the_state_comes_from_this_browser(self, pb):

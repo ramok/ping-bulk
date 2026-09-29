@@ -1337,11 +1337,83 @@ draws its whole jump chain, so `ses-wg-video → proxmox → nray-set2-slave
 purpose is to size the column to its content. **A server-side cap on something
 only the client can measure should be generous enough never to bind.**
 
-**A host is indented inside its name cell; a section indents its whole row.**
-The padding goes on the `.name` span rather than the row — with `box-sizing:
-border-box` it comes out of the fixed name width, so however deep a host sits
-its stats and strip stay in the same column. Indenting the row instead would
-push those right and undo the alignment a fixed name column exists for (5e535b2).
+**Every row indents inside its name cell — sections included.** The padding
+goes on the `.name` span rather than the row: with `box-sizing: border-box` it
+comes out of the fixed name width, so however deep a row sits its stats and
+strip stay in the same column. Indenting the row instead pushes those right
+and undoes the alignment a fixed name column exists for (5e535b2).
+
+**A section did indent its whole row, and a folded one drew a strip that did
+not line up.** Reported as *"when title is fold, ping history do not indented
+with host ping history"*, and `.strip` being `flex: 1 1 0` is why: a strip
+begins where the boxes before it end, so two strips share a column only if
+those boxes are the same width. Three things made that false and any one of
+them was enough — the row-level indent above; the fold marker sitting as a
+sibling **before** the name, which added its width and a 12px gap to section
+rows and nothing to host rows; and the badge taking its natural width where a
+host's stat block takes as many columns as `:set stats` asked for. The marker
+now lives inside the name cell and the badge spans `--stats-w`, measured from
+a real host row and right-aligned inside it.
+
+**The terminal was right the whole time**, which is what makes this a parity
+bug rather than a design question: `draw_hosts` pads `indent + '──' + marker +
+title` into `stat_col` and then right-aligns the badge inside `stat_field_w`,
+so its section strip has always started in the host strips' column. The
+browser had reinvented the layout instead of mirroring it.
+
+**And a fourth cause was hiding behind `:set web-commands`, which is the
+default.** A host row grows an `.acts` box — pause and quiet — between its
+name and its stats whenever the viewer may write, and a section row had
+nothing there: about 118px, the same order as the three above, for anybody who
+signs in. The first cut of this fix aligned the anonymous case and left the
+common one broken, with a test asserting the anonymous shape as though it were
+general. A section now carries the same box, empty and `aria-hidden`.
+
+**Two more causes survived that fix, and the structural tests could not see
+either.** Reported again — *"last commit actually do not fix a problem"* — and
+both are invisible in the shape of the markup:
+
+- **`.row` sets `padding: 1px 8px` and `.row.section` overrode it with
+  `7px 0 1px`**, so every section's content began 8px left of every host's.
+- **`--name-w` is handed out in `ch`**, which is the width of `0` in the
+  element's **own** font, and the section row carried `font-weight: 600`. The
+  same `30ch` therefore resolved 25px wider on a section than on a host: the
+  fixed name column, the single thing keeping every row's strip in one place,
+  was a different width for the two kinds of row. The weight now sits on the
+  title span inside the cell, so the box is measured in the same font as a
+  host's.
+
+The two partly cancelled — `-8 + 25.03 = 17.03px` — which is why the result
+still looked *nearly* right and why guessing at it twice was possible.
+
+**The lesson is about the tests, not the CSS.** Two rounds of assertions on
+class names, CSS rule shapes and the order of boxes in each row all passed
+while the strips were 17px apart, because *whether the boxes exist* was never
+the question — whether they are the same **width** is, and only a layout
+engine knows that. `TestTheStripsActuallyLineUpInABrowser` runs the real page
+under headless Chrome and asserts the two strips share a left edge, in both
+permission modes; reverting either cause fails it, which was checked rather
+than assumed. Measured before: `.name` at 16px against 24px, widths 292.23
+against 267.2. After: identical to the hundredth of a pixel. **A layout
+invariant needs a layout measurement; a structural test is a proxy that was
+wrong twice here.**
+
+**Those buttons also moved one host's strip out of line with another's.**
+Both labels swap — `pause` becomes `resume`, `quiet` becomes `alarm` — so a
+button sized by its text changes width when a host is paused, and everything
+after it in that row moves. `min-width` on `.acts button` is the floor that
+holds the row still; it is not cosmetic.
+
+`measureBox` publishes both widths, from `.row.host .stats` and
+`.row.host .acts` — never from the element each one sizes, which would read
+back the value it just set, and never from a strip, whose width depends on
+them. Both boxes are sized by their own contents and feed nothing back, so one
+pass settles, unlike the strip-derived `cols` number (above). They are set
+**before** `measureCols`, which reads whichever strip comes first and would
+otherwise measure a section strip about to change width. A width once set is
+**kept** when no host row is on screen — every section folded, or a filter
+matching nothing — because there is then nothing to line up with and holding
+it stops the sections jumping as the last host leaves.
 
 **The step that matters is title-to-host, and the first cut lost exactly
 that.** The terminal puts a title at `(level - 1) * 2` columns and a host at

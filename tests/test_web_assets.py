@@ -1002,7 +1002,8 @@ const mk = (tag) => ({
   // The font probe measures itself; a monospace face is CH per character.
   getBoundingClientRect() { return {width: this.textContent.length * CH}; },
   // Whatever the row list is asked for, hand back a strip of a known width.
-  querySelector() { return {clientWidth: STRIP_PX}; },
+  querySelector() { return {clientWidth: STRIP_PX,
+                            getBoundingClientRect: () => ({width: STRIP_PX})}; },
   clientWidth: STRIP_PX,
 });
 const byId = {};
@@ -1103,7 +1104,8 @@ const mk = () => { const o = {
   addEventListener(t,f){ (o.listeners[t] = o.listeners[t] || []).push(f); },
   classList:{names:[],add(...n){this.names.push(...n);},remove(){},toggle(){},
              contains(n){return this.names.indexOf(n)!==-1;}},
-  querySelector(){return {clientWidth:700};},
+  querySelector(){return {clientWidth:700,
+                          getBoundingClientRect:()=>({width:700})};},
   getBoundingClientRect(){return {width:(o.textContent||'').length*7};},
   removeChild(){}, clientWidth:700, tagName:'SPAN', remove(){}, focus(){}, value:'',
 }; return o; };
@@ -1410,12 +1412,12 @@ const kinds = () => global.foldFilter(rows).map(r => r.uid);
 const out = {open: kinds()};
 // The click handler is what a viewer actually fires.
 const row = global.sectionRow(section, 1);
-out.markerOpen = row.children[0].textContent;
+out.markerOpen = row.children[0].children[0].textContent;
 out.stripWhenOpen = row.children.length;
 row.on.click({target: {tagName: 'DIV'}});
 out.folded = kinds();
 const row2 = global.sectionRow(section, 1);
-out.markerFolded = row2.children[0].textContent;
+out.markerFolded = row2.children[0].children[0].textContent;
 out.stripWhenFolded = row2.children.length;
 row2.on.click({target: {tagName: 'DIV'}});
 out.reopened = kinds();
@@ -1428,6 +1430,18 @@ out.survivesASortedPoll = global.isFolded(section);
 // Bounded, so it cannot grow for the life of the browser profile.
 for (var i = 0; i < 700; i++) { global.setFolded('s' + i, true); }
 out.capped = Object.keys(global.foldStore()).length;
+// 'S' is folded here, so this section draws a strip -- the case that has to
+// line up with the host strips above and below it.
+global.setFolded('S', true);
+out.sectionBoxes = global.sectionRow(section, 1).children.map(c => c.className);
+out.hostBoxes = global.hostRow(host('a', 'S'), 1).children.map(c => c.className);
+out.markerParent = global.sectionRow(section, 1).children[0].children[0].className;
+// The signed-in shape, which is the DEFAULT (':set web-commands safe') and
+// the case the first cut of this fix left broken.
+global.render({rows: [], down: [], events: [], columns: [], view: {},
+               time: 0, commands: 'safe', csrf: 'x'});
+out.sectionBoxesRW = global.sectionRow(section, 1).children.map(c => c.className);
+out.hostBoxesRW = global.hostRow(host('a', 'S'), 1).children.map(c => c.className);
 console.log(JSON.stringify(out));
 '''
 
@@ -1435,8 +1449,8 @@ console.log(JSON.stringify(out));
         app_js = tmp_path / 'app.js'
         app_js.write_text(_served_js(pb) + '\n' + '\n'.join(
             'global.%s = %s;' % (n, n) for n in
-            ('sectionRow', 'foldFilter', 'isFolded', 'setFolded', 'foldStore',
-             'render')
+            ('sectionRow', 'hostRow', 'foldFilter', 'isFolded', 'setFolded',
+             'foldStore', 'render')
         ) + '\n')
         runner = tmp_path / 'run.js'
         runner.write_text(self.RUNNER)
@@ -1490,3 +1504,207 @@ console.log(JSON.stringify(out));
         misread why a row is absent."""
         out = self._run(pb, tmp_path)
         assert out['capped'] <= 500, out['capped']
+
+
+class TestAFoldedSectionStripLinesUpWithTheHosts:
+    """Reported as "when title is fold, ping history do not indented with host
+    ping history".
+
+    ``.strip`` is ``flex: 1 1 0``, so a section's strip and a host's strip
+    begin in the same column only if everything before them is the same width.
+    Three separate things made that false, and each would have been enough on
+    its own: the section indented its whole **row** where a host indents inside
+    its name cell; the fold marker was a sibling *before* the name, adding its
+    width and a 12px gap to section rows only; and the badge took its natural
+    width where a host's stat block takes seven columns.
+
+    The terminal has always done this correctly — ``draw_hosts`` pads
+    ``indent + '──' + marker + title`` into ``stat_col`` and right-aligns the
+    badge inside ``stat_field_w`` — so this is the browser catching up, not a
+    new rule.
+    """
+
+    def test_the_indent_is_inside_the_name_cell_for_both_kinds(self, pb):
+        """Indenting the row moves the stats and the strip with it, which is
+        exactly what a fixed name column exists to prevent."""
+        css = pb._WEB_CSS
+        assert not re.search(r'\.row\.section\.lvl\d\s*\{', css), (
+            'a section must indent its name cell, not its whole row')
+        for level in range(2, 7):
+            assert '.row.section.lvl%d .name { padding-left:' % level in css
+
+    def test_the_badge_takes_the_stat_field_width(self, pb):
+        css = pb._WEB_CSS
+        assert 'var(--stats-w' in css, 'the badge must span the stat field'
+        assert '--stats-w' in pb._WEB_JS, 'and something must measure it'
+
+    def test_the_stat_width_is_measured_from_a_host_row(self, pb):
+        """Not from the section's own badge, which is the thing being sized,
+        and not from the strip, which would oscillate."""
+        assert "measureBox('.row.host .stats', '--stats-w')" in pb._WEB_JS
+        assert "measureBox('.row.host .acts', '--acts-w')" in pb._WEB_JS
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_both_rows_put_the_same_boxes_before_the_strip(self, pb, tmp_path):
+        """The structural half, and the one that actually fails when somebody
+        appends a fourth child to one row kind and not the other."""
+        out = TestTheBrowserFoldsForItself()._run(pb, tmp_path)
+        assert out['sectionBoxes'] == ['name', 'badge', 'strip'], out['sectionBoxes']
+        assert out['hostBoxes'] == ['name', 'stats', 'strip'], out['hostBoxes']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_the_marker_is_inside_the_name_cell(self, pb, tmp_path):
+        """As a sibling it added its own width plus a gap to section rows and
+        nothing to host rows.
+
+        Asserting that the row's first box is ``name`` is what this did first,
+        and it passes with the marker deleted entirely — it never looked at the
+        marker. The class of the name cell's first child is the honest one.
+        """
+        out = TestTheBrowserFoldsForItself()._run(pb, tmp_path)
+        assert out['markerParent'] == 'foldmark', out['markerParent']
+
+    @pytest.mark.skipif(shutil.which('node') is None, reason='needs node')
+    def test_it_holds_for_a_viewer_who_can_write(self, pb, tmp_path):
+        """The first cut aligned the read-only case and left the default one
+        broken: a host row grows an ``.acts`` box of two buttons between its
+        name and its stats when ``canWrite``, and a section row had nothing
+        there — about 118px, the same order as the bug being fixed. Anyone who
+        signs in sees it, which is why asserting only the anonymous shape read
+        as proof of something it did not cover.
+        """
+        out = TestTheBrowserFoldsForItself()._run(pb, tmp_path)
+        assert out['hostBoxesRW'] == ['name', 'acts', 'stats', 'strip'], \
+            out['hostBoxesRW']
+        assert out['sectionBoxesRW'] == ['name', 'acts', 'badge', 'strip'], \
+            out['sectionBoxesRW']
+
+    def test_an_action_button_cannot_change_width_with_its_label(self, pb):
+        """'pause' becomes 'resume' and 'quiet' becomes 'alarm'. Sized by its
+        text, the button moves the stats and the strip of that row alone — so
+        pausing one host took its strip out of line with every other host's,
+        not just with the sections."""
+        assert re.search(r'\.acts button \{[^}]*min-width:', pb._WEB_CSS), \
+            'the labels swap, so the button needs a floor'
+
+
+class TestTheStripsActuallyLineUpInABrowser:
+    """The one test in this file that measures instead of inspecting.
+
+    Two rounds of structural assertions — class names, CSS rule shapes, the
+    order of boxes in each row — passed while the strips were still 17px
+    apart, because *the boxes existed* was never the question. What matters is
+    whether they are the same **width**, and only a layout engine knows that.
+    Two causes survived both rounds and neither is visible in the shape of the
+    markup:
+
+    * ``.row`` sets ``padding: 1px 8px`` and ``.row.section`` overrode it with
+      ``7px 0 1px``, so every section's content began 8px left of every host's.
+    * ``--name-w`` is handed out in ``ch``, which is the width of ``0`` in the
+      element's **own** font, and the section row was bold — so the same
+      ``30ch`` came out 25px wider on a section than on a host. The fixed name
+      column, the single thing keeping every row's strip in one place, was a
+      different width for the two kinds of row.
+
+    Measured, before: ``.name`` at 16px vs 24px, widths 292.23 vs 267.2, strip
+    delta 17.03px. After: identical to the hundredth of a pixel.
+    """
+
+    PROBE = r'''
+window.fetch = function () { return new Promise(function () {}); };
+window.onerror = function (m, u, line) {
+  document.title = 'R' + JSON.stringify({error: String(m) + ' @' + line}) + 'E';
+};
+'''
+
+    MEASURE = r'''
+var state = {
+  time: 0, generation: 1, csrf: __CSRF__, commands: __CMD__,
+  columns: ['GPS s/off/sat','RTime','Drift','Down','Last','Avg','StDev'],
+  down: [], events: [],
+  view: {name_width: 30, cell_width: 1, sort: 'none', dns: 'name+ip', sync: false},
+  rows: [
+    {kind:'section', uid:'S', level:1, title:'Comm mods', folded:true,
+     badge:[{text:'3',cls:'b-up'},{text:'/',cls:''},{text:'1',cls:'b-down'}],
+     history:'..........', hist_class:[], cell_width:1},
+    {kind:'section', uid:'S2', level:1, title:'Cameras', folded:false,
+     badge:[{text:'1',cls:'b-up'}],
+     history:'..........', hist_class:[], cell_width:1},
+    {kind:'host', uid:'h1', parent:'S2', level:1, name:'sh1-comm-mod',
+     host:'10.0.0.1', ip:null, alive:true, paused:false, no_alarm:false,
+     error:null, latency:1.2, updown:'1h', down:false,
+     stats:{'GPS s/off/sat':'0/0/29','RTime':'1','Drift':'0','Down':'-',
+            'Last':'1.2','Avg':'1.3','StDev':'0.1'},
+     stat_class:{}, history:'..........', hist_class:[], cell_width:1}
+  ]
+};
+function px(row, sel, what) {
+  var e = row.querySelector(sel);
+  if (!e) { return null; }
+  var r = e.getBoundingClientRect();
+  return Math.round((what === 'w' ? r.width : r.left) * 100) / 100;
+}
+try {
+  render(state);
+  var sec = document.querySelector('.row.section');
+  var host = document.querySelector('.row.host');
+  if (!sec || !host) { throw new Error('rows missing'); }
+  document.title = 'R' + JSON.stringify({
+    nameLeft:  [px(sec, '.name'), px(host, '.name')],
+    nameWidth: [px(sec, '.name', 'w'), px(host, '.name', 'w')],
+    stripLeft: [px(sec, '.strip'), px(host, '.strip')]
+  }) + 'E';
+} catch (e) {
+  document.title = 'R' + JSON.stringify({error: 'render: ' + e.message}) + 'E';
+}
+'''
+
+    def _measure(self, pb, tmp_path, commands, csrf):
+        html = pb._WEB_HTML.replace(
+            '<link rel="stylesheet" href="/static/app.css">',
+            '<style>\n' + pb._WEB_CSS + '\n</style>')
+        html = html.replace('<script src="/static/app.js"></script>', '')
+        probe = (self.MEASURE.replace('__CMD__', json.dumps(commands))
+                             .replace('__CSRF__', json.dumps(csrf)))
+        html = html.replace(
+            '</body>',
+            '<script>' + self.PROBE + '</script>\n'
+            '<script>' + pb._WEB_JS + '</script>\n'
+            '<script>' + probe + '</script>\n</body>')
+        page = tmp_path / 'page.html'
+        page.write_text(html)
+        # Its own profile directory: this must never touch the developer's
+        # running browser or its session.
+        r = subprocess.run(
+            ['google-chrome', '--headless', '--no-sandbox', '--disable-gpu',
+             '--window-size=1400,900',
+             '--user-data-dir=' + str(tmp_path / 'chrome'),
+             '--virtual-time-budget=4000', '--dump-dom', page.as_uri()],
+            capture_output=True, text=True, timeout=180)
+        found = re.search(r'R(\{.*?\})E</title>', r.stdout, re.S)
+        assert found, 'no measurement came back:\n' + r.stdout[:600] + r.stderr[-600:]
+        out = json.loads(found.group(1))
+        assert 'error' not in out, out['error']
+        return out
+
+    @pytest.mark.skipif(shutil.which('google-chrome') is None,
+                        reason='needs google-chrome to measure real layout')
+    @pytest.mark.parametrize('commands,csrf', [('read-only', None), ('safe', 'tok')])
+    def test_a_folded_section_strip_starts_where_a_hosts_does(
+            self, pb, tmp_path, commands, csrf):
+        """Both permission modes: the ``.acts`` box a signed-in viewer gets is
+        one of the causes, so measuring only one mode proves half of it."""
+        out = self._measure(pb, tmp_path, commands, csrf)
+        sec, host = out['stripLeft']
+        assert sec == host, (
+            'a folded section\'s strip is %s px from the host\'s (%s vs %s) '
+            'under commands=%r' % (round(sec - host, 2), sec, host, commands))
+
+    @pytest.mark.skipif(shutil.which('google-chrome') is None,
+                        reason='needs google-chrome to measure real layout')
+    def test_the_name_column_is_one_width_for_both_row_kinds(self, pb, tmp_path):
+        """``ch`` resolves against the element's own font, so a bold section
+        row silently widened the column that exists to be fixed."""
+        out = self._measure(pb, tmp_path, 'read-only', None)
+        assert out['nameWidth'][0] == out['nameWidth'][1], out['nameWidth']
+        assert out['nameLeft'][0] == out['nameLeft'][1], out['nameLeft']

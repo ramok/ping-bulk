@@ -7961,7 +7961,18 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .row { display: flex; align-items: center; gap: 12px;
        padding: 1px 8px; background: var(--panel); border-radius: 2px;
        line-height: 1.35; }
-.row.section { background: none; padding: 7px 0 1px; font-weight: 600; }
+/* The horizontal padding must match '.row' exactly.  It was 0 here against
+   8px there, so every section's content -- title, badge and strip -- sat 8px
+   left of every host's.  Measured in headless Chrome: '.name' at 16px on a
+   section against 24px on a host.
+   The weight goes on the TITLE, not the row, and that is not cosmetic either:
+   '--name-w' is handed out in 'ch', which is the width of '0' in the element's
+   OWN font, and a 600-weight '0' is wider.  With the row bold, the same
+   '30ch' measured 292.23px on a section and 267.2px on a host -- so the fixed
+   name column, the one thing keeping every row's strip in one place, was a
+   different width for the two kinds of row. */
+.row.section { background: none; padding: 7px 8px 1px; }
+.row.section .title { font-weight: 600; }
 .row.section .name { color: var(--dim); }
 /* Section nesting is not limited to three in the hosts file, so neither is
    the indent here.
@@ -7973,17 +7984,17 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
    loses the title-to-host step entirely, so every host stood flush with the
    header above it.  A host outside any section is level 0 and matches no rule.
 
-   A section indents the whole row.  A host indents inside its NAME cell
-   instead -- `box-sizing: border-box` means the padding comes out of the
-   fixed name width, so every row's stats and strip stay in one column however
-   deep the host sits.  Indenting the host's row instead would push its stats
-   and strip right and undo the alignment that is the point of a fixed name
-   column. */
-.row.section.lvl2 { padding-left: 16px; }
-.row.section.lvl3 { padding-left: 32px; }
-.row.section.lvl4 { padding-left: 48px; }
-.row.section.lvl5 { padding-left: 64px; }
-.row.section.lvl6 { padding-left: 80px; }
+   Every row indents inside its NAME cell, sections included -- `box-sizing:
+   border-box` means the padding comes out of the fixed name width, so every
+   row's stats and strip stay in one column however deep it sits.  Indenting
+   the row instead pushes its stats and strip right and undoes the alignment
+   that is the point of a fixed name column; a section did exactly that, and
+   its folded strip did not line up with the host strips below it. */
+.row.section.lvl2 .name { padding-left: 16px; }
+.row.section.lvl3 .name { padding-left: 32px; }
+.row.section.lvl4 .name { padding-left: 48px; }
+.row.section.lvl5 .name { padding-left: 64px; }
+.row.section.lvl6 .name { padding-left: 80px; }
 .row.host.lvl1 .name { padding-left: 16px; }
 .row.host.lvl2 .name { padding-left: 32px; }
 .row.host.lvl3 .name { padding-left: 48px; }
@@ -8046,7 +8057,19 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .strip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
          font-size: 12px; letter-spacing: 0; white-space: pre;
          overflow: hidden; flex: 1 1 0; min-width: 0; }
-.badge { color: var(--dim); font-size: 12px; }
+/* The stat field, not the badge's own width.  A folded section draws a strip
+   and a host draws a strip, and '.strip' is 'flex: 1 1 0' -- so the two start
+   in the same column only if everything before them is the same width.  The
+   terminal has always done this: it pads the header into stat_col and then
+   right-aligns the badge inside stat_field_w, so the two strips line up.  The
+   browser gave the badge its natural width instead, which is far narrower
+   than seven stat columns, and the section's strip started short of the host
+   strips below it and ran wider.  --stats-w is measured from a real host row;
+   with no host on screen there is nothing to line up with and the badge falls
+   back to its own width. */
+.badge { color: var(--dim); font-size: 12px;
+         flex: 0 0 var(--stats-w, auto);
+         display: flex; justify-content: flex-end; gap: 0; }
 /* The fold marker is the terminal's '[+]'/'[-]', and doubles as the control.
    It is a hit target, so it gets padding rather than sitting flush against
    the title.  Under ':set web-commands read-only' it still shows the state --
@@ -8060,11 +8083,21 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
 .row.section.foldable:hover .foldmark,
 .row.section.foldable:hover .name { color: var(--fg); }
 .acts { display: flex; gap: 4px; }
+/* A floor wide enough for the longest label, because both of them swap:
+   'pause' becomes 'resume' and 'quiet' becomes 'alarm'.  Sized by its text, a
+   button changes width when a host is paused -- and it sits before the stats
+   and the strip, so pausing one host moved that row's strip out of line with
+   every other row's.  The same failure as the section strip below, one row
+   kind in. */
 .acts button {
   font: inherit; font-size: 12px; padding: 2px 8px; cursor: pointer;
   border: 1px solid var(--line); border-radius: 3px;
-  background: var(--field); color: var(--dim);
+  background: var(--field); color: var(--dim); min-width: 11ch;
 }
+/* A section has no actions to offer, and no box at all would put its strip
+   where a host's cannot start.  Measured from a real host row, like
+   --stats-w, so it needs no guess about the font. */
+.row.section .acts { flex: 0 0 var(--acts-w, 0); }
 .acts button:hover { color: var(--fg); border-color: var(--dim); }
 .acts button[disabled] { opacity: .4; cursor: default; }
 .row.paused .acts button.pause { color: var(--slow); }
@@ -8677,8 +8710,28 @@ function sectionRow(r, cellWidth) {
     // click and waiting two seconds for it reads as a dead control.
     if (lastState) { render(lastState); }
   });
-  el.appendChild(marker);
-  el.appendChild(span(r.title, 'name'));
+  // The marker goes INSIDE the name cell rather than beside it, because that
+  // cell is the fixed column every row's stats and strip are measured from.
+  // As a sibling it added its own width plus a 12px gap to this row and
+  // nothing to a host row, so a section's strip could not line up with the
+  // strips underneath it.  The terminal builds the same box: indent, '──',
+  // the marker and the title, all padded into stat_col.
+  var nameCell = document.createElement('span');
+  nameCell.className = 'name';
+  nameCell.appendChild(marker);
+  nameCell.appendChild(span(r.title, 'title'));
+  el.appendChild(nameCell);
+  // A host row carries its pause/quiet buttons here when the viewer may write,
+  // and a section has nothing to offer -- but the box has to exist, or every
+  // section strip starts a hundred pixels left of every host strip the moment
+  // somebody signs in.  ':set web-commands safe' is the default, so that is
+  // the common case, not the corner.
+  if (canWrite) {
+    var actsPad = document.createElement('span');
+    actsPad.className = 'acts';
+    actsPad.setAttribute('aria-hidden', 'true');
+    el.appendChild(actsPad);
+  }
   el.appendChild(badge(r.badge));
   // Only when folded, as the terminal does -- an open section's hosts are
   // already drawing their own strips underneath, and summarising them again
@@ -8783,6 +8836,12 @@ function render(state) {
     detailWrap.hidden = true;
   }
   rowsEl.replaceChildren.apply(rowsEl, built);
+  // Before measureCols, which reads whichever strip comes first and would
+  // otherwise measure a section strip whose width is about to change.  The
+  // stat block is sized by its own columns and knows nothing about the strip,
+  // so this cannot oscillate the way a strip-derived number would.
+  measureBox('.row.host .stats', '--stats-w');
+  measureBox('.row.host .acts', '--acts-w');
   measureCols(state.view.cell_width);
 
   eventsEl.replaceChildren.apply(eventsEl, state.events.slice(-120).map(
@@ -8871,6 +8930,20 @@ function stripCellPx() {
 
 // Called after every render: the columns beside the strip can change width
 // (a longer name, a column switched on), so what fits is not answered once.
+// The width of one host row's box, published for the section rows to match.
+// Never measured from the element it sizes (that would read back the value it
+// just set) and never from a strip, whose width depends on this one -- both
+// of these are sized by their own contents and feed nothing back, so one pass
+// settles.  A value once set is kept when no host row is on screen: there is
+// then nothing to line up with, and holding the width stops the sections
+// jumping as the last host is filtered away.
+function measureBox(selector, prop) {
+  var el = rowsEl.querySelector(selector);
+  if (!el) { return; }
+  var w = el.getBoundingClientRect().width;
+  if (w > 0) { rowsEl.style.setProperty(prop, w + 'px'); }
+}
+
 function measureCols(cellWidth) {
   var el = rowsEl.querySelector('.strip');
   if (!el) { return; }
