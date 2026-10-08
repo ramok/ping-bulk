@@ -1917,6 +1917,48 @@ option in `:set ssh-options` overrides all of it — ssh takes the *first* value
 of a repeated option and these are placed first, so an explicit choice would
 otherwise be silently ignored.
 
+### Nothing we start may own a terminal
+
+Every spawn passes `start_new_session=True`, so no child has a controlling
+terminal. That is not tidiness, and `stdin=subprocess.DEVNULL` is not a
+substitute: **ssh reads a host-key confirmation, a password and a key
+passphrase from `/dev/tty` directly**, never from stdin. Only `BatchMode`
+suppresses the asking — and a `-J` **ProxyJump child does not inherit it**.
+`ProbeReader` adds `-J <relay>` for any host behind one, so that child opened
+the terminal, painted its question across the curses screen and blocked for
+ever. Without a controlling tty the open fails and ssh reports the failure
+like any other, which the table below then explains.
+
+**It was diagnosed from a `script(1)` capture, and the capture is why the
+first answer was wrong.** Every one of ping-bulk's own ssh argvs carries
+`BatchMode=yes`, every spawn already took stdin away, and `:mux` refuses
+cleanly with no multiplexer — so the prompt was confidently attributed to an
+unrelated process sharing the terminal. `script` allocates a **new** pty, so
+anything appearing in its capture is this program's own child; the prompt was
+there four times, which is exactly the number of `*-comm-mod` hosts the
+`:probe-source` covers. The bytes settle it too: ncurses addresses the cursor
+(`ESC[row;colH`) before writing, and the prompt arrives as a bare `\r`
+followed by plain text.
+
+**And taking the terminal away is only half of it.** ssh does not give up on
+asking when there is no tty — it turns to `SSH_ASKPASS` and puts the same
+host-key question in a **GUI window**, which blocks exactly as the terminal
+prompt did and is further out of reach of whoever is watching the screen.
+Reported within minutes of the first fix, as a gpg-agent dialog carrying the
+same "yes", on a machine where nothing but `DISPLAY` was set. So
+`_ssh_child_env()` refuses that route too: `SSH_ASKPASS_REQUIRE=never` (the
+documented refusal, OpenSSH 8.4+) plus dropping `DISPLAY` and `SSH_ASKPASS`,
+because an older ssh consults those on their own. `SSH_AUTH_SOCK` is
+deliberately **kept** — an agent answers without asking anybody, which is the
+case worth having. Between the two there is no way left for a connection this
+program opens to wait on a human.
+
+The cost, stated rather than discovered: a detached child no longer receives
+terminal-generated signals. Nothing depended on that — children are stopped
+explicitly, and `run()`'s `finally` plus the `SIGTERM` handler cover teardown —
+but a `SIGKILL`ed ping-bulk can now leave an `ssh` behind where the terminal's
+`SIGHUP` would once have reaped it.
+
 ### A failure ssh can state but not act on
 
 Every connection this program opens carries `BatchMode=yes` **and**

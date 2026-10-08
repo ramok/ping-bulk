@@ -26,6 +26,8 @@ connection, and it named no fix. Reported from a real run whose log read
 against a relay that had simply never been connected to.
 """
 
+import io
+
 import pytest
 
 # ssh's own text, captured from OpenSSH against a live sshd.
@@ -201,3 +203,50 @@ class TestATipIsNotSomethingTheChildSaid:
             m._note_stderr(line)
         tips = [t for t in m.take_new_stderr() if t.startswith('tip:')]
         assert len(tips) == 1, tips
+
+
+class TestNoConnectionCanAskAHuman:
+    """Taking the terminal away is half the job; ssh has a second route.
+
+    With no controlling tty ssh does not give up — it falls back to
+    ``SSH_ASKPASS`` and puts the same host-key question in a **GUI window**,
+    which blocks exactly as the terminal prompt did and is further out of reach
+    of whoever is watching the screen. Reported as a gpg-agent dialog carrying
+    the same "yes" question, on a machine where nothing but ``DISPLAY`` was
+    set — so the first fix had moved the problem rather than closed it.
+    """
+
+    def test_the_gui_fallback_is_refused(self, pb):
+        assert pb._ssh_child_env()['SSH_ASKPASS_REQUIRE'] == 'never'
+
+    def test_and_the_older_routes_to_it_are_removed(self, pb, monkeypatch):
+        """``SSH_ASKPASS_REQUIRE`` is OpenSSH 8.4+; an older ssh consults
+        ``DISPLAY`` and ``SSH_ASKPASS`` on their own."""
+        monkeypatch.setenv('DISPLAY', ':0')
+        monkeypatch.setenv('SSH_ASKPASS', '/usr/bin/ssh-askpass')
+        env = pb._ssh_child_env()
+        assert 'DISPLAY' not in env
+        assert 'SSH_ASKPASS' not in env
+
+    def test_the_agent_is_kept(self, pb, monkeypatch):
+        """An agent answers without asking anybody, which is the case worth
+        having — dropping it would turn working key auth into a failure."""
+        monkeypatch.setenv('SSH_AUTH_SOCK', '/tmp/ssh-xxx/agent.1')
+        assert pb._ssh_child_env()['SSH_AUTH_SOCK'] == '/tmp/ssh-xxx/agent.1'
+
+    def test_the_rest_of_the_environment_survives(self, pb, monkeypatch):
+        """It is a copy with three keys touched, not a hand-built environment:
+        ssh still needs HOME to find its config and known_hosts."""
+        monkeypatch.setenv('HOME', '/home/someone')
+        assert pb._ssh_child_env()['HOME'] == '/home/someone'
+
+    def test_every_connection_we_open_uses_it(self, pb):
+        """The four spawns ping-bulk makes for itself. A new one that forgets
+        this reopens the GUI prompt for whichever host it reaches."""
+        import re
+        src = io.open(pb.__file__, encoding='utf-8').read() if hasattr(pb, '__file__') else None
+        if src is None:
+            import pathlib
+            src = pathlib.Path('/home/komar/work/github/ping-bulk.git/ping-bulk').read_text()
+        assert src.count('env=_ssh_child_env()') == 4, (
+            'expected the four self-opened connections to carry it')

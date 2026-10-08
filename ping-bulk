@@ -3534,6 +3534,16 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
                     stdin=subprocess.DEVNULL,   # never let the child read the terminal
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    env=_ssh_child_env(),
+                    # No controlling terminal for anything we start.  ssh
+                    # reads a host-key confirmation, a password and a key
+                    # passphrase from /dev/tty **directly**, not from stdin, so
+                    # the DEVNULL above does not stop it -- only BatchMode
+                    # does, and a '-J' ProxyJump child does not inherit that.
+                    # Such a child then paints its question over the curses
+                    # screen and blocks for ever.  Without a controlling tty
+                    # the open fails and ssh reports the failure instead.
+                    start_new_session=True,
                 )
             except Exception as exc:
                 self.error = str(exc)
@@ -3814,6 +3824,16 @@ class ProbeReader(_PipeReaderLoop):
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    env=_ssh_child_env(),
+                    # No controlling terminal for anything we start.  ssh
+                    # reads a host-key confirmation, a password and a key
+                    # passphrase from /dev/tty **directly**, not from stdin, so
+                    # the DEVNULL above does not stop it -- only BatchMode
+                    # does, and a '-J' ProxyJump child does not inherit that.
+                    # Such a child then paints its question over the curses
+                    # screen and blocks for ever.  Without a controlling tty
+                    # the open fails and ssh reports the failure instead.
+                    start_new_session=True,
                 )
             except Exception as exc:
                 self.error = str(exc)
@@ -6703,7 +6723,9 @@ def _detect_relay_os(ssh_args, ssh_dest, note_cb=None):
                + _ssh_monitor_flags() + list(ssh_args) + ['uname', '-s'])
         try:
             proc = subprocess.run(cmd, stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=20)
+                                  capture_output=True, text=True, timeout=20,
+                                  start_new_session=True,
+                                  env=_ssh_child_env())
         except (OSError, subprocess.SubprocessError) as exc:
             _relay_os_retry_after[key] = (time.monotonic()
                                           + _RELAY_OS_RETRY_PAUSE)
@@ -6803,6 +6825,29 @@ def _ssh_endpoint_key(spec):
 def _ssh_spec_user(spec):
     """The user named in an ssh destination, or '' when it names none."""
     return spec.rsplit('@', 1)[0] if '@' in spec else ''
+
+
+def _ssh_child_env():
+    """The environment for a connection we open: one that cannot ask a human.
+
+    Taking the controlling terminal away does not make ssh give up on asking —
+    it falls back to SSH_ASKPASS and puts the same host-key question in a
+    **GUI window**, which blocks exactly as the terminal prompt did and is
+    further out of reach of whoever is reading the screen.  Reported as a
+    gpg-agent dialog carrying the same "yes" question, on a machine where
+    nothing but DISPLAY was set.
+
+    'never' is the documented refusal (OpenSSH 8.4+).  DISPLAY and SSH_ASKPASS
+    are dropped as well, because an older ssh consults those on their own.
+
+    SSH_AUTH_SOCK is deliberately **kept**: an agent answers without asking
+    anybody, which is the case worth having.
+    """
+    env = dict(os.environ)
+    env['SSH_ASKPASS_REQUIRE'] = 'never'
+    env.pop('SSH_ASKPASS', None)
+    env.pop('DISPLAY', None)
+    return env
 
 
 def _ssh_diagnostic_flags(user_args=()) -> list:
@@ -10324,7 +10369,8 @@ class Application:
                 return None
         try:
             proc = subprocess.run(
-                cmd, stdin=subprocess.DEVNULL,
+                cmd, stdin=subprocess.DEVNULL, start_new_session=True,
+                env=_ssh_child_env(),
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, timeout=self.clock_interval + 5,
             )
