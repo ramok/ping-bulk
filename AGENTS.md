@@ -1917,6 +1917,70 @@ option in `:set ssh-options` overrides all of it — ssh takes the *first* value
 of a repeated option and these are placed first, so an explicit choice would
 otherwise be silently ignored.
 
+### A failure ssh can state but not act on
+
+Every connection this program opens carries `BatchMode=yes` **and**
+`stdin=DEVNULL` — checked on all of them: the two `SubprocessMonitor` spawns,
+`ProbeReader`, `_detect_relay_os` and the clock probe. That is the right
+trade and not negotiable: a child that can prompt blocks for ever *and* writes
+its question over the curses screen, which is far worse than an error. The
+cost is that a host key nobody has accepted, a password and a locked key all
+come back as one terse line, and the row simply dies.
+
+So the line has to carry the fix. **`_SSH_FIX_TIPS` is the one-off MikroTik
+forwarding tip widened into a table**; `_note_stderr` matches it first-hit-wins
+and feeds the tip back through itself, which is what dedupes it to once per
+host. No tip may contain a mark, or it would trigger itself — there is a test.
+
+**Three conditions arrive as one `Host key verification failed.`**, and calling
+them all a *mismatch* — which this did — is both wrong and alarming: a mismatch
+means the key CHANGED, i.e. a possible man-in-the-middle, while the usual truth
+is "this host has never been connected to". Reported from a real run whose log
+read `host startup fail: ssh host key mismatch (Host key verification failed.)`
+against a relay that was simply new. Measured against a live sshd rather than
+guessed, because the branch is on what ssh actually prints:
+
+| ssh says | reason | the fix the tip names |
+| ----------------------------------------- | -------------------------- | ------------------------ |
+| `No <TYPE> host key is known … strict checking` | `ssh host key not known yet` | `ssh-keyscan -H` |
+| `REMOTE HOST IDENTIFICATION HAS CHANGED` | `ssh host key CHANGED` | verify, then `ssh-keygen -R` |
+| `Host key verification failed` alone | `ssh rejected the host key` | — (the floor, not a gap) |
+
+**ssh does not volunteer which it is, and the first cut of this shipped a
+branch that could never fire.** With ping-bulk's own flags the default
+`StrictHostKeyChecking=ask` answers the bare `Host key verification failed.`
+and nothing else; the explanatory line appears only under `yes`. The fixture
+that "proved" the branch had passed `UserKnownHostsFile=/dev/null`, which makes
+ssh explain all by itself — so the test passed against a condition production
+never produces. **It was caught by running the program in tmux against the real
+relay**, which is the only reason this paragraph is not still wrong.
+
+`_ssh_quiet_flags` is therefore `_ssh_diagnostic_flags`, and adds
+`StrictHostKeyChecking=yes` beside the log level — each dropped independently
+the moment the user names it, since ssh keeps the first value of a repeated
+option and these go first. Under `BatchMode` `ask` and `yes` refuse
+identically, so this buys the explanation and changes no outcome. It is
+deliberately **not** `accept-new`: trusting a key because nobody was watching
+is the one thing the check exists to prevent.
+
+**A tip is ours, not the child's.** `_note_stderr` feeds tips back through
+itself for the dedupe, which put them in the accumulator behind `self.error` —
+a real run reported `error: tip: this host key has never been accepted here…`,
+quoting the program back at itself as though ssh had said it. `from_child=False`
+keeps them out of `_stderr_lines` and `last_stderr` while still logging them.
+And **one tip per failure**: ssh prints the explanation *and* the verdict, so a
+tip on each is two answers to one question.
+| `Permission denied (publickey,password)` | `ssh refused the credentials` | a key it accepts; `ssh-agent` |
+| `Too many authentication failures` | — | `-i <key> -o IdentitiesOnly=yes` |
+
+Ordering is load-bearing in both tables: substring match, first hit wins, so
+the specific wordings come before the generic one and a test asserts the three
+host-key texts resolve to three different reasons.
+
+**A password prompt and a passphrase prompt are not separately detectable.**
+Under `BatchMode` both arrive as `Permission denied`, so one message names
+both rather than inventing a distinction ssh does not give us.
+
 ### The kiosk blocklist is the only guard on `:set ssh-options`
 
 `_cmd_ssh_options` is **not** one of the commands kiosk mode refuses at the

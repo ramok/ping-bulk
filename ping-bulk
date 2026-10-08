@@ -1503,7 +1503,17 @@ _HOST_DIAGNOSES = (
     ('operation not permitted',       'ping not permitted on the relay'),
     ('no such device',                'no such interface on the relay'),
     ('permission denied',             'ssh refused the credentials'),
-    ('host key verification failed',  'ssh host key mismatch'),
+    # Three different conditions arrive as one 'Host key verification failed.'
+    # and they need three different answers, so the specific wordings come
+    # first.  Calling an unknown key a "mismatch" -- which this did -- reads as
+    # "the key CHANGED", i.e. a possible man-in-the-middle, when the truth is
+    # usually "this host has never been connected to".  Measured against a real
+    # sshd: an unknown key says 'No <TYPE> host key is known for <h> and you
+    # have requested strict checking', a changed one shouts 'REMOTE HOST
+    # IDENTIFICATION HAS CHANGED'.
+    ('identification has changed',    'ssh host key CHANGED'),
+    ('requested strict checking',     'ssh host key not known yet'),
+    ('host key verification failed',  'ssh rejected the host key'),
     # Closed before the peer could be named: with '-J' the connection to the
     # relay rides a channel through the jump host, which has no peer address
     # of its own — hence ssh's 'UNKNOWN port 65535'.  Same family as
@@ -1538,6 +1548,40 @@ _SSH_FORWARD_REFUSED_MARK = 'administratively prohibited'
 _MIKROTIK_FORWARD_TIP = (
     'tip: if a jump host on this chain is a MikroTik, enable forwarding '
     'on it: /ip ssh set forwarding-enabled=both')
+
+# A failure ssh can state but not act on, paired with what to do about it.
+# Every connection this program opens carries 'BatchMode=yes', so ssh never
+# asks anything: a host key it has not seen, a password and a locked key all
+# come back as one terse line and the run simply stops for that host.  Naming
+# the fix beside the error is the difference between a dead row and a job.
+#
+# **A password prompt and a passphrase prompt are not separately detectable**
+# under BatchMode — both arrive as 'Permission denied' — so one message names
+# both rather than inventing a distinction ssh does not give us.
+#
+# Matched on the lowercased line, first hit wins, so the specific wordings
+# come first.  A tip is itself passed through _note_stderr, which dedupes it
+# like any other line; no tip may contain a mark, or it would trigger itself.
+_SSH_FIX_TIPS = (
+    (_SSH_FORWARD_REFUSED_MARK, _MIKROTIK_FORWARD_TIP),
+    ('identification has changed',
+     'tip: the relay now presents a different host key. Verify it before '
+     'trusting it; if the change was expected, drop the old one with '
+     "'ssh-keygen -R <host>'"),
+    ('requested strict checking',
+     'tip: this host key has never been accepted here, and BatchMode leaves '
+     "ssh nothing to ask. Confirm it with 'ssh-keygen -F <host>' (no output "
+     "means never seen), then add it: 'ssh-keyscan -H <host> >> "
+     "~/.ssh/known_hosts', or connect by hand once"),
+    ('too many authentication failures',
+     'tip: ssh offered more keys than the relay allows before the right one. '
+     "Name the key for this host: ':prog-options ssh <host> -i <keyfile> "
+     "-o IdentitiesOnly=yes'"),
+    ('permission denied',
+     'tip: the relay refused these credentials, and BatchMode means no '
+     'password or key passphrase can be typed. Give it a key it accepts, and '
+     'load any passphrase into ssh-agent before starting'),
+)
 
 
 def _is_fatal_ssh_text(stderr_text, extra=()):
@@ -3410,8 +3454,15 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
         # A window with no output is a probe that never came back.
         self._record_stale_loss(time.time())
 
-    def _note_stderr(self, line):
+    def _note_stderr(self, line, from_child=True):
         """Record a stderr line for later classification, and surface it once.
+
+        *from_child* False marks a line this program wrote about the child
+        rather than one the child wrote — the tips below.  Those still go to
+        the event log, and are still deduped there, but must not reach
+        `_stderr_lines` or `last_stderr`: those feed `self.error` and the row's
+        reason, and a run whose error reads 'tip: …' is quoting us back at
+        ourselves as though ssh had said it.
 
         Deliberately does not classify here.  'network is unreachable' is in
         _FATAL_PING_ERRORS, but ping prints it per probe while continuing to
@@ -3422,8 +3473,9 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
         if not line:
             return
         with self.lock:
-            self._stderr_lines.append(line)
-            self.last_stderr = (line, time.time())
+            if from_child:
+                self._stderr_lines.append(line)
+                self.last_stderr = (line, time.time())
             # Capped: this process is expected to run for days, and a message
             # carrying a varying detail would otherwise grow the set without
             # bound.  Past the cap we stop reporting new texts rather than stop
@@ -3435,10 +3487,15 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
                 # Queued rather than logged here: a Monitor has no route to the
                 # event log, and the state loop already visits every monitor.
                 self._new_stderr.append(line)
-        if fresh and _SSH_FORWARD_REFUSED_MARK in line.lower():
-            # Follow the refusal with the likely fix; its constant text is
-            # deduped like any stderr line, so the tip appears once per host.
-            self._note_stderr(_MIKROTIK_FORWARD_TIP)
+        if fresh and from_child:
+            # Follow the failure with the likely fix; the tip's constant text
+            # is deduped like any stderr line, so it appears once per host.
+            # First hit only: these are alternatives, not a checklist.
+            low = line.lower()
+            for mark, tip in _SSH_FIX_TIPS:
+                if mark in low:
+                    self._note_stderr(tip, from_child=False)
+                    break
         return fresh
 
     def ping(self):
@@ -3645,7 +3702,7 @@ class ProbeReader(_PipeReaderLoop):
         # out of reach.
         flags = _kiosk_ssh_flags() if self.kiosk_mode else []
         return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(True)
-                + _ssh_quiet_flags(self._ssh_args)
+                + _ssh_diagnostic_flags(self._ssh_args)
                 + _ssh_monitor_flags() + flags
                 + self._jump_args() + self._ssh_args
                 + [self._ssh_target(), remote])
@@ -4535,7 +4592,7 @@ class SshPingMonitor(SubprocessMonitor):
     def _build_ping_cmd(self):
         """Build: ssh -o BatchMode=yes <ssh_args…> <profile ping command>"""
         return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
-                + _ssh_quiet_flags(self._ssh_args)
+                + _ssh_diagnostic_flags(self._ssh_args)
                 + _ssh_monitor_flags() + self._relay_extra_ssh_opts()
                 + self._ssh_args
                 + self._os.ping_argv(self._ping_host))
@@ -6492,6 +6549,14 @@ _SSH_MONITOR_OPTIONS_DEFAULT = [
 # wins — '-o LogLevel=INFO' brings the notices back.
 _SSH_QUIET_OPTIONS = ('-o', 'LogLevel=ERROR')
 
+# Under BatchMode, 'ask' and 'yes' both refuse a host key nobody has accepted
+# — but only 'yes' says WHICH problem it is.  Measured against a real relay:
+# the default answers the bare 'Host key verification failed.', while 'yes'
+# prefixes 'No RSA host key is known for <h> and you have requested strict
+# checking', which is the only thing that tells an unknown key apart from a
+# changed one.  So this buys a diagnosis and changes no outcome.
+_SSH_HOSTKEY_OPTIONS = ('-o', 'StrictHostKeyChecking=yes')
+
 # Live value, replaced by ':set ssh-options'.  Module-level because the three
 # command builders that need it are spread across a Monitor method, a
 # ProbeReader method and an Application method, none of which share an object.
@@ -6630,7 +6695,7 @@ def _detect_relay_os(ssh_args, ssh_dest, note_cb=None):
         # monitor connection.
         _ssh_spawn_gate(_ssh_first_hop(list(ssh_args), ssh_dest))
         cmd = (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
-               + _ssh_quiet_flags(ssh_args)
+               + _ssh_diagnostic_flags(ssh_args)
                # Bounded twice over: ConnectTimeout for a black hole that
                # would otherwise sit in the TCP handshake, and run()'s own
                # timeout for a relay that connects and then says nothing.
@@ -6740,19 +6805,33 @@ def _ssh_spec_user(spec):
     return spec.rsplit('@', 1)[0] if '@' in spec else ''
 
 
-def _ssh_quiet_flags(user_args=()) -> list:
-    """Return the log-level option, or [] when the user has named one.
+def _ssh_diagnostic_flags(user_args=()) -> list:
+    """Options deciding how much ssh says about its own failures.
 
-    See _SSH_QUIET_OPTIONS: ssh's per-connection notices multiply by the host
-    count, so they are silenced on ping-bulk's own connections.  Skipped as
-    soon as LogLevel appears in ':set ssh-options' or in the directive's own
-    ssh arguments, since ssh keeps the first value of a repeated option and
-    these are placed first — an explicit choice would otherwise be ignored.
+    Two, each dropped independently as soon as the user names it in
+    ':set ssh-options' or in the directive's own ssh arguments — ssh keeps the
+    first value of a repeated option and these are placed first, so an
+    explicit choice would otherwise be silently ignored.
+
+    *LogLevel* (_SSH_QUIET_OPTIONS): ssh's per-connection notices multiply by
+    the host count, so they are silenced.
+
+    *StrictHostKeyChecking* (_SSH_HOSTKEY_OPTIONS): this one **adds** output.
+    Every connection runs BatchMode, under which 'ask' and 'yes' both refuse
+    an unaccepted key — but the default's message is the bare 'Host key
+    verification failed.', which cannot tell a host nobody has connected to
+    from one whose key has changed.  Those need opposite answers (accept it
+    once, versus stop and find out why), so the explanation is worth asking
+    for.  It is deliberately NOT 'accept-new': trusting a key because nobody
+    was watching is the one thing this check exists to prevent.
     """
     named = ' '.join(list(_ssh_monitor_options) + list(user_args)).lower()
-    if 'loglevel' in named:
-        return []
-    return list(_SSH_QUIET_OPTIONS)
+    out = []
+    if 'loglevel' not in named:
+        out += list(_SSH_QUIET_OPTIONS)
+    if 'stricthostkeychecking' not in named:
+        out += list(_SSH_HOSTKEY_OPTIONS)
+    return out
 
 
 def _ssh_sharing_flags(share: bool) -> list:
@@ -10211,7 +10290,7 @@ class Application:
         ping_args = ['ping', '-n', '-c', '1', '-W', '2', '-T', 'tsandaddr', ip]
         if isinstance(monitor, SshPingMonitor):
             return (['ssh', '-o', 'BatchMode=yes'] + _ssh_sharing_flags(False)
-                    + _ssh_quiet_flags(monitor._ssh_args)
+                    + _ssh_diagnostic_flags(monitor._ssh_args)
                     + _ssh_monitor_flags() + monitor._ssh_args + ping_args)
         return ping_args
 

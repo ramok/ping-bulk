@@ -132,7 +132,7 @@ class TestOsPingCommands:
         m = self._prepared(pb, 'linux')
         assert m._build_ping_cmd() == (
             ['ssh', '-o', 'BatchMode=yes']
-            + pb._ssh_sharing_flags(False) + pb._ssh_quiet_flags()
+            + pb._ssh_sharing_flags(False) + pb._ssh_diagnostic_flags()
             + pb._ssh_monitor_flags()
             + ['user@remote', 'ping', '-O', '-D', 'target.host'])
 
@@ -140,7 +140,7 @@ class TestOsPingCommands:
         m = self._prepared(pb, 'mikrotik')
         assert m._build_ping_cmd() == (
             ['ssh', '-o', 'BatchMode=yes']
-            + pb._ssh_sharing_flags(False) + pb._ssh_quiet_flags()
+            + pb._ssh_sharing_flags(False) + pb._ssh_diagnostic_flags()
             + pb._ssh_monitor_flags()
             + ['user@remote', '/ping', 'target.host'])
 
@@ -149,7 +149,7 @@ class TestOsPingCommands:
         cmd = m._build_ping_cmd()
         assert cmd == (
             ['ssh', '-o', 'BatchMode=yes']
-            + pb._ssh_sharing_flags(False) + pb._ssh_quiet_flags()
+            + pb._ssh_sharing_flags(False) + pb._ssh_diagnostic_flags()
             + pb._ssh_monitor_flags()
             + ['-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=3',
                'user@remote',
