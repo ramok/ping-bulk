@@ -1563,21 +1563,25 @@ _MIKROTIK_FORWARD_TIP = (
 # come first.  A tip is itself passed through _note_stderr, which dedupes it
 # like any other line; no tip may contain a mark, or it would trigger itself.
 _SSH_FIX_TIPS = (
-    (_SSH_FORWARD_REFUSED_MARK, _MIKROTIK_FORWARD_TIP),
-    ('identification has changed',
+    ('forward', _SSH_FORWARD_REFUSED_MARK, _MIKROTIK_FORWARD_TIP),
+    ('hostkey', 'identification has changed',
      'tip: the relay now presents a different host key. Verify it before '
      'trusting it; if the change was expected, drop the old one with '
      "'ssh-keygen -R <host>'"),
-    ('requested strict checking',
+    ('hostkey', 'requested strict checking',
      'tip: this host key has never been accepted here, and BatchMode leaves '
      "ssh nothing to ask. Confirm it with 'ssh-keygen -F <host>' (no output "
      "means never seen), then add it: 'ssh-keyscan -H <host> >> "
      "~/.ssh/known_hosts', or connect by hand once"),
-    ('too many authentication failures',
+    ('hostkey', 'host key verification failed',
+     "tip: ssh does not say which from this message alone. "
+     "'ssh-keygen -F <host>' answers it: no output means the key has never "
+     'been accepted here, a line means the one on file no longer matches'),
+    ('auth', 'too many authentication failures',
      'tip: ssh offered more keys than the relay allows before the right one. '
      "Name the key for this host: ':prog-options ssh <host> -i <keyfile> "
      "-o IdentitiesOnly=yes'"),
-    ('permission denied',
+    ('auth', 'permission denied',
      'tip: the relay refused these credentials, and BatchMode means no '
      'password or key passphrase can be typed. Give it a key it accepts, and '
      'load any passphrase into ssh-agent before starting'),
@@ -2697,7 +2701,9 @@ class Monitor(ABC):
         # and to explain a down transition.  Bounded: a per-probe error can
         # repeat every second for days.
         self._stderr_lines = deque(maxlen=self._STDERR_KEEP)
-        self._seen_stderr = set()   # message texts already surfaced, to log once each
+        self._seen_stderr = set()
+        #: Tip families already answered for this host — see _SSH_FIX_TIPS.
+        self._tipped_families = set()   # message texts already surfaced, to log once each
         self._new_stderr = []       # first-time messages awaiting the event log
         self.last_stderr = None     # (text, wall ts) of the most recent stderr line
         self._proc = None          # active Popen handle for the persistent ping subprocess
@@ -3492,10 +3498,17 @@ class SubprocessMonitor(_PipeReaderLoop, Monitor):
             # is deduped like any stderr line, so it appears once per host.
             # First hit only: these are alternatives, not a checklist.
             low = line.lower()
-            for mark, tip in _SSH_FIX_TIPS:
-                if mark in low:
+            for family, mark, tip in _SSH_FIX_TIPS:
+                if mark not in low:
+                    continue
+                # One answer per family.  ssh states the explanation and the
+                # verdict as separate lines of the SAME failure ('No host key
+                # is known …' then 'Host key verification failed.'), and a tip
+                # on each is two answers to one question.
+                if family not in self._tipped_families:
+                    self._tipped_families.add(family)
                     self._note_stderr(tip, from_child=False)
-                    break
+                break
         return fresh
 
     def ping(self):
@@ -6569,13 +6582,6 @@ _SSH_MONITOR_OPTIONS_DEFAULT = [
 # wins — '-o LogLevel=INFO' brings the notices back.
 _SSH_QUIET_OPTIONS = ('-o', 'LogLevel=ERROR')
 
-# Under BatchMode, 'ask' and 'yes' both refuse a host key nobody has accepted
-# — but only 'yes' says WHICH problem it is.  Measured against a real relay:
-# the default answers the bare 'Host key verification failed.', while 'yes'
-# prefixes 'No RSA host key is known for <h> and you have requested strict
-# checking', which is the only thing that tells an unknown key apart from a
-# changed one.  So this buys a diagnosis and changes no outcome.
-_SSH_HOSTKEY_OPTIONS = ('-o', 'StrictHostKeyChecking=yes')
 
 # Live value, replaced by ':set ssh-options'.  Module-level because the three
 # command builders that need it are spread across a Monitor method, a
@@ -6861,22 +6867,21 @@ def _ssh_diagnostic_flags(user_args=()) -> list:
     *LogLevel* (_SSH_QUIET_OPTIONS): ssh's per-connection notices multiply by
     the host count, so they are silenced.
 
-    *StrictHostKeyChecking* (_SSH_HOSTKEY_OPTIONS): this one **adds** output.
-    Every connection runs BatchMode, under which 'ask' and 'yes' both refuse
-    an unaccepted key — but the default's message is the bare 'Host key
-    verification failed.', which cannot tell a host nobody has connected to
-    from one whose key has changed.  Those need opposite answers (accept it
-    once, versus stop and find out why), so the explanation is worth asking
-    for.  It is deliberately NOT 'accept-new': trusting a key because nobody
-    was watching is the one thing this check exists to prevent.
+    **StrictHostKeyChecking is deliberately NOT set here.**  Forcing 'yes'
+    bought a better message — only 'yes' prefixes 'No <TYPE> host key is known
+    for <h>', which is the one thing that tells an unknown key apart from a
+    changed one — and it broke a working fleet within hours.  ssh takes the
+    first value of a repeated option and these go first, so it overrode an
+    'accept-new' the operator had set in **~/.ssh/config**, and every host
+    behind the relay failed verification at once.  This function only ever
+    looked for an explicit choice in ':set ssh-options' and the directive's
+    own arguments; a policy set where ssh itself reads it was invisible to it.
+    A connection's host-key policy belongs to whoever configured ssh.
     """
     named = ' '.join(list(_ssh_monitor_options) + list(user_args)).lower()
-    out = []
-    if 'loglevel' not in named:
-        out += list(_SSH_QUIET_OPTIONS)
-    if 'stricthostkeychecking' not in named:
-        out += list(_SSH_HOSTKEY_OPTIONS)
-    return out
+    if 'loglevel' in named:
+        return []
+    return list(_SSH_QUIET_OPTIONS)
 
 
 def _ssh_sharing_flags(share: bool) -> list:

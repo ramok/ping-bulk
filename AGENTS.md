@@ -1988,6 +1988,21 @@ guessed, because the branch is on what ssh actually prints:
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | `ssh host key CHANGED` | verify, then `ssh-keygen -R` |
 | `Host key verification failed` alone | `ssh rejected the host key` | — (the floor, not a gap) |
 
+**Do not set `StrictHostKeyChecking` from here — it broke a working fleet.**
+Forcing `yes` bought the diagnosis below (only `yes` prefixes `No <TYPE> host
+key is known for <h>`, which is the one thing separating an unknown key from a
+changed one) and was reverted within hours. ssh keeps the first value of a
+repeated option and ping-bulk's go first, so it overrode an `accept-new` the
+operator had set in **`~/.ssh/config`**, and every host behind the relay failed
+verification at once — against a relay the operator could reach by hand in the
+same breath. `_ssh_diagnostic_flags` yields to an explicit choice in `:set
+ssh-options` and in the directive's own arguments; a policy set where ssh
+itself reads it was invisible to that check, so "an explicit choice wins" was
+true of the places this program looks and false of the place actually used.
+**A connection's host-key policy belongs to whoever configured ssh.** The
+bare-rejection tip carries `ssh-keygen -F` instead, which answers the same
+question without touching anybody's policy.
+
 **ssh does not volunteer which it is, and the first cut of this shipped a
 branch that could never fire.** With ping-bulk's own flags the default
 `StrictHostKeyChecking=ask` answers the bare `Host key verification failed.`
@@ -1997,13 +2012,19 @@ ssh explain all by itself — so the test passed against a condition production
 never produces. **It was caught by running the program in tmux against the real
 relay**, which is the only reason this paragraph is not still wrong.
 
-`_ssh_quiet_flags` is therefore `_ssh_diagnostic_flags`, and adds
-`StrictHostKeyChecking=yes` beside the log level — each dropped independently
-the moment the user names it, since ssh keeps the first value of a repeated
-option and these go first. Under `BatchMode` `ask` and `yes` refuse
-identically, so this buys the explanation and changes no outcome. It is
-deliberately **not** `accept-new`: trusting a key because nobody was watching
-is the one thing the check exists to prevent.
+So the explanation is used **when ssh happens to give it** — an operator whose
+own config sets `StrictHostKeyChecking=yes` gets the precise reading — and the
+generic entry is the floor for everyone else, which is the common case.
+
+**One tip per failure family.** ssh states the explanation and the verdict as
+two lines of the same failure, so `_SSH_FIX_TIPS` carries a family column and
+`_note_stderr` answers each family once per host. Adding that column is also
+the cautionary tale: three rows did not get it, the table held a mix of 2- and
+3-tuples, and the unpack raised **inside the reader loop** — 67 monitor tests
+failed reporting empty history and no latency, a monitor that had simply died,
+with nothing naming the cause. It passed in isolation because that test never
+produced a stderr line. The same edit landed on `_HOST_DIAGNOSES`, which sits
+beside it and shares its wordings. Both tables now have a shape assertion.
 
 **A tip is ours, not the child's.** `_note_stderr` feeds tips back through
 itself for the dedupe, which put them in the accumulator behind `self.error` —

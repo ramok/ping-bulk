@@ -82,7 +82,7 @@ class TestEachFailureCarriesItsFix:
     ])
     def test_the_tip_names_the_command(self, pb, text, must_mention):
         low = text.lower()
-        tip = next((t for mark, t in pb._SSH_FIX_TIPS if mark in low), None)
+        tip = next((t for _f, mark, t in pb._SSH_FIX_TIPS if mark in low), None)
         assert tip is not None, 'no tip for: ' + text.splitlines()[0]
         assert must_mention in tip, tip
 
@@ -91,21 +91,21 @@ class TestEachFailureCarriesItsFix:
         nothing to tell them apart, so one message names both. Inventing a
         distinction would be a confident wrong answer."""
         low = NO_KEY.lower()
-        tip = next(t for mark, t in pb._SSH_FIX_TIPS if mark in low)
+        tip = next(t for _f, mark, t in pb._SSH_FIX_TIPS if mark in low)
         assert 'password' in tip and 'passphrase' in tip, tip
 
     def test_no_tip_can_trigger_a_tip(self, pb):
         """``_note_stderr`` feeds the tip back through itself to get the
         dedupe, so a tip containing a mark would recurse."""
-        for _mark, tip in pb._SSH_FIX_TIPS:
+        for _family, _mark, tip in pb._SSH_FIX_TIPS:
             low = tip.lower()
-            hit = [m for m, _ in pb._SSH_FIX_TIPS if m in low]
+            hit = [m for _f, m, _t in pb._SSH_FIX_TIPS if m in low]
             assert not hit, (tip, hit)
 
     def test_every_tip_is_reachable(self, pb):
         """First hit wins, so a mark shadowed by an earlier one is dead text."""
-        for i, (mark, _tip) in enumerate(pb._SSH_FIX_TIPS):
-            earlier = [m for m, _ in pb._SSH_FIX_TIPS[:i] if m in mark]
+        for i, (_fam, mark, _tip) in enumerate(pb._SSH_FIX_TIPS):
+            earlier = [m for _f, m, _t in pb._SSH_FIX_TIPS[:i] if m in mark]
             assert not earlier, (
                 '%r can never fire: shadowed by %r' % (mark, earlier))
 
@@ -120,42 +120,50 @@ class TestTheseStayFatal:
         assert pb._is_fatal_ssh_text(text), text.splitlines()[0]
 
 
-class TestSshIsAskedToExplainItself:
-    """The diagnosis above is only possible if ssh says which problem it is,
-    and by default it does not.
+class TestWeDoNotImposeAHostKeyPolicy:
+    """The regression guard for the worst mistake of this change.
 
-    Measured against a real relay with ping-bulk's own flags: the default
-    ``StrictHostKeyChecking=ask`` answers the bare ``Host key verification
-    failed.``, which cannot tell a host nobody has accepted from one whose key
-    has changed — and those need opposite answers. ``yes`` prefixes ``No RSA
-    host key is known for <h> …``. Under ``BatchMode`` both refuse identically,
-    so this buys the explanation and changes no outcome.
+    Forcing ``StrictHostKeyChecking=yes`` bought a better message — only
+    ``yes`` prefixes ``No <TYPE> host key is known for <h>``, the one thing
+    that tells an unknown key apart from a changed one — and it broke a working
+    fleet within hours. ssh takes the first value of a repeated option and
+    ping-bulk's go first, so it overrode an ``accept-new`` the operator had set
+    in **~/.ssh/config**, and every host behind the relay failed verification
+    at once.
 
-    Found by running it, not by reading it: the first cut of this fix shipped a
-    branch that could never fire in production, because the test fixture had
-    passed ``UserKnownHostsFile=/dev/null`` and that alone makes ssh explain.
+    The yielding logic only ever consulted ``:set ssh-options`` and the
+    directive's own arguments. A policy set where ssh itself reads it was
+    invisible to it — so "an explicit choice wins" was true of the places this
+    program looks, and false of the place the operator had used.
+
+    Measured against the real relay: the identical command differed only by
+    this option, and only with it did the connection fail.
     """
 
-    def test_it_asks_for_the_explanation(self, pb):
-        assert '-o' in pb._ssh_diagnostic_flags()
-        assert 'StrictHostKeyChecking=yes' in pb._ssh_diagnostic_flags()
+    def test_no_host_key_policy_is_forced(self, pb):
+        flags = ' '.join(pb._ssh_diagnostic_flags())
+        assert 'StrictHostKeyChecking' not in flags, (
+            'a connection\'s host-key policy belongs to whoever configured '
+            'ssh; overriding it from here broke a working fleet')
 
-    def test_it_never_accepts_a_key_on_its_own(self, pb):
-        """'accept-new' would make the message problem go away by trusting
-        whatever answers, which is the one thing the check exists to stop."""
-        assert 'accept-new' not in ' '.join(pb._ssh_diagnostic_flags())
+    def test_not_even_a_permissive_one(self, pb):
+        """'accept-new' would be the mirror-image error: deciding to trust
+        whatever answers, on the operator's behalf, without being asked."""
+        flags = ' '.join(pb._ssh_diagnostic_flags())
+        assert 'accept-new' not in flags
 
-    def test_an_explicit_choice_wins(self, pb):
-        """ssh keeps the first value of a repeated option and these are placed
-        first, so not yielding here would silently ignore the user."""
-        got = pb._ssh_diagnostic_flags(['-o', 'StrictHostKeyChecking=accept-new'])
-        assert 'StrictHostKeyChecking=yes' not in got, got
-        assert 'LogLevel=ERROR' in got, 'the two must yield independently'
+    def test_the_log_level_is_still_quietened(self, pb):
+        """The one option this function does set, and it yields as before."""
+        assert 'LogLevel=ERROR' in ' '.join(pb._ssh_diagnostic_flags())
+        assert pb._ssh_diagnostic_flags(['-o', 'LogLevel=DEBUG']) == []
 
-    def test_the_log_level_still_yields_on_its_own(self, pb):
-        got = pb._ssh_diagnostic_flags(['-o', 'LogLevel=DEBUG'])
-        assert 'LogLevel=ERROR' not in got
-        assert 'StrictHostKeyChecking=yes' in got, got
+    def test_the_bare_rejection_keeps_a_tip(self, pb):
+        """Without the forced option ssh usually will not explain itself, so
+        the generic case is the common one and must still name a way to find
+        out which failure it is."""
+        tip = next(t for _f, mark, t in pb._SSH_FIX_TIPS
+                   if mark == 'host key verification failed')
+        assert 'ssh-keygen -F' in tip
 
 
 class TestATipIsNotSomethingTheChildSaid:
@@ -250,3 +258,40 @@ class TestNoConnectionCanAskAHuman:
             src = pathlib.Path('/home/komar/work/github/ping-bulk.git/ping-bulk').read_text()
         assert src.count('env=_ssh_child_env()') == 4, (
             'expected the four self-opened connections to carry it')
+
+
+class TestTheTipTableIsWellFormed:
+    """The guard for a mistake that cost a full suite run.
+
+    ``_SSH_FIX_TIPS`` grew a family column and three rows did not get it, so
+    the table held a mix of 2- and 3-tuples. ``for family, mark, tip in …``
+    then raised inside ``_note_stderr``, which runs in the reader loop — so
+    **67 monitor tests failed with empty history and no latency**, reporting a
+    monitor that had simply died, with nothing anywhere naming the real cause.
+    It passed in isolation, because that one test never produced a stderr line.
+
+    One assertion on the shape of the table turns that into an instant,
+    obvious failure.
+    """
+
+    def test_every_row_has_the_same_shape(self, pb):
+        shapes = {len(row) for row in pb._SSH_FIX_TIPS}
+        assert shapes == {3}, (
+            'mixed arity unpacks wrongly inside the reader loop and kills the '
+            'monitor: %r' % (shapes,))
+
+    def test_every_row_is_three_strings(self, pb):
+        for row in pb._SSH_FIX_TIPS:
+            assert all(isinstance(x, str) and x for x in row), row
+
+    def test_the_families_are_the_known_ones(self, pb):
+        """A typo'd family silently stops deduping instead of failing."""
+        assert {r[0] for r in pb._SSH_FIX_TIPS} == {'forward', 'hostkey', 'auth'}
+
+    def test_the_other_table_keeps_its_own_shape(self, pb):
+        """``_HOST_DIAGNOSES`` sits beside ``_SSH_FIX_TIPS`` and shares its
+        wordings, so an edit aimed at one lands in the other — which is exactly
+        what happened: the family column was added to the diagnoses table by
+        mistake and `_host_diagnosis` raised on every transport error."""
+        shapes = {len(row) for row in pb._HOST_DIAGNOSES}
+        assert shapes == {2}, shapes
