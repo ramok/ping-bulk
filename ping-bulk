@@ -4750,6 +4750,30 @@ class SectionLabel:
         return 's' + hashlib.sha1(key.encode('utf-8')).hexdigest()[:9]
 
 
+def _dup_name(label_tmpl, captures, host):
+    """What to call *host* in a duplicate report: its label, else itself.
+
+    A bare address says nothing in a file that reaches the same box under
+    several names — 'duplicate host ignored: 10.123.254.1' sent a reader
+    hunting through forty lines and two nested loops for which of them it
+    meant, and did not say what already held the address.
+    """
+    if not label_tmpl:
+        return host
+    try:
+        name = _apply_backref(label_tmpl, captures, host).strip()
+    except Exception:
+        return host
+    return name or host
+
+
+def _dup_warn(dropped, host, taken_by):
+    """The message for a host whose address is already monitored."""
+    where = '' if taken_by in (None, host) else f', already monitored as {taken_by}'
+    what = host if dropped == host else f'{dropped} ({host})'
+    return f'duplicate host ignored: {what}{where}'
+
+
 def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                       var_names=None, variables=None):
     """Expand a ``:for`` loop and return a list of entry tuples.
@@ -4766,7 +4790,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
     body_lines : list[str]
         Stripped body lines collected between ``:for`` and ``:end``
         (comments and blank lines are already excluded).
-    seen_hosts : set
+    seen_hosts : dict
         Mutable set of already-encountered host/SSH-command strings; updated
         in place so deduplication spans the whole file.
     with_context : (str, str) or None
@@ -5011,7 +5035,7 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                         if key in seen_hosts:
                             entries.append(('warn', f'duplicate remote-ping command ignored: {chained_cmd}'))
                         else:
-                            seen_hosts.add(key)
+                            seen_hosts[key] = chained_cmd
                             entries.append(('cmd', chained_cmd))
                     else:
                         # Generic command — apply back-references and emit every iteration.
@@ -5074,10 +5098,12 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                                               if local_with_type == 'remote-ping' else None)
                         for host, host_captures in expanded_pairs:
                             key = (effective_ssh_args, host)
+                            _name = _dup_name(expanded_label, host_captures, host)
                             if key in seen_hosts:
-                                entries.append(('warn', f"duplicate host ignored: {host}"))
+                                entries.append(('warn', _dup_warn(
+                                    _name, host, seen_hosts.get(key))))
                             else:
-                                seen_hosts.add(key)
+                                seen_hosts[key] = _name
                                 if expanded_label and _is_ip(host):
                                     label = _apply_backref(expanded_label, host_captures, host)
                                     entries.append(('cmd', f':resolv {host} {label}'))
@@ -5114,10 +5140,12 @@ def _process_for_loop(pattern, body_lines, seen_hosts, with_context=None,
                                                   if local_with_type == 'remote-ping' else None)
                             for host, host_captures in expanded_pairs:
                                 key = (effective_ssh_args, host)
+                                _name = _dup_name(label_tmpl, host_captures, host)
                                 if key in seen_hosts:
-                                    entries.append(('warn', f"duplicate host ignored: {host}"))
+                                    entries.append(('warn', _dup_warn(
+                                        _name, host, seen_hosts.get(key))))
                                 else:
-                                    seen_hosts.add(key)
+                                    seen_hosts[key] = _name
                                     if label_tmpl and _is_ip(host):
                                         label = _apply_backref(label_tmpl, host_captures, host)
                                         entries.append(('cmd', f':resolv {host} {label}'))
@@ -5195,7 +5223,7 @@ class _HostsParser:
 
     def __init__(self, variables=None, seen_hosts=None):
         self.variables = dict(variables) if variables else {}
-        self.seen_hosts = seen_hosts if seen_hosts is not None else set()
+        self.seen_hosts = seen_hosts if seen_hosts is not None else {}
 
     # ── Public entry points ───────────────────────────────────────────────
 
@@ -5741,10 +5769,12 @@ class _HostsParser:
             return [('error', str(e))]
         for host, captures in expanded:
             key = (ssh_args, host)
+            _name = _dup_name(inline_comment, captures, host)
             if key in self.seen_hosts:
-                entries.append(('warn', f'duplicate host ignored: {host}'))
+                entries.append(('warn', _dup_warn(
+                    _name, host, self.seen_hosts.get(key))))
                 continue
-            self.seen_hosts.add(key)
+            self.seen_hosts[key] = _name
             # '~' reuses the ':no-alarm' rule store rather than adding an entry
             # kind, so a marked host and a glob rule share one code path.  The
             # rule has to name what the monitor will *be called*: with an

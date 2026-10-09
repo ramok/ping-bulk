@@ -1039,6 +1039,31 @@ that `%h`/`%r` are *not* expanded, because `_handle_cmd_key` calls
 checked rather than assumed, and it is why no second expansion path had to be
 written; the council had flagged one as a thing that would drift.
 
+### A warning nobody can act on
+
+`duplicate host ignored: 10.123.254.1` was reported as a parser bug — *"I add
+SH254, but for some reason parser drop many hosts from it"*. The drop was
+right: three of the generated addresses were already monitored under other
+names, and deduplication is by **target**, because pinging one box twice
+doubles the traffic and tells you nothing new.
+
+So the behaviour was correct and the message was still a defect. In a file of
+forty-odd hosts across nested `:for` loops, a bare address names neither the
+line that was dropped nor the one that already held it, and the reader cannot
+get from the warning to the edit. `seen_hosts` is a dict rather than a set for
+exactly this — it remembers the name that claimed each key — and the report
+now reads:
+
+    duplicate host ignored: sh254-router (10.123.254.1), already monitored as harbour-router
+
+The address stays in the text because the log is read with `grep` as often as
+with eyes, and an unlabelled host degrades to the old wording rather than
+printing `10.0.0.1 (10.0.0.1)`.
+
+**The family this belongs to is the one below**, and it is worth stating as a
+rule: a message that reports a decision must carry enough to undo it. Being
+*audible* is the floor, not the goal.
+
 ### A refusal nobody can see
 
 `_refuse()` reports at `LEVEL_NORMAL` **and** puts the text on the status bar.
