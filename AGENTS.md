@@ -2069,6 +2069,51 @@ host-key texts resolve to three different reasons.
 Under `BatchMode` both arrive as `Permission denied`, so one message names
 both rather than inventing a distinction ssh does not give us.
 
+### A relay only holds so many sessions, and RouterOS hides the number
+
+§9a is about the two OpenSSH limits that bite a fleet behind one relay.
+**RouterOS has a third, lower one, and it is not where anybody looks.**
+
+Measured on a MikroTik CRS328-24P-4S+ running RouterOS 7.22, used as a `-J`
+jump for ~45 monitors: host after host failed with `Stdio forwarding request
+failed: Session open refused by peer`. The cap was read live off the box —
+
+    /ip service print detail where name=ssh
+      name="ssh" port=22 proto=tcp address="" vrf=main max-sessions=20
+
+— and every measurement agrees with it: 20 concurrent all succeeded, 30 lost
+about five, and 30 through a *single shared master* got 22 through before the
+rest were refused. **22 against a documented cap of 20 is what settles it.**
+
+**It is `/ip service`, not `/ip ssh`.** The `/ip ssh` menu holds ciphers, host
+keys and `forwarding-enabled` and nothing about concurrency, so an operator who
+goes there concludes no such setting exists. The fix is one command and the
+ceiling is generous:
+
+    /ip service set ssh max-sessions=64        # default 20, max 1000
+
+`_SSH_SESSION_LIMIT_TIP` says exactly that, on both wordings ssh uses for it —
+the refusal itself and the failed `-W` setup — as one `sessions` family, so a
+host hears it once. It names `MaxSessions` for an OpenSSH relay in the same
+breath, because the first wording is OpenSSH's too and sending that reader to a
+RouterOS menu would waste their time.
+
+**A shared connection is not a workaround**, and the tip must never suggest
+one. `max-sessions` counts *sessions*, so moving them onto one connection
+changes nothing — measured, and the reason that avenue is closed. This is the
+mirror of §9a's warning about `ControlMaster`: there, sharing converts a
+recoverable storm into permanent failure; here it simply does not help.
+
+Two further hazards, from the same investigation:
+
+- `forwarding-enabled` can **display** as enabled after a firmware upgrade
+  while remaining inert until toggled off and on again.
+- MikroTik's documented bruteforce-prevention firewall rules count **new
+  connections, not failed logins**, and blacklist the source on the fourth
+  within the stage window. A monitoring host looks exactly like an attacker to
+  those rules, and a retrying monitor then stays blocked. Check
+  `/ip firewall filter` before blaming the ssh limits again.
+
 ### The kiosk blocklist is the only guard on `:set ssh-options`
 
 `_cmd_ssh_options` is **not** one of the commands kiosk mode refuses at the

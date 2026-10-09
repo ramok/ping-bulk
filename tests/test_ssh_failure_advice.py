@@ -286,7 +286,8 @@ class TestTheTipTableIsWellFormed:
 
     def test_the_families_are_the_known_ones(self, pb):
         """A typo'd family silently stops deduping instead of failing."""
-        assert {r[0] for r in pb._SSH_FIX_TIPS} == {'forward', 'hostkey', 'auth'}
+        assert {r[0] for r in pb._SSH_FIX_TIPS} == {
+            'forward', 'hostkey', 'auth', 'sessions'}
 
     def test_the_other_table_keeps_its_own_shape(self, pb):
         """``_HOST_DIAGNOSES`` sits beside ``_SSH_FIX_TIPS`` and shares its
@@ -295,3 +296,70 @@ class TestTheTipTableIsWellFormed:
         mistake and `_host_diagnosis` raised on every transport error."""
         shapes = {len(row) for row in pb._HOST_DIAGNOSES}
         assert shapes == {2}, shapes
+
+
+class TestARelayOutOfSessionsNamesTheSetting:
+    """A fleet behind one relay walks into its ssh server's session ceiling.
+
+    Measured end to end on 2026-10-09: ~45 monitors through a MikroTik
+    CRS328-24P-4S+ (RouterOS 7.22) used as a ``-J`` jump failed host after host
+    with ``Stdio forwarding request failed: Session open refused by peer``. The
+    cap was read live off the box — ``/ip service`` ``max-sessions=20``, the
+    stock default — and every measurement lines up with it: 20 concurrent all
+    succeeded, and 30 through a single shared master got 22 through before the
+    rest were refused.
+
+    **The setting is in ``/ip service``, not ``/ip ssh``**, which is why it is
+    missed: the ``/ip ssh`` menu holds only ciphers, host keys and forwarding.
+    Naming the wrong menu would be worse than saying nothing, so the tip names
+    both the right one and the command.
+
+    A shared connection is **not** a workaround, and the tip must not suggest
+    one: ``max-sessions`` counts sessions, so moving them onto one connection
+    changes nothing — measured, and the reason that avenue was closed.
+    """
+
+    REFUSED = ('Stdio forwarding request failed: '
+               'Session open refused by peer')
+    FORWARD_FAILED = 'Stdio forwarding request failed'
+
+    def _tip(self, pb, text):
+        low = text.lower()
+        return next((t for _f, mark, t in pb._SSH_FIX_TIPS if mark in low), None)
+
+    def test_the_refusal_gets_a_tip(self, pb):
+        assert self._tip(pb, self.REFUSED) is not None
+
+    def test_it_names_the_right_menu(self, pb):
+        tip = self._tip(pb, self.REFUSED)
+        assert '/ip service set ssh max-sessions' in tip, tip
+
+    def test_and_says_it_is_not_the_other_menu(self, pb):
+        """An operator who goes to '/ip ssh' finds ciphers and host keys and
+        concludes there is no such setting — which is what happened."""
+        tip = self._tip(pb, self.REFUSED)
+        assert '/ip ssh' in tip and 'NOT' in tip, tip
+
+    def test_it_gives_the_default_so_the_number_can_be_judged(self, pb):
+        tip = self._tip(pb, self.REFUSED)
+        assert '20' in tip, tip
+
+    def test_an_openssh_relay_is_not_left_out(self, pb):
+        """The same wording is OpenSSH's MaxSessions refusal, and a reader on
+        a Linux relay must not be sent to a RouterOS menu that does not exist
+        for them."""
+        assert 'MaxSessions' in self._tip(pb, self.REFUSED)
+
+    def test_both_wordings_are_one_family(self, pb):
+        """ssh reports the refusal and the failed '-W' setup as separate
+        lines of the same failure; two tips would be two answers to one
+        question."""
+        fams = {f for f, mark, _t in pb._SSH_FIX_TIPS
+                if mark in (self.REFUSED.lower(), self.FORWARD_FAILED.lower())}
+        assert fams == {'sessions'}, fams
+
+    def test_a_target_that_is_simply_unreachable_gets_no_session_tip(self, pb):
+        """'channel open failed: connect failed' means the jump could not
+        reach the host — a different fault, and sending the reader to raise a
+        session limit would waste their time."""
+        assert self._tip(pb, 'channel 0: open failed: connect failed:') is None

@@ -1562,6 +1562,19 @@ _MIKROTIK_FORWARD_TIP = (
 # Matched on the lowercased line, first hit wins, so the specific wordings
 # come first.  A tip is itself passed through _note_stderr, which dedupes it
 # like any other line; no tip may contain a mark, or it would trigger itself.
+# A relay's ssh server will only hold so many sessions at once, and a fleet
+# behind one relay walks straight into it.  **RouterOS caps this in
+# '/ip service', not in '/ip ssh'** — which is why it is so easily missed: the
+# '/ip ssh' menu holds only ciphers, host keys and forwarding.  Confirmed on a
+# CRS328-24P-4S+ running RouterOS 7.22, where 'max-sessions' read 20 by
+# default and 20 concurrent monitors was exactly the ceiling.
+_SSH_SESSION_LIMIT_TIP = (
+    'tip: the relay refused another ssh session — its server has a ceiling '
+    'and this fleet is over it. RouterOS sets it in "/ip service", NOT in '
+    '"/ip ssh": raise it past the host count with '
+    '"/ip service set ssh max-sessions=64" (default 20, max 1000). '
+    'On an OpenSSH relay the equivalent is MaxSessions in sshd_config.')
+
 _SSH_FIX_TIPS = (
     ('forward', _SSH_FORWARD_REFUSED_MARK, _MIKROTIK_FORWARD_TIP),
     ('hostkey', 'identification has changed',
@@ -1577,6 +1590,11 @@ _SSH_FIX_TIPS = (
      "tip: ssh does not say which from this message alone. "
      "'ssh-keygen -F <host>' answers it: no output means the key has never "
      'been accepted here, a line means the one on file no longer matches'),
+    # Both wordings are the same condition: OpenSSH says the first when a
+    # session is refused, and the second when the '-W' a jump host needs
+    # cannot be set up.  One family, so a host is told once.
+    ('sessions', 'session open refused by peer', _SSH_SESSION_LIMIT_TIP),
+    ('sessions', 'stdio forwarding request failed', _SSH_SESSION_LIMIT_TIP),
     ('auth', 'too many authentication failures',
      'tip: ssh offered more keys than the relay allows before the right one. '
      "Name the key for this host: ':prog-options ssh <host> -i <keyfile> "

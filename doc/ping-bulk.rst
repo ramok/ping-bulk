@@ -2110,6 +2110,18 @@ Web interface
     — a section says where a host sits in the configured order, so it means
     nothing once the rows are somewhere else.
 
+    A relay's SSH server limits how many sessions it will hold at once, and
+    a fleet behind one relay can exceed it — every host behind it then fails
+    with ``Session open refused by peer``.  On a MikroTik the setting is in
+    ``/ip service`` and **not** in ``/ip ssh``, where there is nothing about
+    concurrency; it defaults to 20::
+
+        /ip service set ssh max-sessions=64
+
+    On an OpenSSH relay the equivalent is ``MaxSessions``.  Sharing one
+    connection does not help: the limit counts sessions, not connections.
+    ping-bulk says all this the first time a relay refuses one.
+
     If ping-bulk is restarted while the page is open, the page reloads
     itself within a poll.  An open tab keeps the stylesheet and script it
     first loaded, so without this it would go on drawing live readings with
