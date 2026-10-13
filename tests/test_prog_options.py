@@ -204,13 +204,20 @@ def _make_mock_backend():
     return mock_backend
 
 
-def _held(tokens):
+def _held(pb, tokens):
     """Return the ['sh', '-c', ...] wrapper that _cmd_mux builds."""
     cmd = shlex.join(tokens)
     # Mirrors Application._mux_pane_script: the pane shows the command it
-    # runs as its first line, then holds if the command failed.
+    # runs as its first line, is handed this process's own ssh agent, then
+    # holds if the command failed.  The agent segment goes through
+    # _live_agent_socket() rather than being spelled out again, because a
+    # mirror that can silently disagree is what made these tests depend on
+    # whether the developer running them happened to have a working agent.
+    agent = pb._live_agent_socket()
+    env = ('' if agent is None else
+           'SSH_AUTH_SOCK=' + shlex.quote(agent) + '; export SSH_AUTH_SOCK; ')
     script = (
-        "printf '$ %s\\n' " + shlex.quote(cmd) + '; ' + cmd
+        "printf '$ %s\\n' " + shlex.quote(cmd) + '; ' + env + cmd
         + '; _rc=$?;'
           ' if [ "$_rc" -ne 0 ]; then'
           ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'
@@ -230,7 +237,7 @@ class TestMuxProgOptionsInjection:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('ssh myhost')
         mock_backend.split.assert_called_once_with(
-            'v', _held(['ssh', '-o', 'ProxyJump=gw', 'myhost']), focus=True
+            'v', _held(pb, ['ssh', '-o', 'ProxyJump=gw', 'myhost']), focus=True
         )
 
     def test_disabled_from_binding_aborts(self, pb, tmp_path):
@@ -253,7 +260,7 @@ class TestMuxProgOptionsInjection:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._cmd_mux('ssh myhost')
         mock_backend.split.assert_called_once_with(
-            'v', _held(['ssh', 'myhost']), focus=True
+            'v', _held(pb, ['ssh', 'myhost']), focus=True
         )
 
     def test_flag_reset_after_binding(self, pb, tmp_path):
@@ -293,7 +300,7 @@ class TestMuxProgOptionsInjection:
         with patch.dict(pb._MUX_BACKENDS, {'tmux': mock_backend}):
             app._execute_binding(binding)
         mock_backend.split.assert_called_once_with(
-            'v', _held(['ssh', '-o', 'StrictHostKeyChecking=no', '10.0.0.1']), focus=True
+            'v', _held(pb, ['ssh', '-o', 'StrictHostKeyChecking=no', '10.0.0.1']), focus=True
         )
 
 

@@ -1887,6 +1887,19 @@ That is the command after ``:prog-options`` injection and relay wrapping, so
 it is the whole story of what the key did, and it can be copied out of the
 pane to run a variant of it by hand.
 
+The pane also carries ping-bulk's own ``SSH_AUTH_SOCK``, so a connection
+opened with ``c`` reaches the same ssh agent the monitoring connections use
+and ``ForwardAgent`` has something to forward.  The multiplexer starts the
+pane from the **server's** environment rather than ping-bulk's, so a tmux or
+screen session older than the running agent otherwise hands every pane it
+opens a socket path that no longer exists — invisibly, since an interactive
+shell started in that pane may repair the variable for itself while the
+``ssh`` that ``c`` runs does not.  The value is passed on only when it names
+a socket that is really there: where ping-bulk holds the stale path instead,
+the pane's own value is the better of the two and is left alone.  In kiosk
+mode nothing is passed, since the agent belongs to the operator rather than
+to whoever is at the console.
+
 Users can override the ``c`` binding in their config or hosts file::
 
     :bind-key c :mux ssh -l admin %r

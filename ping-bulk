@@ -6904,6 +6904,34 @@ def _ssh_child_env():
     return env
 
 
+def _live_agent_socket():
+    """The ssh agent this process can reach, or None when there is not one.
+
+    A ':mux' pane is started by the tmux or screen **server**, so it inherits
+    that server's environment and not ping-bulk's.  Measured on a private
+    socket: with the session environment holding one path and the client
+    passing another, the pane got the session's.  So an agent that was
+    restarted after the multiplexer session began leaves every pane it opens
+    with a socket that no longer exists — and 'ForwardAgent yes' then has
+    nothing to forward, which is how an interactive connection ends up without
+    an agent while ping-bulk's own connections, which inherit this process's
+    environment through _ssh_child_env(), still have one.
+
+    **The liveness check is what makes overriding safe in both directions.**
+    Attaching a client refreshes the session environment, so where this
+    process is the stale one the pane's own value is the better of the two and
+    must be left alone.  Handing it a dead path unconditionally would break
+    exactly that case.
+    """
+    path = os.environ.get('SSH_AUTH_SOCK')
+    if not path:
+        return None
+    try:
+        return path if stat.S_ISSOCK(os.stat(path).st_mode) else None
+    except OSError:
+        return None
+
+
 def _ssh_diagnostic_flags(user_args=()) -> list:
     """Options deciding how much ssh says about its own failures.
 
@@ -16431,12 +16459,30 @@ class Application:
         Not in kiosk mode: the argv there carries the key isolation flags
         that _kiosk_ssh_flags() injects precisely so the user cannot see or
         change them, down to the path of the key in use.
+
+        **The pane is handed this process's own ssh agent**, because the mux
+        server starts it with the server's environment rather than ping-bulk's
+        (see _live_agent_socket): a session older than the running agent
+        otherwise opens every pane with a socket that is gone, so 'c' reaches
+        the host with no agent to forward while ping-bulk's own connections
+        still have one.  It is exported rather than written in front of the
+        command so the echoed line stays the command, which is there to be
+        read and copied.
+
+        Not in kiosk mode either, and for the same reason the echo is not:
+        _kiosk_ssh_flags() isolates a session from the user's home directory
+        but says nothing about ForwardAgent, so an agent reaching that pane
+        would be the operator's keys handed to whoever is at the keyboard —
+        the party that mode exists to distrust.
         """
         cmd = shlex.join(tokens)
         echo = ('' if self.kiosk_mode
                 else "printf '$ %s\\n' " + shlex.quote(cmd) + '; ')
+        agent = None if self.kiosk_mode else _live_agent_socket()
+        env = ('' if agent is None else
+               'SSH_AUTH_SOCK=' + shlex.quote(agent) + '; export SSH_AUTH_SOCK; ')
         return (
-            echo + cmd
+            echo + env + cmd
             + '; _rc=$?;'
               ' if [ "$_rc" -ne 0 ]; then'
               ' printf "\\n[process exited (code %s) — press Enter to close]\\n" "$_rc";'

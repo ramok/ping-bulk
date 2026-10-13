@@ -85,6 +85,7 @@ automatically in kiosk mode.
 |---------|------------------------|
 | `c` hotkey SSH | Allowed; uses `/etc/ping-bulk/id_ed25519` if present |
 | `~/.ssh/` keys | **Ignored** (`-F none -o IdentityFile=none -o IdentitiesOnly=yes`) |
+| SSH agent | **Not passed** — a `:mux` pane is handed ping-bulk's own `SSH_AUTH_SOCK` outside kiosk mode, never inside it: the agent holds the operator's keys, and the console user is who this mode distrusts |
 | SSH code execution via `-o` | **Blocked** — `ProxyCommand`, `LocalCommand`, `PermitLocalCommand`, `KnownHostsCommand`, `PKCS11Provider` and the forwarding options are rejected, in every spelling ssh accepts (`Key=value`, `Key value`, inline `-oKey=value`) |
 | `:mux` arbitrary cmds | Blocked — only `ssh` and `login` are whitelisted |
 | `:mux` backend | **tmux only** — screen and X terminals are not used in kiosk mode |

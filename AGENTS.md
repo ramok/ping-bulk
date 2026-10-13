@@ -1984,6 +1984,54 @@ explicitly, and `run()`'s `finally` plus the `SIGTERM` handler cover teardown �
 but a `SIGKILL`ed ping-bulk can now leave an `ssh` behind where the terminal's
 `SIGHUP` would once have reaped it.
 
+### A pane we open does not inherit our environment
+
+The mirror image of the above: `_ssh_child_env()` keeps `SSH_AUTH_SOCK` because
+a connection this program opens should reach the agent, and the one connection
+a user opens *through* this program — `c`, `C`, `:mux ssh` — did not.
+
+**A mux pane is started by the tmux or screen server, not by us.** `:mux` runs
+`tmux split-window`, which is a request to a daemon; the pane gets that
+server's environment, and the client's is discarded. Measured on a private
+socket, server env `/stale/server.sock` against a client passing
+`/fresh/client.sock`: the pane saw `/stale/server.sock`. `update-environment`
+refreshes the *session* environment when a client attaches, so a session older
+than the running agent keeps handing out a dead path indefinitely — measured on
+a real machine, 20 of 22 sessions named agents that had been gone for days
+while the live one was in the server's global environment and in ping-bulk's
+own process.
+
+**It hid behind the shell.** The report was that `c` reached the host with no
+agent while ping-bulk's own relayed connections authenticated fine. A pane the
+user opened by hand worked, because it runs their interactive zsh and
+`~/.zshrc` runs `keychain`, which re-exports a live socket; the `c` pane runs
+`sh -c 'ssh …'`, which reads no rc file at all. So the same session produced a
+working agent and a dead one depending on what the pane happened to start, and
+`ForwardAgent yes` — already set in their `Host *` — was never the problem.
+
+`_mux_pane_script` exports `_live_agent_socket()` ahead of the command. That is
+the one place tmux, screen **and** the X-terminal backend all route through, so
+one edit covers three, and it needs no `tmux` 3.0 `-e` flag, which screen has
+no equivalent for anyway.
+
+Three things about it are deliberate:
+
+- **Only a socket that is really there** (`stat.S_ISSOCK`). The override has to
+  be safe in both directions: attaching a client refreshes the session
+  environment, so where *this* process is the stale one the pane's own value is
+  the better of the two. Passing a dead path unconditionally would turn the fix
+  into the bug for exactly that case.
+- **After the echoed `$ <command>` line**, not in front of it. That line exists
+  to be read and copied, and an `export` in it is not part of what the key ran.
+- **Not in kiosk mode**, for the reason the echo is not. `_kiosk_ssh_flags()`
+  isolates a session from the user's home directory but says nothing about
+  `ForwardAgent`, so an agent reaching that pane is the operator's keys handed
+  to the party that mode exists to distrust.
+
+Only `SSH_AUTH_SOCK`. `DISPLAY` has the same staleness problem and is not the
+same question — a pane with no X11 fails visibly, where a pane with no agent
+fails as a password prompt that looks like a key problem.
+
 ### A failure ssh can state but not act on
 
 Every connection this program opens carries `BatchMode=yes` **and**
