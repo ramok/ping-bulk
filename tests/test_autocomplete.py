@@ -112,7 +112,7 @@ class TestGetCompletions:
         result = app._get_completions('s')
         assert set(result) == {'save', 'save-config', 'screen', 'scroll',
                                 'scroll-overlay', 'scroll-overlay-h', 'seen', 'select', 'set', 'sort',
-                                'source', 'stats', 'sync-history'}, (
+                                'source', 'source!', 'stats', 'sync-history'}, (
             f"Unexpected results for 's': {sorted(result)}"
         )
 
