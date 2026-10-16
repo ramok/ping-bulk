@@ -115,6 +115,25 @@ The repository is structured to keep the core application as a single deployable
 - Consider adding export functionalities (e.g., CSV/JSON output for metrics) if requested, keeping the single-file constraint in mind.
 
 ## 8. Recent Work
+- **Phase 25 (generated fleets)**: six asks from a tool that emits the hosts
+  file (`evo-prod ping-bulk-gen`). `:source! [--timeout S] <command>` runs a
+  command (no shell, no stdin, no tty, 30 s default / 300 s cap, 4 MiB cap) and
+  reads its stdout as hosts-file text through `_apply_source_entries` (the loop
+  extracted from `_cmd_source`). **One-shot**: a reload re-runs it, and a
+  failure falls back to `source_cache` so a briefly-down generator does not
+  empty the screen; `:reload` re-reads the hosts file without an editor.
+  Named, multiple probe sources (`ProbeSource`, `--name`), `--local` sources
+  (`LocalProbeReader`, `%h`/`%i` substituted per argv token, never via a
+  shell), per-host-glob probe thresholds (`probe_overrides`, `_probe_for`,
+  applied everywhere a probe is judged, including the web twin), and
+  `:prog-options ssh <glob> --askpass <program>` (`_ssh_batch_flags`,
+  `_ssh_child_env(askpass)`; **probe readers only** — ping, clock and relay-OS
+  spawns stay BatchMode, and the program must be a single executable because
+  ssh runs it without a shell). `-f <(cmd)` works once; `hosts_pipe` makes
+  `:edit`, `:reload` and the tmux relaunch refuse with a reason instead of
+  re-reading a consumed pipe as no hosts. Kiosk: all of the command-running
+  forms are declared-in-file-only and pass `_kiosk_probe_cmd_allowed`.
+  Not done: streaming `:source!`, `-f -`. Tests: `tests/test_evo_prod_asks.py`.
 - **Phase 24 (Ctrl+C is a keystroke, not an exception)**: the draw loop caught
   `KeyboardInterrupt` around exactly two calls — `stdscr.refresh()` and
   `stdscr.getch()` — and Python's default SIGINT handler raises it *wherever
