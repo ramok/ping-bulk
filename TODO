@@ -102,7 +102,7 @@ after publishing on github.com need to add to documentation "simple" installatio
 
 - need to plan for a new feature:
     - form of :source which can run some command, which run in backround and collect IPs
-        - :source! or :source|
+        - :source! is done, one-shot (re-run by :reload); streaming (--follow) is not
         - for example "ping -b"
         - if new IP arrive, it displayed by ping-bulk
             - possible to delete interactively hosts without ping

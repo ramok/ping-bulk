@@ -110,6 +110,29 @@
 # typed at the ':' prompt, and the command must be an unwritable script.
 # See doc/custom-probes.md for the design.
 
+# Generated fleets
+# ----------------
+# :source! runs a command and reads what it prints as more of this file --
+# hosts, '## sections', :let, :prog-options, :probe-source, :probe.  One-shot:
+# it runs again on :edit and :reload.  If it fails the hosts it printed last
+# time are kept.  No shell, no stdin, 30 s limit (--timeout S, at most 300).
+# :source! --timeout 10 /usr/local/bin/fleet-hosts
+#
+# Several probe sources, told apart by --name.  --local runs a command on THIS
+# machine per host ('%h' name, '%i' address, no shell) for devices with no shell:
+# :probe-source --name boards --script pb-probe --hosts '*-nuc'
+# :probe-source --name radio --local '/usr/local/bin/radio-probe %i' --hosts '*-radio'
+#
+# Thresholds for some hosts only; a later rule wins per field:
+# :probe temp --hosts '*-jetson' --warn 80 --crit 95
+#
+# A password for probe connections to some hosts, from a single executable
+# (ssh runs it without a shell, so no arguments):
+# :prog-options ssh '*-camera' --askpass /usr/local/bin/fleet-askpass
+#
+# -f <(command) works for the first read; :edit, :reload and the multiplexer
+# relaunch refuse, because a pipe cannot be read twice.  Prefer :source!.
+
 # -- Predefined variables: $SCRIPT_DIR / $SCRIPT_FILE ----------------------
 # Both are set automatically while a hosts *file* is parsed: the file's
 # absolute directory (no trailing slash) and its base name.  They keep a

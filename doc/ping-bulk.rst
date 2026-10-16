@@ -73,6 +73,11 @@ OPTIONS
     Read hosts from *FILE* instead of (or in addition to) positional
     arguments.  See **HOSTS FILE** below for the file format.
 
+    *FILE* may be a pipe, such as ``-f <(generate-hosts)``; it is read once at
+    start-up.  ``:edit``, ``:reload`` and the multiplexer relaunch refuse for
+    it, since a pipe cannot be read again.  ``:source!`` is the form that
+    re-runs.  ``-f -`` (stdin) is not supported: stdin is the terminal.
+
 ``-l LOGFILE``, ``--log-file LOGFILE``
     Append every event-log entry to *LOGFILE* in real time.
     Overrides any ``:log`` setting in the config file **or** in the hosts
@@ -758,7 +763,7 @@ Key bindings
 ``:bind-key``
     List all user-defined key bindings in the event log.
 
-``:probe-source [--cmd 'CMD' | --script PATH] [--interval SEC] [--retain N] [--hosts GLOBS] | off``
+``:probe-source [--name N] [--cmd 'CMD' | --script PATH | --local 'CMD'] [--interval SEC] [--retain N] [--hosts GLOBS] | [--name N] off``
     Command run on each monitored host that prints one ``key=value`` per
     line.  It is wrapped in a loop on the far side and the SSH connection is
     held open, so one connection per host serves every reading and the
@@ -774,6 +779,25 @@ Key bindings
     describing Linux boards, routers and cameras together needs this to say
     which of them have a shell at all.  The rest would each hold a failing
     connection open on a backoff loop for the life of the run.
+
+    ``--name`` makes it one of several.  Each named source has its own
+    command or script, ``--hosts`` scope and interval, and its own connection
+    per host; without ``--name`` it is the single unnamed source it always
+    was.  ``:probe-source --name N off`` removes one, bare ``:probe-source``
+    lists them all.  A key two sources both print is read from both, last
+    write wins, so give them different keys.
+
+    ``--local 'CMD'`` (needs ``--name``) runs the command on **this** machine,
+    once per round for each matching host, instead of over ssh — for a device
+    with nothing to log in to, such as a radio with a JSON-RPC port.  ``%h``
+    (host name), ``%i`` (address) and ``%%`` are replaced in each argument.
+    The command is split into arguments and run directly, never through a
+    shell, so a host name cannot become a command; credentials are the
+    command's own business.  It prints the same ``key=value`` lines, and each
+    round is bounded by twice the interval (at least 5 s, at most 60 s).
+    It needs no ssh login, so ``--disable`` in ``:prog-options ssh`` does not
+    exclude a host.  In kiosk mode it follows the declared-not-typed rule and
+    the command check below.
 
     The login is the host's own ``:prog-options ssh`` rule, so a site records
     it once for ``:mux``, ``[c]`` and the probe alike; ``--disable`` there
@@ -814,6 +838,13 @@ Key bindings
     ``:mux``.
 
 ``:probe <name> [--unit U] [--range MIN:MAX] [--warn N] [--crit N] [--on-fail retry|give-up] [--label TEXT] [--combine A,B,C]``
+    ``:probe <name> --hosts GLOBS [--warn N] [--crit N]`` declares nothing;
+    it overrides the thresholds for the matching hosts (name or ``:resolv``
+    alias).  Rules apply in order and a later one wins per field, so one that
+    sets only ``--warn`` leaves ``--crit`` as it was.  Unit, range and label
+    stay the probe's own so the columns still line up.  It applies to the
+    column, the strip, the overlay and the web view.
+
     Declare how one key from ``:probe-source`` is displayed.  Keys with no
     declaration are ignored, so a single site-wide script can serve hosts
     that show different subsets.  ``--range`` sizes the history-strip cell,
@@ -1206,6 +1237,26 @@ Hosts and DNS
 
 ``:source <file>``
     Load hosts and commands from the specified file.
+
+``:source! [--timeout SEC] <command...>``
+    Run a command and read what it prints as a hosts file: hosts, ``##``
+    sections and every directive (``:let``, ``:prog-options``,
+    ``:probe-source``, ``:probe``, ``:resolv``...).  The command is split
+    like a shell would but **not** run by one, has no stdin and no
+    terminal, and is killed after ``--timeout`` (default 30 s, at most 300 s)
+    or after 4 MiB of output.  Its stderr goes to the event log.
+
+    One-shot: it runs when the line is read and again on every reload
+    (``:edit`` or ``:reload``).  A host it stopped printing is dropped by the
+    reload like one deleted from a file.  If it fails — non-zero exit,
+    timeout, too much output — nothing new is loaded, the reason is shown, and
+    the hosts it printed last time are kept.  Under ``--kiosk`` it must be
+    declared in the hosts file, and the command is checked like a
+    ``:probe-source`` one.
+
+``:reload``
+    Re-read the hosts file in place, without an editor; ``:source!`` commands
+    run again.  Not available for a hosts file read from a pipe.
 
 ``:resolv <ip-pattern> <hostname-template>``
     Register a static name↔IP mapping.  *ip-pattern* may use brace
@@ -1822,6 +1873,16 @@ above depends on it.
     Each inner line is ``<glob> [opts|--disable]`` — identical to the
     last two arguments of the inline form.  The inline form continues
     to work; the block form is purely syntactic sugar.
+
+    ``:prog-options ssh <glob> --askpass <program>`` lets a ``:probe-source``
+    connection answer a password prompt.  ``BatchMode`` is dropped for
+    matching hosts (one attempt only) and ssh is pointed at *program* with
+    ``SSH_ASKPASS_REQUIRE=force``.  The program must be a **single
+    executable** — ssh runs it without a shell, so a command with arguments
+    does not work; use a wrapper.  ping-bulk stores no credentials.  It cannot
+    combine with ``--disable``.  Only probe sources use it: ping, clock and
+    relay-OS connections stay ``BatchMode=yes``.  In kiosk mode it is declared
+    in the file only, with the ``:probe-source`` command check.
 
     Additional forms:
 
