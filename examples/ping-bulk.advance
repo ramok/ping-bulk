@@ -117,6 +117,8 @@
 # it runs again on :edit and :reload.  If it fails the hosts it printed last
 # time are kept.  No shell, no stdin, 30 s limit (--timeout S, at most 300).
 # :source! --timeout 10 /usr/local/bin/fleet-hosts
+# :dump-script <file> saves the fleet as it is now, with each :source! replaced
+# by the output it printed last time (nothing is run); --hosts-only, --force.
 #
 # Several probe sources, told apart by --name.  --local runs a command on THIS
 # machine per host ('%h' name, '%i' address, no shell) for devices with no shell:

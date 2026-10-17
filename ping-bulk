@@ -1438,6 +1438,8 @@ example.com:443
 # it runs again on :edit and :reload.  If it fails the hosts it printed last
 # time are kept.  No shell, no stdin, 30 s limit (--timeout S, at most 300).
 # :source! --timeout 10 /usr/local/bin/fleet-hosts
+# :dump-script <file> saves the fleet as it is now, with each :source! replaced
+# by the output it printed last time (nothing is run); --hosts-only, --force.
 #
 # Several probe sources, told apart by --name.  --local runs a command on THIS
 # machine per host ('%h' name, '%i' address, no shell) for devices with no shell:
@@ -6083,8 +6085,13 @@ def parse_hosts_file(filename, variables=None):
     return _HostsParser(variables=variables).parse_file(filename)
 
 
-def _flatten_sourced(entries, _seen=None):
+def _flatten_sourced(entries, _seen=None, bang=None, _depth=0):
     """Recursively splice ``:source FILE`` commands into the entry list.
+
+    *bang*, when given, is called with the argument string of a ``:source!``
+    line and returns that command's parsed entries, or None when it has none
+    to give (the line is then kept, with a warning).  Only the running
+    program has them, so the --dump-* flags leave it None.
 
     Used by the --dump-* flags so the output is a single self-contained
     file.
@@ -6109,7 +6116,16 @@ def _flatten_sourced(entries, _seen=None):
                     out.append(('warn', f':source kept, cannot open: {exc}'))
                     out.append(e)
                     continue
-                out.extend(_flatten_sourced(sub, _seen))
+                out.extend(_flatten_sourced(sub, _seen, bang, _depth))
+                continue
+            if parts[0].lower() == ':source!' and bang is not None:
+                sub = bang(parts[1] if len(parts) > 1 else '')
+                if sub is None or _depth >= _SOURCE_CMD_MAX_DEPTH:
+                    out.append(('warn', f':source! kept, no output to '
+                                        f'inline: {parts[1] if len(parts) > 1 else ""}'))
+                    out.append(e)
+                    continue
+                out.extend(_flatten_sourced(sub, _seen, bang, _depth + 1))
                 continue
         out.append(e)
     return out
@@ -6135,7 +6151,7 @@ _SIMPLE_SCRIPT_HEADER = """\
 """
 
 
-def _dump_simplified(entries, hosts_only=False):
+def _dump_simplified(entries, hosts_only=False, bang=None):
     """Serialise parsed entries back into a flat hosts file.
 
     ``:for`` / ``:if`` / ``:let`` and brace expansion are already applied
@@ -6150,7 +6166,8 @@ def _dump_simplified(entries, hosts_only=False):
     ``:remote-ping`` targets are flattened to plain host lines (the relay
     is dropped), ``:source`` files are spliced in recursively, and
     duplicate targets are emitted once.  ``:resolv`` lines merged into an
-    inline ``##`` are dropped; unconsumed ones are kept.
+    inline ``##`` are dropped; unconsumed ones are kept.  *bang* resolves
+    ``:source!`` lines (see ``_flatten_sourced``).
 
     *hosts_only* (--dump-hosts) keeps just host lines and section titles;
     the full form (--dump-simple-script) keeps the other directives so the
@@ -6159,7 +6176,7 @@ def _dump_simplified(entries, hosts_only=False):
     Returns ``(text, warnings)`` — *warnings* collects the parser's
     warn/error entries for the caller to print on stderr.
     """
-    entries = _flatten_sourced(entries)
+    entries = _flatten_sourced(entries, bang=bang)
 
     # Pass 1: resolv maps and the target/name of every host line.
     name2ip, ip2name = {}, {}
@@ -6369,6 +6386,11 @@ CMD_REGISTRY = [
            'load hosts/commands from a command\'s output'),
     CmdDef(['reload'],           '_cmd_reload',     None,
            '',                    're-read the hosts file (and re-run :source! commands)'),
+    CmdDef(['dump-script'],      '_cmd_dump_script', None,
+           '[--hosts-only] [--force] <file>',
+           'write the expanded hosts script to a file (like --dump-simple-script)',
+           arg_completer=_complete_path_arg,
+           flags=['--hosts-only', '--force']),
     CmdDef(['source'],           '_cmd_source',     None,
            '<file>',              'load hosts/commands from file',
            arg_completer=_complete_path_arg,
@@ -9653,6 +9675,8 @@ class Application:
         self._web_queue = deque(maxlen=_WEB_QUEUE_MAX)
         self.startup_select = None     # host name to pre-highlight at startup (--select)
         self.hosts_file = hosts_file   # path of the active hosts file (for :edit)
+        # What :dump-script writes when there is no file to re-read.
+        self._startup_entries = list(entries)
         self._monitoring_started = False  # set True once start_monitoring() is called
         self._key_trie = _KeyTrie()
         self._key_seq = []        # accumulated key codes for multi-key lookup
@@ -16541,6 +16565,7 @@ class Application:
     # Application through __new__ and _dispatch_cmd reaches this.
     source_cache: dict = {}
     _source_depth = 0
+    _startup_entries = ()
 
     def _run_source_command(self, argv, timeout):
         """Run *argv* and return ``(stdout_text, stderr_lines, problem)``.
@@ -16693,6 +16718,103 @@ class Application:
                     "reload: no hosts file loaded (use -f <file>)")
             return
         self._edit_reload_inplace(self.hosts_file)
+
+    def _source_bang_entries(self, args):
+        """Parsed output of a ``:source!`` line as last run, or None.
+
+        The key is the command text with any ``--timeout`` removed, which is
+        how ``_cmd_source_bang`` files it.  Never runs the command.
+        """
+        rest = args.strip()
+        if rest.startswith('--timeout'):
+            rest = rest.split(None, 2)[2] if len(rest.split(None, 2)) > 2 else ''
+        cached = self.source_cache.get(rest.strip())
+        if cached is None:
+            return None
+        try:
+            return _HostsParser(variables=self.variables).parse(cached[0])
+        except Exception:
+            return None
+
+    def _cmd_dump_script(self, args=''):
+        """:dump-script [--hosts-only] [--force] <file> — write the flat script.
+
+        What ``--dump-simple-script`` writes, from inside the running program:
+        loops, conditionals and variables expanded, ``:source`` files spliced
+        in, a ``#!/bin/sh`` header, mode +x.  A ``:source!`` line is replaced by
+        the output it produced the last time it ran, so a generated fleet is
+        saved as the fixed list on screen rather than as the generator.  Nothing
+        is run.
+
+        The hosts come from the hosts file as it is on disk now (what a
+        ``:reload`` would read), or from the command line when there is none.
+        Hosts added at the ``:`` line are not in it.  An existing file is
+        refused unless ``--force``; ``--hosts-only`` writes just hosts and
+        section titles, like ``--dump-hosts``.  ``-`` is not a file here: the
+        screen belongs to curses.
+        """
+        try:
+            words = shlex.split(args)
+        except ValueError as exc:
+            self._refuse("cmd", f"dump-script: {exc}")
+            return
+        hosts_only = force = False
+        paths = []
+        for w in words:
+            if w == '--hosts-only':
+                hosts_only = True
+            elif w == '--force':
+                force = True
+            elif w.startswith('--'):
+                self._refuse("cmd", f"dump-script: unknown flag {w}")
+                return
+            else:
+                paths.append(w)
+        if len(paths) != 1:
+            self._refuse("cmd", "dump-script: usage: :dump-script "
+                                "[--hosts-only] [--force] <file>")
+            return
+        path = _resolve_path(paths[0])
+        if path in _STDOUT_PATHS:
+            self._refuse("cmd", "dump-script: needs a file, not stdout "
+                                "(use --dump-simple-script - for a pipe)")
+            return
+        if self.kiosk_mode and not self._kiosk_allow_path(path, 'dump-script'):
+            return
+        if os.path.isdir(path):
+            self._refuse("cmd", f"dump-script: '{path}' is a directory")
+            return
+        if os.path.exists(path) and not force:
+            self._refuse("cmd", f"dump-script: '{path}' exists — "
+                                f"add --force to overwrite")
+            return
+        try:
+            if self.hosts_file:
+                entries = parse_hosts_file(self.hosts_file)
+            else:
+                entries = list(self._startup_entries)
+            text, warnings = _dump_simplified(
+                entries, hosts_only=hosts_only, bang=self._source_bang_entries)
+        except Exception as exc:
+            self._refuse("cmd", f"dump-script: {type(exc).__name__}: {exc}")
+            return
+        if not hosts_only:
+            text = _SIMPLE_SCRIPT_HEADER + text
+        try:
+            _write_file_atomically(path, text)
+            if not hosts_only:
+                os.chmod(path, os.stat(path).st_mode | 0o111)
+        except Exception as exc:
+            self._refuse("cmd", f"dump-script: cannot write '{path}': "
+                                f"{type(exc).__name__}: {exc}")
+            return
+        for w in warnings:
+            self.add_event("warn", f"dump-script: {w}", level=LEVEL_NORMAL)
+        n = sum(1 for ln in text.splitlines()
+                if ln and not ln.startswith(('#', ':', ' ')))
+        msg = f"dump-script: wrote {n} host(s) to {path}"
+        self._status_msg = {'text': msg, 'expires': time.time() + 4.0}
+        self.add_event("cmd", msg)
 
     def _apply_source_entries(self, new_entries):
         """Apply parsed hosts-file entries: hosts, sections, commands, warnings.

@@ -308,3 +308,80 @@ class TestPipeHostsFile:
         app.hosts_pipe = '/dev/fd/63'
         app._cmd_edit('')
         assert any('pipe' in t for t in _texts(app))
+
+
+# ---------------------------------------------------------------------------
+# :dump-script
+# ---------------------------------------------------------------------------
+
+class TestDumpScript:
+
+    def _fleet(self, pb, tmp_path):
+        gen = _script(tmp_path, 'gen',
+                      'printf "## G\\n~127.0.0.2  ## b\\n:probe temp --unit C\\n"\n')
+        hosts = tmp_path / 'fleet'
+        hosts.write_text(f':source! {gen}\n127.0.0.9\n')
+        entries = pb.parse_hosts_file(str(hosts))
+        app = _make_app(pb, tmp_path, entries, hosts_file=str(hosts))
+        return app, gen
+
+    def test_inlines_the_last_source_output(self, pb, tmp_path):
+        app, gen = self._fleet(pb, tmp_path)
+        app._cmd_source_bang(gen)
+        out = tmp_path / 'flat'
+        app._cmd_dump_script(str(out))
+        text = out.read_text()
+        assert text.startswith('#!/bin/sh')
+        assert ':source!' not in text
+        assert '127.0.0.2' in text and '127.0.0.9' in text
+        assert ':probe temp --unit C' in text
+        assert out.stat().st_mode & stat.S_IXUSR
+
+    def test_runs_nothing(self, pb, tmp_path):
+        app, gen = self._fleet(pb, tmp_path)
+        marker = tmp_path / 'ran'
+        (tmp_path / 'gen').write_text(f'#!/bin/sh\ntouch {marker}\n')
+        out = tmp_path / 'flat'
+        app.source_cache = {}
+        app._cmd_dump_script(str(out))
+        assert not marker.exists()
+        # never run: the line is kept and the reader is told why
+        assert ':source!' in out.read_text()
+        assert any('no output to inline' in t for t in _texts(app))
+
+    def test_hosts_only(self, pb, tmp_path):
+        app, gen = self._fleet(pb, tmp_path)
+        app._cmd_source_bang(gen)
+        out = tmp_path / 'inv'
+        app._cmd_dump_script(f'--hosts-only {out}')
+        text = out.read_text()
+        assert not text.startswith('#!')
+        assert ':probe' not in text and '127.0.0.9' in text
+
+    def test_existing_file_needs_force(self, pb, tmp_path):
+        app, _ = self._fleet(pb, tmp_path)
+        out = tmp_path / 'flat'
+        out.write_text('keep')
+        app._cmd_dump_script(str(out))
+        assert out.read_text() == 'keep'
+        assert any('--force' in t for t in _texts(app))
+        app._cmd_dump_script(f'--force {out}')
+        assert out.read_text().startswith('#!/bin/sh')
+
+    @pytest.mark.parametrize('arg', ['', '-', '/dev/stdout', '--bogus x',
+                                     'a b'])
+    def test_bad_arguments_refused(self, pb, app, arg):
+        app._cmd_dump_script(arg)
+        assert any(t for t in _texts(app) if 'dump-script' in t)
+
+    def test_directory_refused(self, pb, app, tmp_path):
+        app._cmd_dump_script(str(tmp_path))
+        assert any('directory' in t for t in _texts(app))
+
+    def test_without_hosts_file_uses_startup_entries(self, pb, app, tmp_path):
+        out = tmp_path / 'flat'
+        app._cmd_dump_script(str(out))
+        assert '10.0.0.1' in out.read_text()
+
+    def test_registered(self, pb):
+        assert any('dump-script' in c.names for c in pb.CMD_REGISTRY)

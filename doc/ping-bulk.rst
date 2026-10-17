@@ -1258,6 +1258,16 @@ Hosts and DNS
     Re-read the hosts file in place, without an editor; ``:source!`` commands
     run again.  Not available for a hosts file read from a pipe.
 
+``:dump-script [--hosts-only] [--force] <file>``
+    ``--dump-simple-script`` from the running program: write the expanded hosts
+    script to *file* (mode +x, ``#!/bin/sh`` header).  A ``:source!`` line is
+    replaced by what it printed the last time it ran, so a generated fleet is
+    saved as the list on screen; nothing is run.  Hosts come from the hosts
+    file as it is on disk (or the command line when there is none), so hosts
+    added at the ``:`` line are not in it.  An existing file is refused unless
+    ``--force``.  ``--hosts-only`` writes just hosts and section titles, like
+    ``--dump-hosts``.  There is no ``-`` for stdout.
+
 ``:resolv <ip-pattern> <hostname-template>``
     Register a static name↔IP mapping.  *ip-pattern* may use brace
     expansion.  Back-reference placeholders in *hostname-template* are
