@@ -1256,7 +1256,10 @@ Hosts and DNS
 
 ``:reload``
     Re-read the hosts file in place, without an editor; ``:source!`` commands
-    run again.  Not available for a hosts file read from a pipe.
+    run again.  Unchanged hosts keep their connections; a probe reader that
+    gave up after a fatal ssh error is started again, once — if the cause is
+    still there it gives up again (see the ``probe:`` line in the events).
+    Not available for a hosts file read from a pipe.
 
 ``:dump-script [--hosts-only] [--force] <file>``
     ``--dump-simple-script`` from the running program: write the expanded hosts

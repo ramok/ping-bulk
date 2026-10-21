@@ -378,6 +378,27 @@ class TestResyncOnADeclarationChange:
             app._resync_probe_readers()
         assert app.probe_readers[0] is first
 
+    def test_a_reader_that_gave_up_is_replaced_by_a_reload(self, pb, tmp_path):
+        """A fatal ssh error ends the thread and leaves the reader's settings
+        unchanged, so 'unchanged' must not mean 'keep the dead one' -- that
+        left ':reload' unable to bring a probe back."""
+        app, f = self._app(pb, tmp_path, 'echo gps=0\n')
+        first = app.probe_readers[0]
+        first._thread = type('T', (), {'is_alive': lambda self: False})()
+        app._cmd_probe_source(f'--script {f}')
+        with patch('threading.Thread'):
+            app._resync_probe_readers()
+        assert app.probe_readers[0] is not first
+
+    def test_a_reader_still_running_is_kept(self, pb, tmp_path):
+        app, f = self._app(pb, tmp_path, 'echo gps=0\n')
+        first = app.probe_readers[0]
+        first._thread = type('T', (), {'is_alive': lambda self: True})()
+        app._cmd_probe_source(f'--script {f}')
+        with patch('threading.Thread'):
+            app._resync_probe_readers()
+        assert app.probe_readers[0] is first
+
     def test_a_changed_interval_replaces_the_reader(self, pb, tmp_path):
         app, f = self._app(pb, tmp_path, 'echo gps=0\n')
         first = app.probe_readers[0]

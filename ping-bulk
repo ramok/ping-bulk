@@ -3740,6 +3740,10 @@ class ProbeReader(_PipeReaderLoop):
     """
 
     _child_label = 'probe reader'
+    # The thread running ``run()``; set by the spawner.  A reader whose thread
+    # has ended without ``stop()`` gave up (a fatal ssh error) and is replaced
+    # by a reload rather than kept for its unchanged settings.
+    _thread = None
 
     def __init__(self, monitor, source_cmd, interval, defs, retain,
                  ssh_args=None, kiosk_mode=False, script=None,
@@ -10701,7 +10705,8 @@ class Application:
         reader = self._make_probe_reader(src, monitor, ssh_args)
         self.probe_readers.append(reader)
         tag = f'probe:{src.name}:' if src.name else 'probe:'
-        self.threads.append(_spawn(reader.run, f'{tag}{monitor.host}'))
+        reader._thread = _spawn(reader.run, f'{tag}{monitor.host}')
+        self.threads.append(reader._thread)
 
     def _stop_probe_readers(self):
         """Terminate every probe connection."""
@@ -18244,7 +18249,10 @@ class Application:
             # For a shipped script the *text* is the contract; its path can
             # differ between a symlink and the real file while the bytes are
             # identical, and replacing four readers over that is pure churn.
-            stale = (reader.script != src.script
+            gave_up = (reader._thread is not None
+                       and not reader._thread.is_alive())
+            stale = (gave_up
+                     or reader.script != src.script
                      or reader.interval != float(src.interval)
                      or (not isinstance(reader, LocalProbeReader)
                          and reader.askpass
