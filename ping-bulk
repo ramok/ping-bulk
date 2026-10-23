@@ -480,6 +480,9 @@ SET_PARAMS = [
     SetParam('autosave', '_cmd_autosave', ['off', 'on'],
              'write the config file whenever a saved setting changes',
              getter=lambda app: 'on' if app.autosave else 'off'),
+    SetParam('no-alarm-release', '_cmd_no_alarm_release', ['off', 'on'],
+             'a no-alarm (~) host that answers is logged as up and unmarked',
+             getter=lambda app: 'on' if app.no_alarm_release else 'off'),
     SetParam('sync-history', '_cmd_sync_history', ['on', 'off'],
              'align history bars to wall-clock time (default on)',
              getter=lambda app: 'on' if app.sync_history else 'off'),
@@ -1209,6 +1212,7 @@ _HELP_BINDINGS = [
     "  :unbind-key <key>         remove a key binding",
     "  :set multikey-timeout <ms>  timeout for multi-key sequences (0 = wait forever)",
     "  :set autosave on|off        save the config whenever a setting changes",
+    "  :set no-alarm-release on|off  a '~' host that answers is logged up and unmarked",
     "  :web \\[start|stop|status]   serve the host list over HTTP  (no arg reports)",
     "  :set web-listen <host:port> where it binds (default 127.0.0.1:8765; trailing +",
     "                              takes the next free port; a routable",
@@ -1404,6 +1408,9 @@ example.com:443
 # Marked hosts draw a grey 'o' instead of a red 'X', are counted apart in the
 # section badge (8↑/1↓/1○), and log their up/down at info level.  Press [o] on
 # a selected host to toggle it; :save-config keeps it.
+# For a host that is only silent until it first shows up, have the mark lifted
+# when it answers -- logged as up at the normal level, then watched as usual:
+# :set no-alarm-release on
 
 # ── Custom probes ──────────────────────────────────────────────────────────
 # One command runs on each host and prints 'key=value' lines; the SSH
@@ -2735,6 +2742,12 @@ class ProbeSeries:
 
 
 class Monitor(ABC):
+    # Set when ':set no-alarm-release' lifted a file-declared no-alarm mark
+    # after the host first answered.  Kept on the monitor so an ':edit' or
+    # ':reload' that adopts it does not re-mark a host that has already
+    # proved it is there.
+    _no_alarm_released = False
+
     def __init__(self, host):
         self.host = host
         self.resolved_ip = None        # IP address resolved from a hostname
@@ -9572,6 +9585,7 @@ class Application:
         self.port_map = {}   # static port overrides: port_num→service_name and service_name→port_num
         self.history_size = 86400  # per-host ping history deque size (default 24 h at 1 ping/s)
         self.autosave = False      # write the config when a saved setting changes
+        self.no_alarm_release = False   # unmark a no-alarm host once it answers
         self._autosave_broken = False   # True after a failed save, until one works
         # What the config file holds, as far as this process knows.  Seeded by
         # start_monitoring so a run that changes nothing writes nothing.
@@ -10066,6 +10080,8 @@ class Application:
         out.append(f":set log-size {self.log_size}\n")
         out.append(f":set history-size {self.history_size}\n")
         out.append(f":set autosave {'on' if self.autosave else 'off'}\n")
+        if self.no_alarm_release:
+            out.append(":set no-alarm-release on\n")
         out.append(f":set sync-history {'on' if self.sync_history else 'off'}\n")
         out.append(f":set mux-split {self.mux_split}\n")
         label = self._LOGLEVEL_LABELS.get(self.loglevel, 'normal')
@@ -10359,6 +10375,7 @@ class Application:
     # those __new__-built Applications do call.  Off, and "the file is
     # unknown", are the right answers for an object that never ran __init__.
     autosave = False
+    no_alarm_release = False
     _config_on_disk = None
     _autosave_broken = False
 
@@ -10910,6 +10927,24 @@ class Application:
         for tb_line in traceback.format_exc().rstrip().splitlines():
             self.add_event("error", tb_line, level=LEVEL_DEBUG)
 
+    def _release_no_alarm(self, monitor):
+        """Lift a file-declared no-alarm mark once the host has answered.
+
+        Only under ':set no-alarm-release on', and only for a mark that came
+        from a glob or '~': a per-host decision made with 'o' is the more
+        recent one and stays.  Returns True when a mark was lifted, so the
+        caller can say so in the event it is about to log.
+        """
+        if not (self.no_alarm_release and monitor.no_alarm):
+            return False
+        name, alias = self._prog_match_names(monitor)
+        if name in self.no_alarm_manual or (
+                alias and alias in self.no_alarm_manual):
+            return False
+        monitor._no_alarm_released = True
+        monitor.no_alarm = False
+        return True
+
     def _monitor_pass(self, monitor, now, wall_now, clock_enabled,
                       _DOWN_LOG_SECS):
         """The per-monitor body of the state loop."""
@@ -10942,7 +10977,10 @@ class Application:
             if current_state is True:
                 monitor.up_since = now
                 display_name = monitor.get_display_name(dns_mode='off')
-                self.add_event(display_name, "host starts up",
+                released = self._release_no_alarm(monitor)
+                self.add_event(display_name,
+                               "host up (no-alarm released)" if released
+                               else "host starts up",
                                level=(LEVEL_INFO if monitor.no_alarm
                                       else None))
             elif current_state is False:
@@ -10953,14 +10991,20 @@ class Application:
             display_name = monitor.get_display_name(dns_mode='off')
             if current_state is True:
                 # DOWN → UP transition
+                released = self._release_no_alarm(monitor)
                 if monitor.down_since is not None:
                     # A "host down" event was already logged; report recovery.
                     downtime = now - monitor.down_since
                     monitor.down_since = None
                     msg = f"host recover. Down time: {self._format_downtime(downtime)}"
+                    if released:
+                        msg += " (no-alarm released)"
                     self.add_event(display_name, msg,
                                    level=(LEVEL_INFO if monitor.no_alarm
                                           else None))
+                elif released:
+                    self.add_event(display_name,
+                                   "host up (no-alarm released)")
                 # If _down_pending_ts is set but down_since is None the host
                 # recovered before the threshold — silent flicker, no log entry.
                 monitor._down_pending_ts = None
@@ -17460,6 +17504,8 @@ class Application:
                 monitor.no_alarm = manual[name]
             elif alias and alias in manual:
                 monitor.no_alarm = manual[alias]
+            elif monitor._no_alarm_released:
+                monitor.no_alarm = False
             else:
                 monitor.no_alarm = any(
                     fnmatch.fnmatch(name, pattern)
@@ -19086,6 +19132,27 @@ class Application:
                 monitor.history_times = deque(monitor.history_times, maxlen=n)
         if self._monitoring_started:
             self.add_event("history-size", f"per-host ping history size set to {n}")
+
+    def _cmd_no_alarm_release(self, args=''):
+        """Report (no arg), cycle, or set no-alarm-release (on/off).
+
+        On: a host marked no-alarm (``~``, ``:no-alarm <glob>``) that answers
+        a ping is logged as up at the normal level and loses the mark, so
+        from then on it is watched like any other host.  Off by default,
+        because a device that comes and goes by design would otherwise raise
+        the alarm the mark exists to prevent.
+        """
+        if self._handle_param_verb('no-alarm-release', args):
+            return
+        val = args.strip().lower()
+        if val not in ('on', 'off'):
+            self._refuse('cmd', f"no-alarm-release: unknown value '{val}' "
+                                "— choices: on off cycle")
+            return
+        self.no_alarm_release = (val == 'on')
+        if self._monitoring_started:
+            self.add_event('config',
+                           f"no-alarm-release {val}")
 
     def _cmd_autosave(self, args=''):
         """Report (no arg), cycle, or set autosave (on/off).

@@ -650,3 +650,74 @@ class TestPerHostOverridesPersist:
         assert '10.0.0.*' in text
         assert '--unmark 10.0.0.1' in text
         assert '--mark 10.9.9.9' in text
+
+
+class TestReleaseOnFirstAnswer:
+    """':set no-alarm-release on' — a '~' host that answers is unmarked."""
+
+    @pytest.fixture
+    def app(self, pb, tmp_path):
+        a = _app(pb, tmp_path, pb._HostsParser().parse(
+            '~10.0.0.1\n~10.0.0.2\n10.0.0.3\n'))
+        a.monitors[2].alive = None
+        return a
+
+    def _events(self, app):
+        return [e for e in app.events if e.level <= app.loglevel]
+
+    def test_off_by_default_the_mark_stays(self, app):
+        marked = app.monitors[0]
+        marked.alive = True
+        app._state_pass(3.0)
+        assert marked.no_alarm is True
+        assert not any('released' in e.text for e in app.events)
+
+    def test_first_answer_is_logged_at_the_normal_level_and_unmarks(self, app):
+        app._cmd_no_alarm_release('on')
+        marked = app.monitors[0]
+        marked.alive = True
+        app._state_pass(3.0)
+        assert marked.no_alarm is False
+        assert any('host up (no-alarm released)' in e.text
+                   for e in self._events(app)), list(app.events)
+
+    def test_a_host_that_has_not_answered_keeps_its_mark(self, app):
+        app._cmd_no_alarm_release('on')
+        app._state_pass(3.0)
+        assert app.monitors[1].no_alarm is True
+
+    def test_recovery_after_a_down_host_is_released_too(self, app):
+        app._cmd_no_alarm_release('on')
+        m = app.monitors[0]
+        m.alive = False
+        app._state_pass(3.0)
+        app._state_pass(3.0 + 1000)          # past the down-log threshold
+        m.alive = True
+        app._state_pass(3.0)
+        assert m.no_alarm is False
+        assert any('host recover' in e.text and 'released' in e.text
+                   for e in self._events(app)), list(app.events)
+
+    def test_the_release_survives_a_reapply(self, app):
+        """':edit' / ':reload' re-run _apply_no_alarm on adopted monitors."""
+        app._cmd_no_alarm_release('on')
+        m = app.monitors[0]
+        m.alive = True
+        app._state_pass(3.0)
+        app._apply_no_alarm()
+        assert m.no_alarm is False
+        assert app.monitors[1].no_alarm is True
+
+    def test_a_press_of_o_is_not_lifted(self, app):
+        app._cmd_no_alarm_release('on')
+        m = app.monitors[0]
+        app._cmd_no_alarm('--mark 10.0.0.1')
+        m.alive = True
+        app._state_pass(3.0)
+        assert m.no_alarm is True
+
+    def test_it_is_saved_and_refuses_junk(self, app):
+        app._cmd_no_alarm_release('on')
+        assert ':set no-alarm-release on\n' in app._config_text()
+        app._cmd_no_alarm_release('maybe')
+        assert app.no_alarm_release is True

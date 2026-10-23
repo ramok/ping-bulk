@@ -33,6 +33,11 @@
 #   :no-alarm --mark   10.0.3.99   mark this host even if no glob covers it
 #   :no-alarm --unmark sh1-cam1    leave this one alone, glob or no glob
 #
+# A host that is only silent until it first shows up can lose its mark when it
+# answers: it is logged as up at the normal level and watched like any other
+# host from then on.  A mark set with 'o' or --mark is kept.
+#   :set no-alarm-release on
+#
 # Inside a :with block use '~', not the command: like :resolv and
 # :prog-options, a ':no-alarm' command there is an error, because a command
 # inside a block usually means a missing ':end' -- and carrying on would

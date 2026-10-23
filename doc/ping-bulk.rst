@@ -1029,6 +1029,14 @@ Key bindings
     inside a ``:for`` body and a ``:with remote-ping`` block.  With no
     argument, lists the active rules; ``--remove`` drops one.
 
+    ``:set no-alarm-release on`` (default ``off``) lifts a mark declared by a
+    glob or ``~`` the first time the host answers: the event is logged at the
+    normal level as ``host up (no-alarm released)`` (or ``host recover …``),
+    and the host is watched like any other from then on, including after an
+    ``:edit`` or ``:reload``.  A decision made with ``o`` or ``--mark`` is
+    never lifted.  It is off by default because a device that comes and goes
+    by design would otherwise raise the alarm the mark exists to prevent.
+
     ``--toggle`` (bound to ``o``) records a decision about the **selected
     host alone**, kept apart from the globs above.  So turning off a host
     that a glob marked leaves that glob in force for every other host it
